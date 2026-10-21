@@ -6,6 +6,7 @@ import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
 import {Envelope,Fault,requireValue,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
+import {SessionNames} from './session-names.ts';
 import * as work from './workspace.ts';
 
 export async function createDaemon(dataDir:string){
@@ -14,6 +15,7 @@ export async function createDaemon(dataDir:string){
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
   await chmod(tokenPath,0o600);
   const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite')),terminals=new Terminals(store);
+  const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
   let queue:Promise<unknown>=Promise.resolve();
   app.addHook('onRequest',async(req,reply)=>{
@@ -36,10 +38,11 @@ export async function createDaemon(dataDir:string){
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。通常のフォルダでは、そのまま作業を開始できます。');
         const commit=(await work.git(project.path,['rev-parse','--verify','--end-of-options',`${c.baseRef}^{commit}`])).trim();
-        const slug=c.name.normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
+        const name=c.name??`worktree-${operationId.slice(0,8)}`;
+        const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
-        const record:Workspace={id:operationId,projectId:project.id,name:c.name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
+        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
       }
       case 'terminal.open':return terminals.open(workspace(c.workspaceId),c.provider,c.resume);
       case 'terminal.input':return terminals.input(c.terminalId,c.clientId,c.data);
@@ -48,7 +51,7 @@ export async function createDaemon(dataDir:string){
       case 'file.save':return work.saveFile(workspace(c.workspaceId).path,c.path,c.content,c.expectedHash);
     }
   }
-  app.get('/v1/state',async()=>store.state());
+  app.get('/v1/state',async()=>{await sessionNames.refresh();return store.state();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
@@ -75,6 +78,6 @@ export async function createDaemon(dataDir:string){
   const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await queue.catch(()=>{});await terminals.shutdown();store.close();});
+  app.addHook('onClose',async()=>{await queue.catch(()=>{});await sessionNames.close();await terminals.shutdown();store.close();});
   return {app,store,token};
 }
