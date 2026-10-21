@@ -1,0 +1,148 @@
+import SwiftUI
+import AppKit
+
+@main struct NeuraOSApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject private var model = AppModel()
+    var body: some Scene {
+        Window("neuraOS", id: "main") {
+            RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
+        }
+        .defaultSize(width: 1380, height: 880)
+        .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("フォルダを開く…") {model.addProject()}.keyboardShortcut("o")
+                Button("新しい作業…") {model.showNewWorkspace = true}.keyboardShortcut("n").disabled(model.gitProjects.isEmpty)
+            }
+            CommandMenu("表示") {
+                Button("変更一覧を表示／非表示") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected?.supportsGit != true)
+            }
+        }
+    }
+}
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)}
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {false}
+    func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush()}
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {sender.windows.first?.makeKeyAndOrderFront(nil)}; return true
+    }
+}
+
+enum Palette {
+    static let surface = Color(nsColor: NSColor(name: nil) {appearance in appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.105, alpha: 1) : NSColor(white: 0.985, alpha: 1)})
+    static let line = Color.primary.opacity(0.08)
+}
+struct RootView: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Text("neuraOS").font(.system(size: 13, weight: .semibold)).padding(.leading, 78)
+                if let selected = model.selected {Text("/").foregroundStyle(.quaternary); Text(selected.name).foregroundStyle(.secondary).lineLimit(1)}
+                Spacer()
+                Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
+                Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
+                if model.selected?.supportsGit == true {Button {model.showInspector.toggle()} label: {Image(systemName: "sidebar.right")}.buttonStyle(.plain).help("変更一覧を表示／非表示").padding(.leading, 6)}
+            }.padding(.horizontal, 18).frame(height: 48)
+            Rectangle().fill(Palette.line).frame(height: 1)
+            HSplitView {
+                Sidebar().frame(minWidth: 190, idealWidth: 235, maxWidth: 280)
+                ZStack {
+                    if model.state.workspaces.isEmpty {WelcomeView()}
+                    // Keep each workspace mounted: its terminal, editor draft and browser remain intact.
+                    ForEach(model.state.workspaces.filter {model.openedIds.contains($0.id)}) {workspace in
+                        WorkspaceView(workspace: workspace)
+                            .opacity(workspace.id == model.selectedId ? 1 : 0)
+                            .allowsHitTesting(workspace.id == model.selectedId)
+                            .accessibilityHidden(workspace.id != model.selectedId)
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if !model.connected {
+                HStack {Image(systemName: "network.slash"); Text("Daemonへ再接続しています。作業の状態は接続後に更新されます。"); Spacer(); Button("再接続") {Task {await model.refresh()}}}
+                    .font(.system(size: 11)).padding(10).background(Color.orange.opacity(0.08))
+            }
+        }
+        .background(Palette.surface)
+        .ignoresSafeArea(.container, edges: .top)
+        .sheet(isPresented: $model.showNewWorkspace) {NewWorkspaceSheet()}
+        .alert("操作を完了できませんでした", isPresented: Binding(get: {model.error != nil}, set: {if !$0 {model.error = nil}})) {Button("閉じる") {model.error = nil}} message: {Text(model.error ?? "")}
+    }
+}
+struct Sidebar: View {
+    @EnvironmentObject var model: AppModel
+    @State private var query = ""
+    @State private var collapsed: Set<String> = []
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
+                .font(.system(size: 12)).padding(9).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7)).padding(12)
+            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Button {model.addProject()} label: {Image(systemName: "plus")}.buttonStyle(.plain).help("フォルダを開く")}.padding(.horizontal, 18).padding(.bottom, 12)
+            ScrollView {
+                VStack(spacing: 15) {
+                    ForEach(model.state.projects) {project in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Button {if collapsed.contains(project.id) {collapsed.remove(project.id)} else {collapsed.insert(project.id)}} label: {Image(systemName: collapsed.contains(project.id) ? "chevron.right" : "chevron.down").font(.system(size: 9))}.buttonStyle(.plain)
+                                Image(systemName: "folder").foregroundStyle(.secondary)
+                                Text(project.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                                Spacer()
+                                if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
+                            }.padding(.horizontal, 12).padding(.vertical, 5)
+                            if !collapsed.contains(project.id) {
+                                ForEach(model.state.workspaces.filter {$0.projectId == project.id && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || project.name.localizedCaseInsensitiveContains(query))}) {workspace in
+                                    Button {model.select(workspace.id)} label: {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: workspace.kind == "folder" ? "folder" : workspace.kind == "root" ? "square.stack" : "arrow.triangle.branch").foregroundStyle(.secondary).frame(width: 14)
+                                            Text(workspace.name).lineLimit(1)
+                                            Spacer(minLength: 0)
+                                            if model.state.terminals.contains(where: {$0.workspaceId == workspace.id && $0.status == "running"}) {Circle().fill(Color.green.opacity(0.8)).frame(width: 5, height: 5)}
+                                        }.font(.system(size: 12)).padding(.vertical, 8).padding(.horizontal, 12).padding(.leading, 14).contentShape(Rectangle())
+                                            .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                    }.buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
+                }.padding(.horizontal, 8)
+            }
+            Spacer(minLength: 0)
+            HStack {Image(systemName: "desktopcomputer"); Text("ローカル開発"); Spacer(); Text("0.2").foregroundStyle(.quaternary)}.font(.system(size: 11)).foregroundStyle(.tertiary).padding(17)
+        }.background(Palette.surface)
+    }
+}
+struct WelcomeView: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "square.stack.3d.up").font(.system(size: 36, weight: .ultraLight)).foregroundStyle(.secondary)
+            Text("次の作業を、ここから。").font(.system(size: 24, weight: .medium))
+            Text("フォルダを開いて、CodexやClaude Codeと作業を始めましょう。")
+                .font(.system(size: 13)).foregroundStyle(.secondary)
+            Button("フォルダを開く…") {model.addProject()}.controlSize(.large).padding(.top, 6)
+            Text("⌘ O").font(.system(size: 11)).foregroundStyle(.tertiary)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+struct NewWorkspaceSheet: View {
+    @EnvironmentObject var model: AppModel
+    @Environment(\.dismiss) var dismiss
+    @State private var projectId = ""
+    @State private var name = ""
+    @State private var base = "HEAD"
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("新しい作業").font(.system(size: 20, weight: .semibold))
+            Text("専用のブランチとworktreeを作成します。").foregroundStyle(.secondary)
+            Form {
+                Picker("プロジェクト", selection: $projectId) {ForEach(model.gitProjects) {Text($0.name).tag($0.id)}}
+                TextField("作業名", text: $name, prompt: Text("例：ログイン画面の改善"))
+                TextField("作成元", text: $base)
+            }
+            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, name: name, base: base)}}.keyboardShortcut(.defaultAction).disabled(model.busy || name.trimmingCharacters(in: .whitespaces).isEmpty || projectId.isEmpty)}
+        }.padding(28).frame(width: 440)
+        .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
+    }
+}

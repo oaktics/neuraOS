@@ -1,0 +1,22 @@
+import {z} from 'zod';
+
+export const protocolVersion = 1;
+const id = z.uuid();
+export const Provider = z.enum(['codex', 'claude', 'shell']);
+export type Provider = z.infer<typeof Provider>;
+export interface Project {id:string; name:string; path:string; isGit?:boolean; createdAt:string}
+export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'; createdAt:string}
+export interface TerminalRecord {id:string; workspaceId:string; provider:Provider; status:'running'|'exited'|'interrupted'; createdAt:string; exitCode?:number; cols:number; rows:number}
+export const Command = z.discriminatedUnion('type', [
+  z.object({type:z.literal('project.add'), path:z.string().min(1).max(4096)}),
+  z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80), baseRef:z.string().min(1).max(200).default('HEAD')}),
+  z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider, resume:z.boolean().default(false)}),
+  z.object({type:z.literal('terminal.input'), terminalId:id, clientId:id, data:z.string().max(65536)}),
+  z.object({type:z.literal('terminal.resize'), terminalId:id, clientId:id, cols:z.number().int().min(20).max(400), rows:z.number().int().min(5).max(200)}),
+  z.object({type:z.literal('terminal.stop'), terminalId:id}),
+  z.object({type:z.literal('file.save'), workspaceId:id, path:z.string().min(1).max(4096), content:z.string().max(1048576), expectedHash:z.string().length(64)}),
+]);
+export type Command = z.infer<typeof Command>;
+export const Envelope = z.object({operationId:id, command:Command});
+export class Fault extends Error {constructor(public code:string, message:string, public status=400){super(message);}}
+export function requireValue<T>(value:T|null|undefined, code:string, message:string):T {if(value===null||value===undefined)throw new Fault(code,message,404);return value;}

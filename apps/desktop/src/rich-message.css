@@ -1,0 +1,25 @@
+@layer theme, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "../../../node_modules/streamdown/dist/*.js";
+@source "../../../node_modules/@streamdown/code/dist/*.js";
+@source "../../../node_modules/@streamdown/mermaid/dist/*.js";
+@theme {
+ --color-background:#ffffff;--color-foreground:#35353d;--color-muted:#f3f3f6;--color-muted-foreground:#898993;--color-border:#e4e4e9;--color-primary:#6965ba;--color-primary-foreground:#ffffff;--color-secondary:#f4f4f7;--color-secondary-foreground:#555561;--color-accent:#efeff4;--color-accent-foreground:#434350;--color-ring:#aaa5d2;--radius-lg:10px;--radius-md:7px;
+}
+.rich-markdown{font-size:13px;line-height:1.85;color:#41414b;overflow-wrap:anywhere;min-width:0;white-space:normal;--tw-prose-body:#41414b}
+.rich-markdown>*:first-child{margin-top:0}.rich-markdown>*:last-child{margin-bottom:0}
+.rich-markdown h1,.rich-markdown h2,.rich-markdown h3{font-weight:600;line-height:1.5;letter-spacing:-.02em;color:#33333d;margin:1.5em 0 .65em}
+.rich-markdown h1{font-size:21px}.rich-markdown h2{font-size:18px}.rich-markdown h3{font-size:15px}
+.rich-markdown p{margin:.65em 0;line-height:1.9}.rich-markdown ul,.rich-markdown ol{padding-left:1.5em;margin:.7em 0}.rich-markdown li{margin:.3em 0}.rich-markdown ul{list-style-type:disc}.rich-markdown ol{list-style-type:decimal}
+.rich-markdown a{color:#6963ae;text-decoration:underline;text-underline-offset:3px;cursor:pointer}.rich-markdown strong{font-weight:600;color:#34343d}
+.rich-markdown blockquote{border-left:2px solid #bbb6d8;padding:2px 16px;margin:16px 0;color:#777482}.rich-markdown hr{border:0;border-top:1px solid #e6e5eb;margin:24px 0}
+.rich-markdown table{width:100%;border-collapse:collapse;font-size:12px}.rich-markdown th{font-weight:600;background:#f7f7f9}.rich-markdown th,.rich-markdown td{padding:10px 13px;border-bottom:1px solid #e9e8ed;text-align:left;white-space:normal}
+.rich-markdown pre{font-size:12px;line-height:1.75;white-space:pre;overflow:auto;background:transparent;border:0;padding:12px 16px;color:inherit;max-width:100%;margin:0}.rich-markdown code{font-family:'SFMono-Regular',Consolas,monospace;font-size:.9em}.rich-markdown :not(pre)>code{background:#f1f0f5;padding:2px 5px;border-radius:4px}
+.rich-markdown button{display:inline-flex;align-items:center;justify-content:center;background:transparent;min-width:26px;min-height:26px;color:#82808d;border-radius:5px;padding:4px}.rich-markdown button:hover{background:#ededf4;color:#454153}.rich-markdown button svg{width:15px;height:15px}.rich-markdown .katex-display{overflow-x:auto;overflow-y:hidden;padding:12px 0}.rich-markdown [data-streamdown="code-block"]{border:1px solid #e5e4eb;border-radius:9px;overflow:hidden;margin:16px 0;background:#fff}
+.message-actions{display:flex;gap:6px;margin-top:12px;color:#9a97a3}.message-actions button{display:flex;gap:6px;align-items:center;min-width:28px;min-height:27px;border-radius:5px;background:transparent;color:inherit;font-size:10px;padding:5px}.message-actions button:hover{background:#eeedf4;color:#6f689b}
+.assistant-avatar{display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:#ebe9f3;color:#6b6489;font-size:12px;font-weight:650}.streaming-label{font-size:10px;color:#9893aa;font-weight:400;margin-left:auto;animation:thought-pulse 1.4s ease-in-out infinite}
+.president-chat{height:calc(100vh - 140px);min-height:450px;max-width:900px}.project-chat{height:calc(100vh - 265px);min-height:400px}
+.chat-history{position:relative;min-height:0;padding:0;overflow:hidden;flex:1}.chat-history-content{padding:16px 8px 24px;min-width:0}.chat-history>div{scrollbar-width:thin;scrollbar-color:#dedce8 transparent}.chat-message{border-bottom:0;padding:20px 0}.chat-message.user{max-width:85%;margin:16px 0 10px auto;background:#f0eff5}.chat-message.assistant{padding-right:8px}.chat-author{margin-bottom:14px}.chat-composer{position:relative;flex-shrink:0;margin-top:12px;border-radius:14px;box-shadow:0 4px 25px #30244306}.chat-composer:focus-within{border-color:#b9b3d6;box-shadow:0 0 0 3px #b9b3d612}.chat-composer .rt-TextAreaInput:focus{outline:none}.chat-scroll-latest{position:absolute;bottom:12px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:6px;background:#fff;border:1px solid #e2dfeb;border-radius:20px;padding:7px 12px;font-size:11px;color:#81788f;box-shadow:0 2px 10px #3227450a}.chat-welcome{padding-top:60px}.markdown-image-link{font-size:12px}
+@media(prefers-reduced-motion:reduce){.streaming-label,.chat-thinking>span{animation:none}}
+@media(max-width:760px){.president-chat{height:calc(100vh - 125px)}.project-chat{height:calc(100vh - 315px)}.chat-message.user{max-width:93%}.rich-markdown{font-size:12px}.chat-history-content{padding-left:0;padding-right:0}}

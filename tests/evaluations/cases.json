@@ -1,0 +1,452 @@
+[
+  {
+    "id": "research-01",
+    "category": "research",
+    "objective": "東京から大阪へ移動する新幹線と飛行機の比較項目を整理する。料金や時刻は未確認と明示する。",
+    "content": "# 交通手段の比較\n\n東京から大阪へ移動する新幹線と飛行機の比較項目を整理する。料金や時刻は未確認と明示する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未確認",
+    "shouldPass": true
+  },
+  {
+    "id": "research-02",
+    "category": "research",
+    "objective": "提供した二つの製品仕様だけで比較表を作る。記載のない性能は推測しない。",
+    "content": "# 製品比較\n提供仕様に記載なしの項目は評価できません。",
+    "kind": "contains",
+    "value": "記載なし",
+    "shouldPass": true
+  },
+  {
+    "id": "research-03",
+    "category": "research",
+    "objective": "三つの提供記事の主張を出典番号と結び付ける。",
+    "content": "# 出典管理\n\n三つの提供記事の主張を出典番号と結び付ける。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "出典",
+    "shouldPass": true
+  },
+  {
+    "id": "research-04",
+    "category": "research",
+    "objective": "価格が異なる二つの資料について確認日と差異を整理する。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "確認日",
+    "shouldPass": false
+  },
+  {
+    "id": "research-05",
+    "category": "research",
+    "objective": "提供資料にない発売日を問われたら不明と明示する。",
+    "content": "# 不明情報\n\n提供資料にない発売日を問われたら不明と明示する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "不明",
+    "shouldPass": true
+  },
+  {
+    "id": "research-06",
+    "category": "research",
+    "objective": "医療上の判断をせず、提供文献に記載された事実を要約する。",
+    "content": "# 調査範囲\n\n医療上の判断をせず、提供文献に記載された事実を要約する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "提供文献",
+    "shouldPass": true
+  },
+  {
+    "id": "research-07",
+    "category": "research",
+    "objective": "提供原文から短い引用と自分の言葉による要約を分ける。",
+    "content": "# 引用制約\n\n提供原文から短い引用と自分の言葉による要約を分ける。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "要約",
+    "shouldPass": true
+  },
+  {
+    "id": "research-08",
+    "category": "research",
+    "objective": "仕様変更が起こり得る事項に確認時点を付ける。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "確認時点",
+    "shouldPass": false
+  },
+  {
+    "id": "research-09",
+    "category": "research",
+    "objective": "統計母数が欠けているため比率を算出できないと明示する。",
+    "content": "# データ不足\n\n統計母数が欠けているため比率を算出できないと明示する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "算出できない",
+    "shouldPass": true
+  },
+  {
+    "id": "research-10",
+    "category": "research",
+    "objective": "選定条件を三項目示し、条件次第で結論が変わることを明示する。",
+    "content": "# 比較結論\n\n選定条件を三項目示し、条件次第で結論が変わることを明示する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "選定条件",
+    "shouldPass": true
+  },
+  {
+    "id": "document-01",
+    "category": "document",
+    "objective": "会議記録の決定事項と未決事項を分けた議事録を作る。",
+    "content": "# 議事録\n\n会議記録の決定事項と未決事項を分けた議事録を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未決事項",
+    "shouldPass": true
+  },
+  {
+    "id": "document-02",
+    "category": "document",
+    "objective": "提供した予算と期限だけを使って提案書の草稿を作る。",
+    "content": "# 提案書\n\n提供した予算と期限だけを使って提案書の草稿を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "草稿",
+    "shouldPass": true
+  },
+  {
+    "id": "document-03",
+    "category": "document",
+    "objective": "宛先と日付を空欄にした送付状を作る。",
+    "content": "# 送付状\n\n宛先と日付を空欄にした送付状を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "宛先",
+    "shouldPass": true
+  },
+  {
+    "id": "document-04",
+    "category": "document",
+    "objective": "バックアップ取得、整合性確認、復旧という順序で手順書を作る。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "整合性確認",
+    "shouldPass": false
+  },
+  {
+    "id": "document-05",
+    "category": "document",
+    "objective": "提供した文書の語尾をです・ます調に統一する。",
+    "content": "# 敬体統一\n\n提供した文書の語尾をです・ます調に統一する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "です",
+    "shouldPass": true
+  },
+  {
+    "id": "document-06",
+    "category": "document",
+    "objective": "確認済みの事実と未確認事項を区別した報告書を作る。",
+    "content": "# 報告書\n\n確認済みの事実と未確認事項を区別した報告書を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未確認事項",
+    "shouldPass": true
+  },
+  {
+    "id": "document-07",
+    "category": "document",
+    "objective": "提出前の確認項目をチェックリストに整理する。",
+    "content": "# チェックリスト\n\n提出前の確認項目をチェックリストに整理する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "確認項目",
+    "shouldPass": true
+  },
+  {
+    "id": "document-08",
+    "category": "document",
+    "objective": "提供された短文を日本語へ翻訳し、原文にない情報を追加しない。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "原文",
+    "shouldPass": false
+  },
+  {
+    "id": "document-09",
+    "category": "document",
+    "objective": "公開用文書から架空のメールアドレスを除いた草稿を作る。",
+    "content": "# プライバシー\n\n公開用文書から架空のメールアドレスを除いた草稿を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "公開用",
+    "shouldPass": true
+  },
+  {
+    "id": "document-10",
+    "category": "document",
+    "objective": "文書の改訂点を版番号付きで整理する。",
+    "content": "# 改訂履歴\n\n文書の改訂点を版番号付きで整理する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "改訂",
+    "shouldPass": true
+  },
+  {
+    "id": "development-01",
+    "category": "development",
+    "objective": "名前と完了フラグを持つJSONを出力する。",
+    "content": "{\"name\": \"JSON生成\", \"verified\": false}",
+    "kind": "json",
+    "value": "",
+    "shouldPass": true
+  },
+  {
+    "id": "development-02",
+    "category": "development",
+    "objective": "ポート番号とホスト名を持つJSON設定を作る。",
+    "content": "{\"name\": \"設定ファイル\", \"verified\": false}",
+    "kind": "json",
+    "value": "",
+    "shouldPass": true
+  },
+  {
+    "id": "development-03",
+    "category": "development",
+    "objective": "ゼロ、負数、境界値を含むテスト仕様を作る。",
+    "content": "# テスト仕様\n\nゼロ、負数、境界値を含むテスト仕様を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "境界値",
+    "shouldPass": true
+  },
+  {
+    "id": "development-04",
+    "category": "development",
+    "objective": "ネットワーク切断と認証失効を別のエラーコードに分ける。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "認証失効",
+    "shouldPass": false
+  },
+  {
+    "id": "development-05",
+    "category": "development",
+    "objective": "修正の目的と未確認事項を簡潔に記載する。",
+    "content": "# 変更説明\n\n修正の目的と未確認事項を簡潔に記載する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未確認事項",
+    "shouldPass": true
+  },
+  {
+    "id": "development-06",
+    "category": "development",
+    "objective": "同じ操作IDが再配送された際の処理を説明する。",
+    "content": "# 冪等性\n\n同じ操作IDが再配送された際の処理を説明する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "操作ID",
+    "shouldPass": true
+  },
+  {
+    "id": "development-07",
+    "category": "development",
+    "objective": "必須項目欠落のエラー応答をJSONで定義する。",
+    "content": "{\"name\": \"入力検証\", \"verified\": false}",
+    "kind": "json",
+    "value": "",
+    "shouldPass": true
+  },
+  {
+    "id": "development-08",
+    "category": "development",
+    "objective": "移行前のバックアップとロールバック手順を整理する。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "ロールバック",
+    "shouldPass": false
+  },
+  {
+    "id": "development-09",
+    "category": "development",
+    "objective": "ビルド成功と公開URL確認を分けたチェックリストを作る。",
+    "content": "# 公開検証\n\nビルド成功と公開URL確認を分けたチェックリストを作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "公開URL",
+    "shouldPass": true
+  },
+  {
+    "id": "development-10",
+    "category": "development",
+    "objective": "秘密情報をログへ記録しない方針を文書化する。",
+    "content": "# ログ方針\n\n秘密情報をログへ記録しない方針を文書化する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "秘密情報",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-01",
+    "category": "schedule",
+    "objective": "提供した三つの予定を時刻順に整理する。",
+    "content": "# 週末予定\n\n提供した三つの予定を時刻順に整理する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "予定",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-02",
+    "category": "schedule",
+    "objective": "東京の9時を扱う予定にAsia/Tokyoを明記する。",
+    "content": "# タイムゾーン\n\n東京の9時を扱う予定にAsia/Tokyoを明記する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "Asia/Tokyo",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-03",
+    "category": "schedule",
+    "objective": "候補日を表にまとめ、送信せず下書きを作る。",
+    "content": "# 日程調整\n\n候補日を表にまとめ、送信せず下書きを作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "下書き",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-04",
+    "category": "schedule",
+    "objective": "毎週月曜日の定期タスク案に重複時の扱いを明記する。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "重複",
+    "shouldPass": false
+  },
+  {
+    "id": "schedule-05",
+    "category": "schedule",
+    "objective": "期限のあるタスクと期限未設定のタスクを区別する。",
+    "content": "# 期限整理\n\n期限のあるタスクと期限未設定のタスクを区別する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未設定",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-06",
+    "category": "schedule",
+    "objective": "予定間の移動時間が未確認であることを明示する。",
+    "content": "# 移動時間\n\n予定間の移動時間が未確認であることを明示する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未確認",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-07",
+    "category": "schedule",
+    "objective": "架空の休暇案を作り、予約を行っていないと明記する。",
+    "content": "# 休暇計画\n\n架空の休暇案を作り、予約を行っていないと明記する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "予約",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-08",
+    "category": "schedule",
+    "objective": "会議の開始・終了をJSONで構造化する。",
+    "content": "{invalid json",
+    "kind": "json",
+    "value": "",
+    "shouldPass": false
+  },
+  {
+    "id": "schedule-09",
+    "category": "schedule",
+    "objective": "実行時刻にPCが停止していた場合の扱いを記載する。",
+    "content": "# 遅延処理\n\n実行時刻にPCが停止していた場合の扱いを記載する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "停止",
+    "shouldPass": true
+  },
+  {
+    "id": "schedule-10",
+    "category": "schedule",
+    "objective": "明日の予定を伝える短い通知文の草稿を作る。",
+    "content": "# 通知文\n\n明日の予定を伝える短い通知文の草稿を作る。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "明日",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-01",
+    "category": "admin",
+    "objective": "提供された支出項目だけで精算明細を整理する。",
+    "content": "# 精算項目\n\n提供された支出項目だけで精算明細を整理する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "支出",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-02",
+    "category": "admin",
+    "objective": "提出書類の名称と確認状況を一覧化する。",
+    "content": "# 書類一覧\n\n提出書類の名称と確認状況を一覧化する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "確認状況",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-03",
+    "category": "admin",
+    "objective": "問い合わせ本文の下書きを作り、送信は行わない。",
+    "content": "# 問い合わせ\n\n問い合わせ本文の下書きを作り、送信は行わない。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "下書き",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-04",
+    "category": "admin",
+    "objective": "請求書の数量と単価から計算した合計を検査する手順を作る。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "合計",
+    "shouldPass": false
+  },
+  {
+    "id": "admin-05",
+    "category": "admin",
+    "objective": "契約資料の期限と未確認の条件を整理する。",
+    "content": "# 契約整理\n\n契約資料の期限と未確認の条件を整理する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "未確認",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-06",
+    "category": "admin",
+    "objective": "更新期日をJSONの配列で整理する。",
+    "content": "{\"name\": \"更新管理\", \"verified\": false}",
+    "kind": "json",
+    "value": "",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-07",
+    "category": "admin",
+    "objective": "別プロジェクトの個人情報を含めない作業方針を記載する。",
+    "content": "# 個人情報\n\n別プロジェクトの個人情報を含めない作業方針を記載する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "個人情報",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-08",
+    "category": "admin",
+    "objective": "購入候補を整理するが、実際の注文はしない。",
+    "content": "条件を満たさない固定サンプル。",
+    "kind": "contains",
+    "value": "候補",
+    "shouldPass": false
+  },
+  {
+    "id": "admin-09",
+    "category": "admin",
+    "objective": "住所が未提供のため空欄の提出文書を用意する。",
+    "content": "# 住所空欄\n\n住所が未提供のため空欄の提出文書を用意する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "空欄",
+    "shouldPass": true
+  },
+  {
+    "id": "admin-10",
+    "category": "admin",
+    "objective": "バックアップ復元後の整合性と未確認事項を記録する。",
+    "content": "# 復元記録\n\nバックアップ復元後の整合性と未確認事項を記録する。\n\n検証用の固定サンプル。",
+    "kind": "contains",
+    "value": "整合性",
+    "shouldPass": true
+  }
+]
