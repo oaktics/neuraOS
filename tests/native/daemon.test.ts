@@ -54,10 +54,13 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
   } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
 });
 
-test('provider commands preserve native permission prompts and resume chooser',()=>{
-  assert.deepEqual(argumentsFor('codex',false),['--sandbox','workspace-write','--ask-for-approval','on-request','-c','approvals_reviewer="user"']);
-  assert.equal(argumentsFor('codex',true)[0],'resume');assert.ok(!argumentsFor('codex',true).includes('--last'));
-  assert.deepEqual(argumentsFor('claude',true),['--resume','--permission-mode','manual']);
+test('provider commands default to full access for new sessions and resume choosers',()=>{
+  assert.deepEqual(argumentsFor('codex',false),['--sandbox','danger-full-access','--ask-for-approval','never']);
+  assert.deepEqual(argumentsFor('codex',true),['resume','--sandbox','danger-full-access','--ask-for-approval','never']);
+  assert.deepEqual(argumentsFor('claude',false),['--permission-mode','bypassPermissions']);
+  assert.deepEqual(argumentsFor('claude',true),['--resume','--permission-mode','bypassPermissions']);
+  assert.deepEqual(argumentsFor('shell',false),['-l']);
+  assert.deepEqual(argumentsFor('shell',true),['-l']);
 });
 
 test('ordinary folders support files, PTY and persistence without initializing Git',async()=>{
