@@ -16,7 +16,7 @@ import AppKit
                 Button("新しい作業…") {model.showNewWorkspace = true}.keyboardShortcut("n").disabled(model.gitProjects.isEmpty)
             }
             CommandMenu("表示") {
-                Button("変更一覧を表示／非表示") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected?.supportsGit != true)
+                Button("右サイドバーを表示／非表示") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected == nil)
             }
         }
     }
@@ -44,7 +44,7 @@ struct RootView: View {
                 Spacer()
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
-                if model.selected?.supportsGit == true {Button {model.showInspector.toggle()} label: {Image(systemName: "sidebar.right")}.buttonStyle(.plain).help("変更一覧を表示／非表示").padding(.leading, 6)}
+                if model.selected != nil {Button {model.showInspector.toggle()} label: {Image(systemName: "sidebar.right")}.buttonStyle(.plain).help("右サイドバーを表示／非表示").padding(.leading, 6)}
             }.padding(.horizontal, 18).frame(height: 48)
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {

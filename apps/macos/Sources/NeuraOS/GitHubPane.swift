@@ -25,10 +25,35 @@ struct GitHubCheck: Decodable, Identifiable {
 struct GitHubResult: Decodable {let ok: Bool; let message: String; let url: String?}
 private func methodLabel(_ method: String) -> String {method == "squash" ? "Squash" : method == "rebase" ? "Rebase" : "Merge commit"}
 
+struct GitHubSidebar: View {
+    @EnvironmentObject var model: AppModel
+    let workspace: Workspace
+    let visible: Bool
+    let openTerminal: () -> Void
+    var body: some View {
+        Group {
+            if !workspace.supportsGit {
+                Text("このフォルダではGitを使用していません。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).padding(12)
+            } else if model.supportsGitHub {
+                GitHubPane(workspace: workspace, visible: visible, openTerminal: openTerminal)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(model.connected ? "GitHub 連携には Daemon の更新が必要です" : "Daemon への接続を確認しています…")
+                        .font(.system(size: 12, weight: .medium))
+                    Text("作業を保存してから Daemon を更新・再起動してください。再起動すると実行中のターミナルは終了します。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }.padding(12)
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
 struct GitHubPane: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
     let visible: Bool
+    let openTerminal: () -> Void
     @State private var snapshot: GitHubSnapshot?
     @State private var refreshing = false
     @State private var busy = false
@@ -43,46 +68,47 @@ struct GitHubPane: View {
     private var disabled: Bool {busy || refreshing || !model.connected || error != nil}
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(snapshot?.repository ?? "GitHub").font(.system(size: 15, weight: .semibold))
-                    Text(snapshot.map {"\($0.branch) · \($0.head.prefix(7))"} ?? "作業ブランチの PR とレビュー").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    Text(snapshot?.repository ?? "GitHub").font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle).help(snapshot?.repository ?? "GitHub")
+                    Text(snapshot.map {"\($0.branch) · \($0.head.prefix(7))"} ?? "作業ブランチの PR とレビュー").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer()
                 if refreshing || busy {ProgressView().controlSize(.small)}
-                Button {Task {await refresh()}} label: {Label("更新", systemImage: "arrow.clockwise")}.disabled(refreshing || busy)
-            }.padding(20)
+                Button {Task {await refresh()}} label: {Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)}.buttonStyle(.plain).help("GitHubを更新").accessibilityLabel("GitHubを更新").disabled(refreshing || busy)
+            }.padding(10)
             Divider()
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 14) {
                     if let notice {Text(notice).foregroundStyle(.green).textSelection(.enabled)}
                     if let error {
                         VStack(alignment: .leading, spacing: 10) {
                             Label("GitHub の状態を確認してください", systemImage: "exclamationmark.circle").fontWeight(.medium)
                             Text(error).textSelection(.enabled)
                             if snapshot != nil {Text("表示中の情報は前回の取得結果です。更新が成功するまで操作できません。").foregroundStyle(.secondary)}
-                            Button("ターミナルを開く") {Task {await model.openTerminal(workspace, provider: "shell")}}.disabled(model.busy)
+                            Button("ターミナルを開く", action: openTerminal).disabled(model.busy)
                             Text("初回設定: brew install gh → gh auth login --hostname github.com → gh auth setup-git").font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                         }.foregroundStyle(.orange)
                     }
                     if let snapshot {
-                        HStack {
+                        VStack(alignment: .leading, spacing: 10) {
                             if let url = URL(string: "https://github.com/\(snapshot.repository)") {Link("リポジトリを開く ↗", destination: url)}
-                            Spacer()
-                            Button("Push…") {confirmPush(snapshot)}.disabled(disabled)
-                            if snapshot.pullRequest?.state != "OPEN" {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
+                            HStack {
+                                Button("Push…") {confirmPush(snapshot)}.disabled(disabled)
+                                if snapshot.pullRequest?.state != "OPEN" {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
+                            }.controlSize(.small)
                         }
                         Text("Push・PR に含まれるのはコミット済みの変更です。").font(.system(size: 11)).foregroundStyle(.secondary)
                         if let pr = snapshot.pullRequest {pullRequest(pr, snapshot: snapshot)}
                         else {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("このブランチの PR はありません").font(.system(size: 19, weight: .medium))
+                                Text("このブランチの PR はありません").font(.system(size: 14, weight: .medium))
                                 Text("変更をコミットしたら、PR を作成してレビューへ進めます。").foregroundStyle(.secondary)
-                            }.padding(.vertical, 30)
+                            }.padding(.vertical, 12)
                         }
                         Text("取得: \(snapshot.fetchedAt) · 表示中は30秒ごとに更新").font(.system(size: 10)).foregroundStyle(.tertiary)
-                    } else if error == nil {Text("GitHub に接続しています…").foregroundStyle(.secondary).padding(.vertical, 30)}
-                }.font(.system(size: 12)).frame(maxWidth: 840, alignment: .leading).padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                    } else if error == nil {Text("GitHub に接続しています…").foregroundStyle(.secondary).padding(.vertical, 12)}
+                }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(10).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .task(id: visible) {
@@ -112,11 +138,11 @@ struct GitHubPane: View {
                 Text("#\(pr.number)").foregroundStyle(.secondary)
                 Text(pr.label).fontWeight(.medium).foregroundStyle(pr.state == "MERGED" ? .purple : pr.isDraft ? .secondary : .green)
                 Spacer()
-                if let url = URL(string: pr.url) {Link("GitHub で開く ↗", destination: url)}
+                if let url = URL(string: pr.url) {Link("開く ↗", destination: url)}
             }
-            Text(pr.title).font(.system(size: 21, weight: .semibold)).textSelection(.enabled)
+            Text(pr.title).font(.system(size: 15, weight: .semibold)).textSelection(.enabled)
             Text("\(pr.headRefName) → \(pr.baseRefName)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-            if !pr.body.isEmpty {Text(pr.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)}
+            if !pr.body.isEmpty {GitHubMarkdown(source: pr.body, baseURL: URL(string: pr.url))}
         }
         Divider()
         VStack(alignment: .leading, spacing: 10) {
@@ -124,17 +150,20 @@ struct GitHubPane: View {
             Text("マージ状態: \(pr.mergeStateStatus) · レビュー: \(pr.reviewDecision.flatMap {$0.isEmpty ? nil : $0} ?? "指定なし") · 未解決スレッド: \(pr.unresolvedThreads)").foregroundStyle(.secondary)
             if pr.checks.isEmpty {Text("チェックはありません").foregroundStyle(.secondary)}
             ForEach(pr.checks) {check in
-                HStack {
-                    Image(systemName: check.passed ? "checkmark.circle" : "circle.dotted").foregroundStyle(check.passed ? .green : .orange)
-                    Text(check.name); Spacer(); Text(check.state).foregroundStyle(.secondary)
-                    if let value = check.url, let url = URL(string: value), url.scheme == "https" {Link("詳細 ↗", destination: url)}
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(check.name, systemImage: check.passed ? "checkmark.circle" : "circle.dotted")
+                        .foregroundStyle(check.passed ? .green : .orange)
+                    HStack {
+                        Text(check.state).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        if let value = check.url, let url = URL(string: value), url.scheme == "https" {Link("詳細 ↗", destination: url)}
+                    }.font(.system(size: 11))
                 }
             }
             if pr.state == "OPEN" {
                 if pr.headRefOid != snapshot.head {Text("PR とローカルのコミットが異なります。Push またはローカルの更新後に確認してください。").foregroundStyle(.orange)}
-                HStack {
-                    Picker("マージ方式", selection: $method) {ForEach(snapshot.mergeMethods, id: \.self) {Text(methodLabel($0)).tag($0)}}.frame(maxWidth: 270)
-                    Spacer()
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("マージ方式", selection: $method) {ForEach(snapshot.mergeMethods, id: \.self) {Text(methodLabel($0)).tag($0)}}
                     Button("マージ…") {confirmMerge(snapshot, pr: pr)}
                         .disabled(disabled || !pr.canMerge || pr.headRefOid != snapshot.head || !snapshot.mergeMethods.contains(method))
                 }
@@ -148,13 +177,13 @@ struct GitHubPane: View {
             ForEach(pr.comments) {comment in
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(comment.author).fontWeight(.medium)
-                        if let state = comment.state {Text(state).foregroundStyle(.secondary)}
+                        Text(comment.author).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                        if let state = comment.state {Text(state).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)}
                         Spacer()
                         if let url = URL(string: comment.url) {Link("開く ↗", destination: url)}
                     }
                     if let path = comment.path {Text("\(path)\(comment.line.map {":\($0)"} ?? "")\(comment.outdated ? " · 過去の差分" : "")").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)}
-                    if !comment.body.isEmpty {Text(comment.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)}
+                    if !comment.body.isEmpty {GitHubMarkdown(source: comment.body, baseURL: URL(string: comment.url))}
                     Text(comment.createdAt).font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
                 Divider()
