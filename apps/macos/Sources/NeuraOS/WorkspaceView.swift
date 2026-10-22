@@ -4,7 +4,7 @@ import AppKit
 struct WorkspaceView: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
-    @State private var tab = "codex"
+    @State private var tab: String
     @State private var inspector = "files"
     @State private var requestedFile: String?
     @State private var treeVersion = 0
@@ -12,6 +12,10 @@ struct WorkspaceView: View {
     @State private var selectedDiff: Diff?
     @State private var gitError: String?
     private let tabs: [(String, String, String)] = [("codex", "Codex", "sparkle"), ("claude", "Claude Code", "asterisk"), ("shell", "ターミナル", "terminal"), ("files", "ファイル", "doc"), ("browser", "ブラウザ", "globe")]
+    init(workspace: Workspace) {
+        self.workspace = workspace
+        _tab = State(initialValue: UserDefaults.standard.string(forKey: "tab.\(workspace.id)") ?? "codex")
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 9) {
@@ -83,7 +87,6 @@ struct WorkspaceView: View {
             HStack {Text(workspace.path).lineLimit(1).truncationMode(.middle); Spacer(); if model.busy {ProgressView().controlSize(.mini)}; if workspace.supportsGit {Text("\(git.changes.count) files changed")}}.font(.system(size: 10)).foregroundStyle(.tertiary).padding(.horizontal, 16).frame(height: 27)
         }
         .onAppear {
-            tab = UserDefaults.standard.string(forKey: "tab.\(workspace.id)") ?? "codex"
             inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
             if tab == "github" {tab = "codex"; inspector = "github"; model.showInspector = true}
         }
@@ -104,6 +107,8 @@ struct TerminalPane: View {
     @State private var showStop = false
     // Mount on first visit, then keep the emulator and output cursor until the session changes.
     @State private var hasBeenVisible = false
+    @State private var attemptedAutoStart = false
+    @State private var starting = false
     private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "ターミナル"}
     var body: some View {
         let terminal = model.terminal(workspaceId: workspace.id, provider: provider)
@@ -127,15 +132,32 @@ struct TerminalPane: View {
                     Text("\(title)で作業する").font(.system(size: 19, weight: .medium))
                     Text(provider == "shell" ? "この作業フォルダでシェルを開きます。" : "ログイン済みのCLIを、そのまま使えます。")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
-                    Button("\(title)を起動") {Task {await model.openTerminal(workspace, provider: provider)}}.controlSize(.large).disabled(model.busy || !model.connected)
-                    if provider != "shell" {Button("以前の会話から再開") {Task {await model.openTerminal(workspace, provider: provider, resume: true)}}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary)}
+                    if starting {ProgressView("\(title)を起動中…")}
+                    else {
+                        Button("\(title)を起動") {Task {await model.openTerminal(workspace, provider: provider)}}.controlSize(.large).disabled(model.busy || !model.connected)
+                        if provider != "shell" {Button("以前の会話から再開") {Task {await model.openTerminal(workspace, provider: provider, resume: true)}}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.busy || !model.connected)}
+                    }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear {if visible {hasBeenVisible = true}}
-        .onChange(of: visible) {_, value in if value {hasBeenVisible = true}}
+        .onAppear {activateIfNeeded()}
+        .onChange(of: visible) {_, _ in activateIfNeeded()}
+        .onChange(of: model.connected) {_, _ in activateIfNeeded()}
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
+    }
+    private func activateIfNeeded() {
+        guard visible else {return}
+        hasBeenVisible = true
+        guard model.connected, !attemptedAutoStart else {return}
+        attemptedAutoStart = true
+        guard model.terminal(workspaceId: workspace.id, provider: provider) == nil else {return}
+        starting = true
+        // Keep the request alive across tab switches; failures can be retried explicitly.
+        Task {
+            await model.openTerminal(workspace, provider: provider)
+            starting = false
+        }
     }
 }
 
