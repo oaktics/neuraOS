@@ -130,18 +130,16 @@ struct NewWorkspaceSheet: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @State private var projectId = ""
-    @State private var name = ""
     @State private var base = "HEAD"
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("新しい作業").font(.system(size: 20, weight: .semibold))
-            Text("専用のブランチとworktreeを作成します。").foregroundStyle(.secondary)
+            Text("専用のブランチとworktreeを作成します。サイドバーの作業名には、CodexやClaude Codeの会話名が自動で反映されます。").foregroundStyle(.secondary)
             Form {
                 Picker("プロジェクト", selection: $projectId) {ForEach(model.gitProjects) {Text($0.name).tag($0.id)}}
-                TextField("作業名", text: $name, prompt: Text("例：ログイン画面の改善"))
                 TextField("作成元", text: $base)
             }
-            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, name: name, base: base)}}.keyboardShortcut(.defaultAction).disabled(model.busy || name.trimmingCharacters(in: .whitespaces).isEmpty || projectId.isEmpty)}
+            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: base)}}.keyboardShortcut(.defaultAction).disabled(model.busy || !model.connected || projectId.isEmpty || base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)}
         }.padding(28).frame(width: 440)
         .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
     }

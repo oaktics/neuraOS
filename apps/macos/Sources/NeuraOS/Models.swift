@@ -94,9 +94,9 @@ final class DaemonClient {
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
-    func createWorkspace(projectId: String, name: String, base: String) async {
+    func createWorkspace(projectId: String, base: String) async {
         busy = true; defer {busy = false}
-        do {let workspace: Workspace = try await api.command(["type": "workspace.create", "projectId": projectId, "name": name, "baseRef": base]); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
+        do {let workspace: Workspace = try await api.command(["type": "workspace.create", "projectId": projectId, "baseRef": base]); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async {
         busy = true; defer {busy = false}

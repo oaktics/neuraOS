@@ -17,8 +17,8 @@ export async function executable(provider:Provider){
 export function argumentsFor(provider:Provider,resume:boolean){
   if(provider==='shell')return ['-l'];
   // Resume is the provider's own chooser. Do not guess a conversation from an unrelated directory.
-  if(provider==='codex')return [...(resume?['resume']:[]),'--sandbox','workspace-write','--ask-for-approval','on-request','-c','approvals_reviewer="user"'];
-  return [...(resume?['--resume']:[]),'--permission-mode','manual'];
+  if(provider==='codex')return [...(resume?['resume']:[]),'--sandbox','danger-full-access','--ask-for-approval','never'];
+  return [...(resume?['--resume']:[]),'--permission-mode','bypassPermissions'];
 }
 export class Terminals {
   private processes=new Map<string,pty.IPty>();
@@ -31,7 +31,7 @@ export class Terminals {
     if(this.processes.size>=24)throw new Fault('terminal_limit','同時に開けるターミナルは24個までです。');
     const program=await executable(provider),id=randomUUID();
     const env:Record<string,string>={HOME:homedir(),USER:process.env.USER??'',SHELL:'/bin/zsh',TERM:'xterm-256color',LANG:process.env.LANG??'en_US.UTF-8',PATH:[join(homedir(),'.local/bin'),'/opt/homebrew/bin','/usr/local/bin',process.env.PATH??'/usr/bin:/bin'].join(delimiter)};
-    // These are interactive user CLIs, with their normal login/config and permission prompts.
+    // Interactive user CLIs retain normal login/config, with full access selected at launch.
     const proc=pty.spawn(program,argumentsFor(provider,resume),{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});
     const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',createdAt:new Date().toISOString(),cols:100,rows:30};
     this.processes.set(id,proc);this.store.put('terminals',record);this.store.resize(id,record.cols,record.rows);
