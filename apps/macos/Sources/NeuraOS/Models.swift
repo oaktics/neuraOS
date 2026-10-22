@@ -103,11 +103,11 @@ final class DaemonClient {
         busy = true; defer {busy = false}
         do {let workspace: Workspace = try await api.command(["type": "workspace.create", "projectId": projectId, "baseRef": base]); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
     }
-    func deleteWorkspace(_ workspace: Workspace) async {
+    func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
         guard workspace.kind == "worktree", !busy else {return}
         busy = true; defer {busy = false}
         do {
-            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id])
+            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges])
             await refresh()
         } catch {report(error)}
     }
