@@ -64,6 +64,33 @@ final class DaemonClient {
     @Published var error: String?
     @Published var busy = false
     @Published var showNewWorkspace = false
+    @Published var showNewSpace = false
+    @Published var sidebarSpaces: SidebarSpaces = {
+        if let data = UserDefaults.standard.data(forKey: "sidebarSpaces"),
+           let saved = try? JSONDecoder().decode(SidebarSpaces.self, from: data), !saved.spaces.isEmpty {return saved}
+        return SidebarSpaces()
+    }() {
+        didSet {if let data = try? JSONEncoder().encode(sidebarSpaces) {UserDefaults.standard.set(data, forKey: "sidebarSpaces")}}
+    }
+    var visibleProjects: [Project] {state.projects.filter {sidebarSpaces.owner(of: $0.id) == sidebarSpaces.active.id}}
+    var visibleWorkspaces: [Workspace] {state.workspaces.filter {sidebarSpaces.owner(of: $0.projectId) == sidebarSpaces.active.id}}
+    func createSpace(name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {return}
+        sidebarSpaces.create(name: name)
+        select(nil)
+    }
+    func switchSpace(_ id: String) {
+        guard sidebarSpaces.spaces.contains(where: {$0.id == id}) else {return}
+        sidebarSpaces.activeId = id
+        let saved = sidebarSpaces.active.selectedWorkspaceId
+        select(visibleWorkspaces.first(where: {$0.id == saved})?.id ?? visibleWorkspaces.first?.id)
+    }
+    func moveProject(_ projectId: String, to spaceId: String) {
+        guard sidebarSpaces.spaces.contains(where: {$0.id == spaceId}) else {return}
+        sidebarSpaces.projectSpaces[projectId] = spaceId
+        switchSpace(sidebarSpaces.active.id)
+    }
     @Published var showSidebar = UserDefaults.standard.object(forKey: "showLeftSidebar") as? Bool ?? true {
         didSet {UserDefaults.standard.set(showSidebar, forKey: "showLeftSidebar")}
     }
@@ -72,7 +99,7 @@ final class DaemonClient {
     }
     @Published var openedIds: Set<String> = []
     private var polling: Task<Void, Never>?
-    var gitProjects: [Project] {state.projects.filter { $0.supportsGit }}
+    var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
     init() {
@@ -88,19 +115,28 @@ final class DaemonClient {
             if next.revision != state.revision || next.features != state.features || !connected {state = next}
             openedIds.formIntersection(Set(state.workspaces.map(\.id)))
             connected = true
-            if !state.workspaces.contains(where: {$0.id == selectedId}) {select(state.workspaces.first?.id)}
+            if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
+                let saved = sidebarSpaces.active.selectedWorkspaceId
+                select(visibleWorkspaces.first(where: {$0.id == saved})?.id ?? visibleWorkspaces.first?.id)
+            }
+            if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
         } catch {connected = false}
     }
-    func select(_ id: String?) {selectedId = id; if let id {openedIds.insert(id)}; UserDefaults.standard.set(id, forKey: "selectedWorkspace")}
+    func select(_ id: String?) {
+        if let workspace = state.workspaces.first(where: {$0.id == id}) {sidebarSpaces.activeId = sidebarSpaces.owner(of: workspace.projectId)}
+        sidebarSpaces.remember(id)
+        selectedId = id; if let id {openedIds.insert(id)}; UserDefaults.standard.set(id, forKey: "selectedWorkspace")}
     func report(_ error: Error) {self.error = error.localizedDescription}
     func addProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
         panel.message = "作業するフォルダを選択（Gitは不要です）"; panel.prompt = "追加"
         guard panel.runModal() == .OK, let path = panel.url?.path else {return}
+        let targetSpaceId = sidebarSpaces.active.id
         busy = true
         Task {defer {busy = false}; do {
             let project: Project = try await api.command(["type": "project.add", "path": path])
+            sidebarSpaces.projectSpaces[project.id] = targetSpaceId
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
