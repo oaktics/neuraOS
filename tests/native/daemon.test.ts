@@ -20,11 +20,12 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
     assert.equal((await daemon.app.inject({url:'/v1/state',headers:{authorization:`Bearer ${daemon.token}`,origin:'https://evil.invalid'}})).statusCode,401);
     assert.equal((await stat(join(data,'daemon-token'))).mode&0o777,0o600);
     const project=(await cmd({type:'project.add',path:repo})).json();assert.ok(project.id);
-    const op=randomUUID(),command={type:'workspace.create',projectId:project.id,name:'Parallel one'};
+    const op=randomUUID(),command={type:'workspace.create',projectId:project.id};
     const [a,b]=await Promise.all([cmd(command,op),cmd(command,op)]);assert.equal(a.statusCode,200);assert.equal(b.statusCode,200);assert.equal(a.json().id,b.json().id);
     const ws=a.json();assert.notEqual(ws.path,repo);assert.match(await git(repo,['worktree','list']),new RegExp(ws.branch));
+    assert.equal(ws.name,`worktree-${op.slice(0,8)}`);assert.equal(ws.branch,`neura/${ws.name}`);assert.equal(b.json().name,ws.name);
     assert.equal((await cmd({...command,name:'different'},op)).statusCode,409);
-    const other=(await cmd({...command,name:'Parallel two'})).json();assert.notEqual(other.path,ws.path);
+    const other=(await cmd({...command,name:'Parallel two'})).json();assert.notEqual(other.path,ws.path);assert.equal(other.name,'Parallel two');
     const file=(await get(`/v1/workspaces/${ws.id}/file?path=hello.txt`)).json();
     assert.equal((await cmd({type:'file.save',workspaceId:ws.id,path:'hello.txt',content:'edited\n',expectedHash:file.hash})).statusCode,200);
     assert.equal(await readFile(join(repo,'hello.txt'),'utf8'),'hello\n');
@@ -49,6 +50,7 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
     const events=(await get('/v1/events?after=0')).json().events;assert.ok(events.length>0);
     const token=daemon.token;await daemon.app.close();daemon=await createDaemon(data);assert.equal(daemon.token,token);
     const state=(await get('/v1/state')).json();assert.equal(state.workspaces.length,3);assert.equal(state.terminals[0].status,'interrupted');
+    assert.equal(state.workspaces.find((w:any)=>w.id===ws.id).name,ws.name);
     assert.match((await get(`/v1/terminals/${terminal.id}/output?after=0`)).json().data,/persistent-output/);
     assert.equal((await cmd({type:'terminal.input',terminalId:terminal.id,clientId,data:'x'})).statusCode,404);
   } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
