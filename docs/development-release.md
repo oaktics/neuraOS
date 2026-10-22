@@ -3,14 +3,14 @@
 1. neuraOSでworktreeを作成し、機能ブランチで変更・commitする。
 2. GitHubサイドバーからPush → PR作成。PR本文に変更内容と確認結果を書く。
 3. CI `native-development / macos` とレビューを確認してmainへマージする。
-4. `native-release` がmainのソースを検証し、Apple Silicon／Intel両方をビルドする。両方のパッケージ試験が成功したときだけGitHub Release `native-N` を公開する。
+4. `native-release` がmainのソースを検証し、Apple Silicon向けをビルドする。パッケージ試験が成功したときだけGitHub Release `native-N` を公開する。Intel向けのビルド・配布は廃止。
 5. neuraOSメニュー → **アップデートを確認…** → **更新して再起動**。
 
 リポジトリ管理者はmainのrulesetでPR経由の変更と`macos`チェックを必須にする。ワークフローファイルだけでは直接pushを禁止できない。
 
 ## 配布と初回導入
 
-GitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon）または`neuraOS-darwin-x64.zip`（Intel）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時、Daemonが未登録なら同梱版をLaunchAgentに登録する。既存Daemonが稼働中の場合は勝手に再起動しない。ソース版からの初回移行は、更新機能入りのソース版を一度ビルドして「更新して再起動」を使うか、作業を保存して旧Daemonを`pnpm service stop`で止めてから配布版を開く。
+GitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時、Daemonが未登録なら同梱版をLaunchAgentに登録する。既存Daemonが稼働中の場合は勝手に再起動しない。ソース版からの初回移行は、更新機能入りのソース版を一度ビルドして「更新して再起動」を使うか、作業を保存して旧Daemonを`pnpm service stop`で止めてから配布版を開く。
 
 Node.js、tsx、Daemon、依存パッケージとネイティブPTYをアプリに同梱する。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Gitなどの開発CLIは引き続き各自の環境を使う。
 
@@ -21,7 +21,7 @@ Node.js、tsx、Daemon、依存パッケージとネイティブPTYをアプリ�
 ## 更新の保証範囲
 
 - 更新番号はreleaseワークフローの`github.run_number`。アプリへ同じ番号を埋め込み、現在より新しい番号だけを案内する。
-- 両アーキテクチャの成果物をDraft Releaseへアップロードし、揃ってからLatestとして公開する。ビルド・試験失敗時は公開しない。
+- Apple Silicon向けの成果物をDraft ReleaseへアップロードしてからLatestとして公開する。ビルド・試験失敗時は公開しない。
 - アーキテクチャ、GitHub assetのSHA-256、署名整合性、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、Developer IDによる作者証明ではない。
 - 明示的な更新操作後にアプリを終了し、ユーザー所有の`~/Applications/neuraOS.app`を入れ替え、Daemonを再登録する。実行中のPTY／エージェントは終了する。保存済みプロジェクト・履歴は既存のDeveloperディレクトリを引き継ぐ。
 - 旧アプリは`~/Applications/neuraOS.app.previous`へ保存する。起動確認失敗時はアプリとLaunchAgent設定を戻す。更新前の実行プロセスそのものやDBの巻き戻しはしない。将来のDB変更は旧版互換の追加方式とし、破壊的な変更には別途バックアップ・復元設計が必要。
