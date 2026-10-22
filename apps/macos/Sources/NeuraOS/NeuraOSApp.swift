@@ -16,7 +16,8 @@ import AppKit
                 Button("新しい作業…") {model.showNewWorkspace = true}.keyboardShortcut("n").disabled(model.gitProjects.isEmpty)
             }
             CommandMenu("表示") {
-                Button("右サイドバーを表示／非表示") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected == nil)
+                Button(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く") {model.showSidebar.toggle()}.keyboardShortcut("s", modifiers: [.command, .control])
+                Button(model.showInspector ? "右サイドバーを閉じる" : "右サイドバーを開く") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected == nil)
             }
         }
     }
@@ -38,17 +39,40 @@ struct RootView: View {
     @EnvironmentObject var model: AppModel
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Text("neuraOS").font(.system(size: 13, weight: .semibold)).padding(.leading, 78)
+            HStack(spacing: 8) {
+                Button {model.showSidebar.toggle()} label: {
+                    Image(systemName: "sidebar.left")
+                        .foregroundStyle(model.showSidebar ? Color.accentColor : Color.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(model.showSidebar ? Color.accentColor.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(model.showSidebar ? "左サイドバーを閉じる（⌃⌘S）" : "左サイドバーを開く（⌃⌘S）")
+                .accessibilityLabel(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く")
+                .padding(.leading, 72)
+                Text("neuraOS").font(.system(size: 13, weight: .semibold))
                 if let selected = model.selected {Text("/").foregroundStyle(.quaternary); Text(selected.name).foregroundStyle(.secondary).lineLimit(1)}
                 Spacer()
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
-                if model.selected != nil {Button {model.showInspector.toggle()} label: {Image(systemName: "sidebar.right")}.buttonStyle(.plain).help("右サイドバーを表示／非表示").padding(.leading, 6)}
-            }.padding(.horizontal, 18).frame(height: 48)
+                if model.selected != nil {
+                    Button {model.showInspector.toggle()} label: {
+                        Image(systemName: "sidebar.right")
+                            .foregroundStyle(model.showInspector ? Color.accentColor : Color.secondary)
+                            .frame(width: 30, height: 28)
+                            .background(model.showInspector ? Color.accentColor.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 5))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(model.showInspector ? "右サイドバーを閉じる（⌘⌥\\）" : "右サイドバーを開く（⌘⌥\\）")
+                    .accessibilityLabel(model.showInspector ? "右サイドバーを閉じる" : "右サイドバーを開く")
+                    .padding(.leading, 6)
+                }
+            }.padding(.horizontal, 10).frame(height: 38)
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
-                Sidebar().frame(minWidth: 190, idealWidth: 235, maxWidth: 280)
+                if model.showSidebar {Sidebar().frame(minWidth: 176, idealWidth: 200, maxWidth: 280)}
                 ZStack {
                     if model.state.workspaces.isEmpty {WelcomeView()}
                     // Keep each workspace mounted: its terminal, editor draft and browser remain intact.
@@ -79,10 +103,10 @@ struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
-                .font(.system(size: 12)).padding(9).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 7)).padding(12)
-            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Button {model.addProject()} label: {Image(systemName: "plus")}.buttonStyle(.plain).help("フォルダを開く")}.padding(.horizontal, 18).padding(.bottom, 12)
+                .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
+            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Button {model.addProject()} label: {Image(systemName: "plus").frame(width: 24, height: 24)}.buttonStyle(.plain).help("フォルダを開く")}.padding(.horizontal, 10).padding(.bottom, 4)
             ScrollView {
-                VStack(spacing: 15) {
+                VStack(spacing: 8) {
                     ForEach(model.state.projects) {project in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack(spacing: 8) {
@@ -100,7 +124,7 @@ struct Sidebar: View {
                                             Text(workspace.name).lineLimit(1)
                                             Spacer(minLength: 0)
                                             if model.state.terminals.contains(where: {$0.workspaceId == workspace.id && $0.status == "running"}) {Circle().fill(Color.green.opacity(0.8)).frame(width: 5, height: 5)}
-                                        }.font(.system(size: 12)).padding(.vertical, 8).padding(.horizontal, 12).padding(.leading, 14).contentShape(Rectangle())
+                                        }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
                                     .contextMenu {
@@ -119,7 +143,6 @@ struct Sidebar: View {
                 }.padding(.horizontal, 8)
             }
             Spacer(minLength: 0)
-            HStack {Image(systemName: "desktopcomputer"); Text("ローカル開発"); Spacer(); Text("0.2").foregroundStyle(.quaternary)}.font(.system(size: 11)).foregroundStyle(.tertiary).padding(17)
         }.background(Palette.surface)
         .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}

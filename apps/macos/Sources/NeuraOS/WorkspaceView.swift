@@ -1,101 +1,228 @@
 import SwiftUI
 import AppKit
 
+struct WorkspaceTab: Codable, Identifiable, Equatable {
+    var id = UUID().uuidString.lowercased()
+    var kind: String
+    var number = 1
+    var terminalId: String?
+    var title: String {
+        let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
+        return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
+    }
+    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : kind == "files" ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
+    var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
+}
+struct WorkspaceTabState: Codable {
+    var tabs: [WorkspaceTab] = []
+    var selectedId: String?
+}
+
 struct WorkspaceView: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
-    @State private var tab: String
-    @State private var inspector = "files"
-    @State private var requestedFile: String?
-    @State private var treeVersion = 0
+    @State private var layout = WorkspaceTabState()
+    @State private var restored = false
     @State private var git = GitStatus()
     @State private var selectedDiff: Diff?
     @State private var gitError: String?
-    private let tabs: [(String, String, String)] = [("codex", "Codex", "sparkle"), ("claude", "Claude Code", "asterisk"), ("shell", "ターミナル", "terminal"), ("files", "ファイル", "doc"), ("browser", "ブラウザ", "globe")]
-    init(workspace: Workspace) {
-        self.workspace = workspace
-        _tab = State(initialValue: UserDefaults.standard.string(forKey: "tab.\(workspace.id)") ?? "codex")
-    }
+    @State private var inspector = "files"
+    @State private var treeVersion = 0
+    @State private var requestedFile: String?
+    @State private var closingTab: WorkspaceTab?
+    private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
+    private var storageKey: String {"workspaceTabs.\(workspace.id)"}
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 9) {
-                Image(systemName: workspace.supportsGit ? "arrow.triangle.branch" : "folder").foregroundStyle(.tertiary)
-                Text(workspace.supportsGit ? (git.branch.isEmpty ? workspace.branch : git.branch) : (workspace.path as NSString).lastPathComponent).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
-                Spacer()
-                Text(workspace.kind == "folder" ? "フォルダ" : workspace.kind == "worktree" ? "Worktree" : "元のリポジトリ").font(.system(size: 11)).foregroundStyle(.tertiary)
-            }.padding(.horizontal, 20).frame(height: 42)
-            HStack(spacing: 20) {
-                ForEach(tabs, id: \.0) {item in
-                    Button {tab = item.0} label: {
-                        HStack(spacing: 6) {Image(systemName: item.2); Text(item.1)}.font(.system(size: 12, weight: tab == item.0 ? .medium : .regular))
-                            .foregroundStyle(tab == item.0 ? .primary : .secondary).frame(height: 35)
-                            .overlay(alignment: .bottom) {if tab == item.0 {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
-                    }.buttonStyle(.plain)
-                }
-                if selectedDiff != nil {Button {tab = "diff"} label: {Label("差分", systemImage: "plus.forwardslash.minus").font(.system(size: 12)).foregroundStyle(tab == "diff" ? .primary : .secondary)}.buttonStyle(.plain)}
-                Spacer(minLength: 0)
-            }.padding(.horizontal, 20)
+            tabBar
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
-                ZStack {
-                    ForEach(["codex", "claude", "shell"], id: \.self) {provider in
-                        TerminalPane(workspace: workspace, provider: provider, visible: tab == provider && model.selectedId == workspace.id)
-                            .opacity(tab == provider ? 1 : 0).allowsHitTesting(tab == provider).accessibilityHidden(tab != provider)
-                    }
-                    FilePane(workspace: workspace, visible: tab == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile).opacity(tab == "files" ? 1 : 0).allowsHitTesting(tab == "files").accessibilityHidden(tab != "files")
-                    BrowserPane(workspaceId: workspace.id, visible: tab == "browser" && model.selectedId == workspace.id).opacity(tab == "browser" ? 1 : 0).allowsHitTesting(tab == "browser").accessibilityHidden(tab != "browser")
-                    if let diff = selectedDiff, tab == "diff" {
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(diff.path).font(.system(size: 12, design: .monospaced)).padding(14)
-                            Divider()
-                            NativeTextEditor(text: .constant(diff.content), editable: false, diff: true)
-                        }
-                    }
-                }.frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
-                if model.showInspector {
-                    VStack(spacing: 0) {
-                        Picker("右サイドバー", selection: $inspector) {Text("エクスプローラー").tag("files"); Text("Git").tag("git"); Text("GitHub").tag("github")}.pickerStyle(.segmented).labelsHidden().padding(6)
-                        Divider()
-                        if inspector == "files" {
-                            HStack {Text((workspace.path as NSString).lastPathComponent).lineLimit(1); Spacer(); Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")}.font(.system(size: 11)).padding(10)
-                            ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: requestedFile, onSelect: {path in requestedFile = path; tab = "files"}).id(treeVersion).padding(.horizontal, 8)}
-                        } else if inspector == "github" {
-                            GitHubSidebar(workspace: workspace, visible: model.showInspector && model.selectedId == workspace.id, openTerminal: {tab = "shell"})
-                        } else if workspace.supportsGit {
-                            VStack(alignment: .leading, spacing: 0) {
-                                HStack {Text("変更").font(.system(size: 12, weight: .medium)); Text("\(git.changes.count)").font(.system(size: 11)).foregroundStyle(.tertiary); Spacer(); Button {Task {await refreshGit()}} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("差分を更新")}.padding(15)
-                                if let gitError {Text(gitError).font(.system(size: 11)).foregroundStyle(.secondary).padding(15)}
-                                if git.changes.isEmpty && gitError == nil {
-                                    VStack(spacing: 9) {Image(systemName: "checkmark.circle").font(.system(size: 22, weight: .light)); Text("変更はありません").font(.system(size: 11))}.foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.top, 48)
-                                }
-                                ScrollView {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        ForEach(git.changes) {change in
-                                            Button {Task {do {selectedDiff = try await model.api.get("v1/workspaces/\(workspace.id)/diff", query: ["path": change.path]); tab = "diff"} catch {model.report(error)}}} label: {
-                                                HStack(spacing: 8) {Text(change.status.trimmingCharacters(in: .whitespaces)).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(change.status == "??" ? .green : .orange).frame(width: 17); Text(change.path).font(.system(size: 11)).lineLimit(1).truncationMode(.middle); Spacer(minLength: 0)}.padding(.horizontal, 12).padding(.vertical, 7).contentShape(Rectangle())
-                                            }.buttonStyle(.plain).help(change.path)
-                                        }
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                            }
-                        } else {Text("このフォルダではGitを使用していません。").font(.system(size: 12)).foregroundStyle(.secondary).padding(12); Spacer()}
-                    }.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)
-                }
+                contents.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+                if model.showInspector {inspectorPane.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)}
             }
             Rectangle().fill(Palette.line).frame(height: 1)
-            HStack {Text(workspace.path).lineLimit(1).truncationMode(.middle); Spacer(); if model.busy {ProgressView().controlSize(.mini)}; if workspace.supportsGit {Text("\(git.changes.count) files changed")}}.font(.system(size: 10)).foregroundStyle(.tertiary).padding(.horizontal, 16).frame(height: 27)
+            HStack(spacing: 10) {
+                if workspace.supportsGit {
+                    Label(git.branch.isEmpty ? workspace.branch : git.branch, systemImage: "arrow.triangle.branch")
+                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: 180, alignment: .leading)
+                        .help(git.branch.isEmpty ? workspace.branch : git.branch)
+                }
+                Text(workspace.path).lineLimit(1).truncationMode(.middle).help(workspace.path)
+                Spacer(minLength: 0)
+                if model.busy {ProgressView().controlSize(.mini)}
+                if workspace.supportsGit {Text("\(git.changes.count) files changed").fixedSize()}
+            }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
         }
-        .onAppear {
-            inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
-            if tab == "github" {tab = "codex"; inspector = "github"; model.showInspector = true}
-        }
+        .onAppear {restore()}
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
-        .onChange(of: tab) {_, value in UserDefaults.standard.set(value, forKey: "tab.\(workspace.id)")}
-        .task {
+        .onChange(of: layout.tabs) {_, _ in persist()}
+        .onChange(of: layout.selectedId) {_, _ in persist()}
+        .confirmationDialog("タブを閉じてプロセスを停止しますか？", isPresented: Binding(get: {closingTab != nil}, set: {if !$0 {closingTab = nil}})) {
+            if let item = closingTab {
+                Button("停止して閉じる", role: .destructive) {
+                    Task {
+                        if let terminal = model.terminal(id: item.terminalId), !(await model.stopTerminal(terminal)) {return}
+                        remove(item)
+                    }
+                }
+                Button("キャンセル", role: .cancel) {closingTab = nil}
+            }
+        } message: {Text("このタブで実行中のCLIやコマンドを終了します。")}
+        .task(id: workspace.supportsGit) {
             while !Task.isCancelled {if model.selectedId == workspace.id {await refreshGit()}; try? await Task.sleep(for: .seconds(3))}
         }
     }
+    private var tabBar: some View {
+        HStack(spacing: 0) {
+            ScrollViewReader {proxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(layout.tabs) {item in
+                            HStack(spacing: 8) {
+                                Button {layout.selectedId = item.id} label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: item.icon)
+                                        Text(item.title).lineLimit(1)
+                                        if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
+                                    }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
+                                }.buttonStyle(.plain)
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.busy).help("\(item.title)を閉じる")
+                            }
+                            .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
+                            .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
+                            .overlay(alignment: .bottom) {if layout.selectedId == item.id {Rectangle().fill(Color.accentColor).frame(height: 2)}}
+                            .id(item.id)
+                        }
+                    }
+                }.scrollIndicators(.hidden)
+                .onChange(of: layout.selectedId) {_, id in if let id {proxy.scrollTo(id)}}
+            }
+            Menu {addTabButtons} label: {Image(systemName: "plus").frame(width: 28, height: 32)}
+                .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加")
+        }.frame(height: 32)
+    }
+    @ViewBuilder private var addTabButtons: some View {
+        Button {add("codex")} label: {Label("Codex", systemImage: "sparkle")}
+        Button {add("claude")} label: {Label("Claude Code", systemImage: "asterisk")}
+        Button {add("shell")} label: {Label("Terminal", systemImage: "terminal")}
+        Button {add("browser")} label: {Label("Browser", systemImage: "globe")}
+
+    }
+    private var contents: some View {
+        ZStack {
+            if layout.tabs.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "plus.square.on.square").font(.system(size: 28, weight: .ultraLight)).foregroundStyle(.secondary)
+                    Text("タブを追加して作業を始める").font(.system(size: 18, weight: .medium))
+                    HStack(spacing: 12) {addTabButtons}.controlSize(.large)
+                    Text("同じ種類のタブも、複数開けます。").font(.system(size: 12)).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            ForEach($layout.tabs) {$item in
+                let active = layout.selectedId == item.id
+                let visible = active && model.selectedId == workspace.id
+                Group {
+                    if item.isTerminal {TerminalPane(workspace: workspace, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible)}
+
+                }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
+            }
+            // Keep drafts mounted even when the editor tab is closed.
+            FilePane(workspace: workspace, visible: activeKind == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile)
+                .opacity(activeKind == "files" ? 1 : 0).allowsHitTesting(activeKind == "files").accessibilityHidden(activeKind != "files")
+            if activeKind == "diff" {
+                if let diff = selectedDiff {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(diff.path).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle).help(diff.path).padding(.horizontal, 8).frame(height: 28)
+                        Divider()
+                        NativeTextEditor(text: .constant(diff.content), editable: false, diff: true)
+                    }
+                } else {Text("右のGit一覧から差分を選択").foregroundStyle(.secondary)}
+            }
+        }
+    }
+    private var inspectorPane: some View {
+        VStack(spacing: 0) {
+            Picker("右サイドバー", selection: $inspector) {
+                Text("エクスプローラー").tag("files")
+                Text("Git").tag("git")
+                Text("GitHub").tag("github")
+            }.pickerStyle(.segmented).labelsHidden().padding(6)
+            Divider()
+            if inspector == "files" {
+                HStack {
+                    Text((workspace.path as NSString).lastPathComponent).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                    Spacer()
+                    Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")
+                }.padding(.horizontal, 8).frame(height: 28)
+                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: requestedFile, onSelect: {path in requestedFile = path; showUtility("files")}).id(treeVersion).padding(.horizontal, 10)}
+            } else if inspector == "github" {
+                GitHubSidebar(workspace: workspace, visible: model.showInspector && model.selectedId == workspace.id, openTerminal: {add("shell")})
+            } else if workspace.supportsGit {gitPane}
+            else {Text("このフォルダではGitを使用していません。").font(.system(size: 12)).foregroundStyle(.secondary).padding(18); Spacer()}
+        }
+    }
+    private var gitPane: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Label(git.branch.isEmpty ? workspace.branch : git.branch, systemImage: "arrow.triangle.branch").lineLimit(1)
+                Spacer()
+                Button {Task {await refreshGit()}} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("差分を更新")
+            }.font(.system(size: 12)).padding(.horizontal, 8).frame(height: 28)
+            HStack {Text("変更"); Text("\(git.changes.count)").foregroundStyle(.secondary); Spacer()}.font(.system(size: 11, weight: .medium)).padding(.horizontal, 14).padding(.bottom, 8)
+            if let gitError {Text(gitError).font(.system(size: 11)).foregroundStyle(.secondary).padding(14)}
+            if git.changes.isEmpty && gitError == nil {Label("変更はありません", systemImage: "checkmark.circle").font(.system(size: 12)).foregroundStyle(.tertiary).padding(14)}
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(git.changes) {change in
+                        Button {Task {do {selectedDiff = try await model.api.get("v1/workspaces/\(workspace.id)/diff", query: ["path": change.path]); showUtility("diff")} catch {model.report(error)}}} label: {
+                            HStack(spacing: 8) {
+                                Text(change.status.trimmingCharacters(in: .whitespaces)).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(change.status == "??" ? .green : .orange).frame(width: 20)
+                                Text(change.path).font(.system(size: 11)).lineLimit(1).truncationMode(.middle)
+                                Spacer(minLength: 0)
+                            }.padding(.horizontal, 12).padding(.vertical, 7).contentShape(Rectangle())
+                        }.buttonStyle(.plain).help(change.path)
+                    }
+                }
+            }
+        }
+    }
+    private func add(_ kind: String) {
+        let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
+        layout.tabs.append(item); layout.selectedId = item.id
+    }
+    private func showUtility(_ kind: String) {
+        if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
+    }
+    private func close(_ item: WorkspaceTab) {
+        if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
+    }
+    private func remove(_ item: WorkspaceTab) {
+        guard let index = layout.tabs.firstIndex(where: {$0.id == item.id}) else {return}
+        layout.tabs.remove(at: index)
+        if layout.selectedId == item.id {layout.selectedId = layout.tabs.isEmpty ? nil : layout.tabs[min(index, layout.tabs.count - 1)].id}
+    }
+    private func restore() {
+        guard !restored else {return}; restored = true
+        let saved = UserDefaults.standard.data(forKey: storageKey).flatMap {try? JSONDecoder().decode(WorkspaceTabState.self, from: $0)}
+        layout = saved ?? WorkspaceTabState()
+        inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
+        if layout.tabs.contains(where: {$0.kind == "github" && $0.id == layout.selectedId}) {
+            inspector = "github"; model.showInspector = true
+        }
+        layout.tabs.removeAll {$0.kind == "github"}
+        // Recover running sessions, including sessions opened while this UI was disconnected.
+        let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
+        for terminal in terminals.filter({terminal in terminal.status == "running" || (saved == nil && terminals.last(where: {$0.provider == terminal.provider})?.id == terminal.id)}) {
+            if !layout.tabs.contains(where: {$0.terminalId == terminal.id}) {
+                let number = (layout.tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1
+                layout.tabs.append(WorkspaceTab(kind: terminal.provider, number: number, terminalId: terminal.id))
+            }
+        }
+        if !layout.tabs.contains(where: {$0.id == layout.selectedId}) {layout.selectedId = layout.tabs.first?.id}
+        persist()
+    }
+    private func persist() {guard restored, let data = try? JSONEncoder().encode(layout) else {return}; UserDefaults.standard.set(data, forKey: storageKey)}
     private func refreshGit() async {guard workspace.supportsGit else {return}; do {git = try await model.api.get("v1/workspaces/\(workspace.id)/git"); gitError = nil} catch {gitError = error.localizedDescription}}
 }
 
@@ -103,15 +230,15 @@ struct TerminalPane: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
     let provider: String
+    @Binding var terminalId: String?
     let visible: Bool
     @State private var showStop = false
-    // Mount on first visit, then keep the emulator and output cursor until the session changes.
     @State private var hasBeenVisible = false
     @State private var attemptedAutoStart = false
     @State private var starting = false
-    private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "ターミナル"}
+    private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal"}
     var body: some View {
-        let terminal = model.terminal(workspaceId: workspace.id, provider: provider)
+        let terminal = model.terminal(id: terminalId)
         VStack(spacing: 0) {
             if let terminal {
                 HStack(spacing: 8) {
@@ -120,27 +247,22 @@ struct TerminalPane: View {
                     Spacer()
                     if terminal.status == "running" {Button("停止") {showStop = true}.font(.system(size: 11)).buttonStyle(.plain)}
                     else {
-                        if provider != "shell" {Button("履歴から再開") {Task {await model.openTerminal(workspace, provider: provider, resume: true)}}.font(.system(size: 11))}
-                        Button("新しく起動") {Task {await model.openTerminal(workspace, provider: provider)}}.font(.system(size: 11))
+                        if provider != "shell" {Button("履歴から再開") {launch(resume: true)}.font(.system(size: 11)).disabled(model.busy || !model.connected)}
+                        Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.busy || !model.connected)
                     }
-                }.padding(.horizontal, 16).frame(height: 32)
-                if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 14).padding(.bottom, 12).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
+                }.padding(.horizontal, 8).frame(height: 24)
+                if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
                 else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
             } else {
                 VStack(spacing: 16) {
                     Image(systemName: provider == "shell" ? "terminal" : "sparkle").font(.system(size: 30, weight: .ultraLight)).foregroundStyle(.secondary)
                     Text("\(title)で作業する").font(.system(size: 19, weight: .medium))
-                    Text(provider == "shell" ? "この作業フォルダでシェルを開きます。" : "ログイン済みのCLIを、そのまま使えます。")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                    if starting {ProgressView("\(title)を起動中…")}
-                    else {
-                        Button("\(title)を起動") {Task {await model.openTerminal(workspace, provider: provider)}}.controlSize(.large).disabled(model.busy || !model.connected)
-                        if provider != "shell" {Button("以前の会話から再開") {Task {await model.openTerminal(workspace, provider: provider, resume: true)}}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.busy || !model.connected)}
-                    }
+                    Text(provider == "shell" ? "この作業フォルダでシェルを開きます。" : "ログイン済みのCLIを、そのまま使えます。").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Button("\(title)を起動") {launch()}.controlSize(.large).disabled(model.busy || !model.connected)
+                    if provider != "shell" {Button("以前の会話から再開") {launch(resume: true)}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.busy || !model.connected)}
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {activateIfNeeded()}
         .onChange(of: visible) {_, _ in activateIfNeeded()}
         .onChange(of: model.connected) {_, _ in activateIfNeeded()}
@@ -151,11 +273,14 @@ struct TerminalPane: View {
         hasBeenVisible = true
         guard model.connected, !attemptedAutoStart else {return}
         attemptedAutoStart = true
-        guard model.terminal(workspaceId: workspace.id, provider: provider) == nil else {return}
+        guard terminalId == nil else {return}
+        launch()
+    }
+    private func launch(resume: Bool = false) {
+        guard !starting else {return}
         starting = true
-        // Keep the request alive across tab switches; failures can be retried explicitly.
         Task {
-            await model.openTerminal(workspace, provider: provider)
+            if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {terminalId = terminal.id}
             starting = false
         }
     }
@@ -174,15 +299,22 @@ struct FilePane: View {
     var body: some View {
             VStack(spacing: 0) {
                 if let path = selected, let document = documents[path] {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 2) {ForEach(order, id: \.self) {name in
-                            Button {selected = name; requestedFile = name} label: {HStack(spacing: 5) {Text((name as NSString).lastPathComponent); if documents[name]?.dirty == true {Circle().frame(width: 5, height: 5)}}.font(.system(size: 11)).padding(10).background(selected == name ? Color.primary.opacity(0.05) : .clear)}.buttonStyle(.plain).help(name)
-                        }}
-                    }.frame(height: 36)
+                    HStack(spacing: 8) {
+                        ScrollView(.horizontal) {
+                            HStack(spacing: 2) {ForEach(order, id: \.self) {name in
+                                Button {selected = name; requestedFile = name} label: {
+                                    HStack(spacing: 5) {Text((name as NSString).lastPathComponent); if documents[name]?.dirty == true {Circle().frame(width: 5, height: 5)}}
+                                        .font(.system(size: 11)).padding(.horizontal, 8).frame(height: 30)
+                                        .background(selected == name ? Color.primary.opacity(0.05) : .clear)
+                                }.buttonStyle(.plain).help(name)
+                            }}
+                        }.scrollIndicators(.hidden)
+                        Text(document.dirty ? "未保存" : "保存済み").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
+                        Button("保存") {save(path)}.keyboardShortcut("s").controlSize(.small).disabled(!document.dirty || saving || !visible)
+                    }.padding(.trailing, 8).frame(height: 30)
                     Rectangle().fill(Palette.line).frame(height: 1)
                     if visible {NativeTextEditor(text: Binding(get: {documents[path]?.text ?? ""}, set: {documents[path]?.text = $0}), editable: true, diff: false).frame(maxWidth: .infinity, maxHeight: .infinity).id(path)}
                     else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
-                    HStack {Text(document.dirty ? "未保存" : "保存済み").foregroundStyle(.secondary); Spacer(); Button("保存") {save(path)}.keyboardShortcut("s").disabled(!document.dirty || saving || !visible)}.font(.system(size: 11)).padding(10)
                 } else {Text("ファイルを選択").font(.system(size: 12)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, maxHeight: .infinity)}
             }.frame(minWidth: 250, maxWidth: .infinity, maxHeight: .infinity)
         .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first; if let requestedFile {open(requestedFile)}}
@@ -191,7 +323,7 @@ struct FilePane: View {
     }
     private func open(_ path: String) {
         if documents[path] != nil {selected = path; return}
-        Task {do {let content: FileContent = try await model.api.get("v1/workspaces/\(workspace.id)/file", query: ["path": path]); documents[path] = OpenDocument(original: content, text: content.content); order.append(path); selected = path} catch {model.report(error)}}
+        Task {do {let content: FileContent = try await model.api.get("v1/workspaces/\(workspace.id)/file", query: ["path": path]); if documents[path] == nil {documents[path] = OpenDocument(original: content, text: content.content); order.append(path)}; selected = path} catch {model.report(error)}}
     }
     private func save(_ path: String) {
         guard let doc = documents[path] else {return}; saving = true
@@ -236,7 +368,7 @@ struct NativeTextEditor: NSViewRepresentable {
         editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false; editor.isAutomaticTextReplacementEnabled = false; editor.isAutomaticSpellingCorrectionEnabled = false
         editor.isHorizontallyResizable = true; editor.isVerticallyResizable = true; editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        editor.font = .monospacedSystemFont(ofSize: 12, weight: .regular); editor.textColor = .labelColor; editor.drawsBackground = false; editor.textContainerInset = NSSize(width: 14, height: 14)
+        editor.font = .monospacedSystemFont(ofSize: 12, weight: .regular); editor.textColor = .labelColor; editor.drawsBackground = false; editor.textContainerInset = NSSize(width: 8, height: 8)
         editor.delegate = context.coordinator; scroll.documentView = editor; return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {

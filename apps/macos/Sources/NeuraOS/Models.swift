@@ -7,6 +7,7 @@ struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: S
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
+    var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
     var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
     var projects: [Project] = []; var workspaces: [Workspace] = []; var terminals: [TerminalRecord] = []
 }
@@ -64,13 +65,19 @@ final class DaemonClient {
     @Published var error: String?
     @Published var busy = false
     @Published var showNewWorkspace = false
-    @Published var showInspector = true
+    @Published var showSidebar = UserDefaults.standard.object(forKey: "showLeftSidebar") as? Bool ?? true {
+        didSet {UserDefaults.standard.set(showSidebar, forKey: "showLeftSidebar")}
+    }
+    @Published var showInspector = UserDefaults.standard.object(forKey: "showRightSidebar") as? Bool ?? true {
+        didSet {UserDefaults.standard.set(showInspector, forKey: "showRightSidebar")}
+    }
     @Published var openedIds: Set<String> = []
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {state.projects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
-    init() {
+    init(startPolling: Bool = true) {
+        guard startPolling else {return}
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
         }
@@ -111,12 +118,19 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
-    func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async {
+    func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
         busy = true; defer {busy = false}
-        do {let _: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume]); await refresh()} catch {report(error)}
+        do {
+            // Check before sending: concurrent opens against legacy daemons can return the same PTY.
+            guard state.supportsMultipleTerminals else {
+                throw APIError(error: "daemon_update_required", message: "Daemonの更新が必要です。実行中の作業を終えてから pnpm service restart を実行してください。")
+            }
+            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
+            await refresh(); return terminal
+        } catch {report(error); return nil}
     }
-    func stopTerminal(_ terminal: TerminalRecord) async {
-        do {let _: OK = try await api.command(["type": "terminal.stop", "terminalId": terminal.id]); await refresh()} catch {report(error)}
+    @discardableResult func stopTerminal(_ terminal: TerminalRecord) async -> Bool {
+        do {let _: OK = try await api.command(["type": "terminal.stop", "terminalId": terminal.id]); await refresh(); return true} catch {report(error); return false}
     }
-    func terminal(workspaceId: String, provider: String) -> TerminalRecord? {state.terminals.last {$0.workspaceId == workspaceId && $0.provider == provider}}
+    func terminal(id: String?) -> TerminalRecord? {state.terminals.first {$0.id == id}}
 }

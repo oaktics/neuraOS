@@ -25,6 +25,12 @@ struct DaemonCapabilitiesContractTest {
         precondition(futureFeature.supportsGitHub)
         let incompatible = try decode(#"["github"]"#, version: 2)
         precondition(!incompatible.supportsGitHub)
+        precondition(!old.supportsMultipleTerminals)
+        precondition(!current.supportsMultipleTerminals, "The previous GitHub-capable daemon still deduplicates PTYs")
+        let multi = try decode(#"["github","terminal.multiple"]"#)
+        precondition(multi.supportsMultipleTerminals)
+        let incompatibleMulti = try decode(#"["terminal.multiple"]"#, version: 2)
+        precondition(!incompatibleMulti.supportsMultipleTerminals)
         print("Legacy and current daemon feature contracts passed")
     }
 }

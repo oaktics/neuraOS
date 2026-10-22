@@ -37,8 +37,11 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
     assert.equal((await get(`/v1/workspaces/${ws.id}/files?path=escape`)).statusCode,400);
     assert.equal((await get(`/v1/workspaces/${ws.id}/file?path=..%2Fdata%2Fdaemon-token`)).statusCode,400);
     assert.equal((await get(`/v1/workspaces/${ws.id}/file?path=.git`)).statusCode,400);
-    const terminal=(await cmd({type:'terminal.open',workspaceId:ws.id,provider:'shell'})).json();assert.ok(terminal.id);
-    const again=(await cmd({type:'terminal.open',workspaceId:ws.id,provider:'shell'})).json();assert.equal(again.id,terminal.id);
+    const openId=randomUUID(),openCommand={type:'terminal.open',workspaceId:ws.id,provider:'shell'};
+    const terminal=(await cmd(openCommand,openId)).json();assert.ok(terminal.id);
+    const replay=(await cmd(openCommand,openId)).json();assert.equal(replay.id,terminal.id);
+    const again=(await cmd(openCommand)).json();assert.notEqual(again.id,terminal.id);
+    assert.equal((await cmd({type:'terminal.input',terminalId:again.id,clientId:randomUUID(),data:"export NEURA_TAB_TEST=second; printf second-tab > second.txt\n"})).statusCode,200);
     const clientId=randomUUID(),inputId=randomUUID();
     const input={type:'terminal.input',terminalId:terminal.id,clientId,data:"printf 'persistent-output\\n'; printf x >> once.txt\n"};
     assert.equal((await cmd(input,inputId)).statusCode,200);assert.equal((await cmd(input,inputId)).statusCode,200);
@@ -46,6 +49,13 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
     let output:any;
     for(let i=0;i<60;i++){output=(await get(`/v1/terminals/${terminal.id}/output?after=0`)).json();if(await readFile(join(ws.path,'once.txt'),'utf8').then(s=>s==='x',()=>false))break;await new Promise(r=>setTimeout(r,50));}
     assert.equal(await readFile(join(ws.path,'once.txt'),'utf8'),'x');assert.match(output.data,/persistent-output/);
+    for(let i=0;i<60;i++){if(await readFile(join(ws.path,'second.txt'),'utf8').then(s=>s==='second-tab',()=>false))break;await new Promise(r=>setTimeout(r,50));}
+    assert.equal(await readFile(join(ws.path,'second.txt'),'utf8'),'second-tab');
+    // Stopping one tab must leave the other process usable.
+    assert.equal((await cmd({type:'terminal.stop',terminalId:again.id})).statusCode,200);
+    assert.equal((await cmd({type:'terminal.input',terminalId:terminal.id,clientId,data:"printf '%s' ${NEURA_TAB_TEST:-independent} > independent.txt\n"})).statusCode,200);
+    for(let i=0;i<60;i++){if(await readFile(join(ws.path,'independent.txt'),'utf8').then(s=>s==='independent',()=>false))break;await new Promise(r=>setTimeout(r,50));}
+    assert.equal(await readFile(join(ws.path,'independent.txt'),'utf8'),'independent');
     const reconnect=(await get(`/v1/terminals/${terminal.id}/output?after=0`)).json();assert.ok(reconnect.cursor>=output.cursor);assert.match(reconnect.data,/persistent-output/);
     const events=(await get('/v1/events?after=0')).json().events;assert.ok(events.length>0);
     const token=daemon.token;await daemon.app.close();daemon=await createDaemon(data);assert.equal(daemon.token,token);
@@ -93,10 +103,43 @@ test('ordinary folders support files, PTY and persistence without initializing G
     await assert.rejects(stat(join(folder,'.git')),{code:'ENOENT'});
     await daemon.app.close();daemon=await createDaemon(data);
     const restored=(await get('/v1/state')).json();assert.equal(restored.projects[0].isGit,false);assert.equal(restored.workspaces[0].id,ws.id);assert.equal(restored.workspaces[0].kind,'folder');
-    // Explicitly initializing later and reopening upgrades the same project/workspace.
+    // Polling upgrades the same project/workspace after git init, even before the first commit.
+    const running=(await cmd({type:'terminal.open',workspaceId:ws.id,provider:'shell'})).json();
     await git(folder,['init','-b','main']);
+    const states=await Promise.all([get('/v1/state'),get('/v1/state')]);
+    const state=states[0].json();assert.equal(state.projects[0].id,project.id);assert.equal(state.projects[0].isGit,true);
+    assert.equal(state.workspaces.length,1);assert.equal(state.workspaces[0].id,ws.id);assert.equal(state.workspaces[0].kind,'root');assert.equal(state.workspaces[0].branch,'main');
+    assert.equal(state.workspaces[0].path,ws.path);assert.ok(state.revision>restored.revision);
+    assert.equal(state.terminals.find((t:any)=>t.id===running.id).status,'running');
+    assert.equal(states[1].json().revision,state.revision);assert.equal((await get('/v1/state')).json().revision,state.revision);
+    assert.equal((await get(`/v1/workspaces/${ws.id}/git`)).statusCode,200);
+    assert.equal((await cmd({type:'terminal.input',terminalId:running.id,clientId:randomUUID(),data:'echo still-running\n'})).statusCode,200);
+    await git(folder,['config','user.name','Test']);await git(folder,['config','user.email','test@example.invalid']);
+    await git(folder,['add','.']);await git(folder,['commit','-m','initial']);
+    const created=await cmd({type:'workspace.create',projectId:project.id,name:'After git init'});assert.equal(created.statusCode,200);assert.equal(created.json().kind,'worktree');
     const upgraded=(await cmd({type:'project.add',path:folder})).json();assert.equal(upgraded.id,project.id);assert.equal(upgraded.isGit,true);
-    const state=(await get('/v1/state')).json();assert.equal(state.workspaces.length,1);assert.equal(state.workspaces[0].id,ws.id);assert.equal(state.workspaces[0].kind,'root');
+    await daemon.app.close();daemon=await createDaemon(data);
+    const persisted=(await get('/v1/state')).json();assert.equal(persisted.projects[0].isGit,true);assert.equal(persisted.workspaces[0].id,ws.id);assert.equal(persisted.workspaces[0].kind,'root');
+  } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('Git discovery tolerates unavailable folders and never broadens a folder to its parent repository',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'neura-discovery-')),parent=join(root,'parent'),child=join(parent,'child'),missing=join(root,'missing');
+  await mkdir(child,{recursive:true});await mkdir(missing);
+  const daemon=await createDaemon(join(root,'data'));
+  const get=()=>daemon.app.inject({url:'/v1/state',headers:{authorization:`Bearer ${daemon.token}`}});
+  const add=(path:string)=>daemon.app.inject({method:'POST',url:'/v1/commands',headers:{authorization:`Bearer ${daemon.token}`},payload:{operationId:randomUUID(),command:{type:'project.add',path}}});
+  try {
+    const project=(await add(child)).json();await add(missing);await rm(missing,{recursive:true});
+    await git(parent,['init','-b','main']);
+    let response=await get();assert.equal(response.statusCode,200);
+    let state=response.json();assert.equal(state.projects.find((p:any)=>p.id===project.id).isGit,false);assert.equal(state.workspaces[0].path,project.path);
+    await mkdir(join(child,'.git')); // An incomplete initialization is not a repository.
+    response=await get();assert.equal(response.statusCode,200);assert.equal(response.json().projects[0].isGit,false);
+    await git(child,['init','-b','nested']);
+    response=await get();assert.equal(response.statusCode,200);state=response.json();
+    assert.equal(state.projects[0].isGit,true);assert.equal(state.workspaces[0].path,project.path);assert.equal(state.workspaces[0].branch,'nested');
+    assert.equal(state.projects[1].isGit,false);
   } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
 });
 

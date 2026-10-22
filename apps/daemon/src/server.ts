@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import {z} from 'zod';
 import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
-import {mkdir,readFile,writeFile,chmod} from 'node:fs/promises';
+import {mkdir,readFile,writeFile,chmod,stat,realpath} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
 import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
@@ -72,7 +72,31 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
       case 'github.push':case 'github.create':case 'github.merge':return github.mutate(gitWorkspace(c.workspaceId).path,c);
     }
   }
-  app.get('/v1/state',async()=>{await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  let folderRefresh:Promise<void>|undefined;
+  function refreshFolderProjects(){
+    // State polling discovers git init without reopening the folder or replacing its IDs.
+    // Share concurrent probes, and do not put filesystem/Git reads on the PTY command queue.
+    folderRefresh??=Promise.all(store.list<Project>('projects').filter(p=>p.isGit===false).map(async candidate=>{
+      try {
+        const marker=await stat(join(candidate.path,'.git'));
+        if(!marker.isDirectory()&&!marker.isFile())return;
+        const root=(await work.git(candidate.path,['rev-parse','--show-toplevel'],2000)).trim();
+        if(await realpath(root)!==await realpath(candidate.path))return;
+        const branch=(await work.git(candidate.path,['branch','--show-current'],2000)).trim()||'(detached)';
+        // Re-read after async probes: project.add may already have upgraded this project.
+        const project=store.get<Project>('projects',candidate.id);
+        if(!project||project.isGit!==false||project.path!==candidate.path)return;
+        const workspace=store.list<Workspace>('workspaces').find(w=>w.projectId===project.id&&w.kind==='folder'&&w.path===project.path);
+        if(!workspace)return;
+        store.put('projects',{...project,isGit:true});
+        store.put('workspaces',{...workspace,kind:'root',branch});
+      } catch {
+        // Missing/offline folders and an incomplete git init must not break state polling.
+      }
+    })).then(()=>{}).finally(()=>{folderRefresh=undefined;});
+    return folderRefresh;
+  }
+  app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
@@ -105,6 +129,6 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue]);await sessionNames.close();await terminals.shutdown();store.close();});
+  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();});
   return {app,store,token};
 }

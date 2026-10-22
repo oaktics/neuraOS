@@ -6,8 +6,8 @@ import {randomUUID} from 'node:crypto';
 import {Fault} from './contracts.ts';
 import {hash} from './store.ts';
 const exec=promisify(execFile);
-export async function git(cwd:string,args:string[]){
-  try{return (await exec('git',['--no-optional-locks','-c','core.quotepath=false',...args],{cwd,maxBuffer:4*1024*1024,timeout:30000,env:{...process.env,GIT_TERMINAL_PROMPT:'0'}})).stdout;}
+export async function git(cwd:string,args:string[],timeout=30000){
+  try{return (await exec('git',['--no-optional-locks','-c','core.quotepath=false',...args],{cwd,maxBuffer:4*1024*1024,timeout,env:{...process.env,GIT_TERMINAL_PROMPT:'0'}})).stdout;}
   catch(e){throw new Fault('git_failed',(e as {stderr?:string}).stderr?.trim()||'Gitの操作に失敗しました。');}
 }
 export async function projectFolder(path:string){
