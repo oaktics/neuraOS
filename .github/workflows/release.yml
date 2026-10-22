@@ -9,6 +9,8 @@ permissions:
   contents: read
 concurrency:
   group: native-release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  # Main keeps the running release and only the newest pending run.
+  # Older pending runs may be replaced even when cancellation is false.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
