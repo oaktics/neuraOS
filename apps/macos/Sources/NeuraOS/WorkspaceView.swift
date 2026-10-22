@@ -5,6 +5,9 @@ struct WorkspaceView: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
     @State private var tab = "codex"
+    @State private var inspector = "files"
+    @State private var requestedFile: String?
+    @State private var treeVersion = 0
     @State private var git = GitStatus()
     @State private var selectedDiff: Diff?
     @State private var gitError: String?
@@ -25,14 +28,6 @@ struct WorkspaceView: View {
                             .overlay(alignment: .bottom) {if tab == item.0 {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
                     }.buttonStyle(.plain)
                 }
-                if workspace.supportsGit {
-                    Button {tab = "github"} label: {
-                        Label("GitHub", systemImage: "arrow.triangle.pull").font(.system(size: 12, weight: tab == "github" ? .medium : .regular))
-                            .foregroundStyle(tab == "github" ? .primary : .secondary).frame(height: 35)
-                            .overlay(alignment: .bottom) {if tab == "github" {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
-                    }.buttonStyle(.plain).disabled(!model.supportsGitHub)
-                        .help(model.supportsGitHub ? "PR・レビュー・CI を確認" : "GitHub 連携には更新済みの Daemon が必要です。作業を保存してから Daemon を更新・再起動してください。")
-                }
                 if selectedDiff != nil {Button {tab = "diff"} label: {Label("差分", systemImage: "plus.forwardslash.minus").font(.system(size: 12)).foregroundStyle(tab == "diff" ? .primary : .secondary)}.buttonStyle(.plain)}
                 Spacer(minLength: 0)
             }.padding(.horizontal, 20)
@@ -43,21 +38,8 @@ struct WorkspaceView: View {
                         TerminalPane(workspace: workspace, provider: provider, visible: tab == provider && model.selectedId == workspace.id)
                             .opacity(tab == provider ? 1 : 0).allowsHitTesting(tab == provider).accessibilityHidden(tab != provider)
                     }
-                    FilePane(workspace: workspace, visible: tab == "files" && model.selectedId == workspace.id).opacity(tab == "files" ? 1 : 0).allowsHitTesting(tab == "files").accessibilityHidden(tab != "files")
+                    FilePane(workspace: workspace, visible: tab == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile).opacity(tab == "files" ? 1 : 0).allowsHitTesting(tab == "files").accessibilityHidden(tab != "files")
                     BrowserPane(workspaceId: workspace.id, visible: tab == "browser" && model.selectedId == workspace.id).opacity(tab == "browser" ? 1 : 0).allowsHitTesting(tab == "browser").accessibilityHidden(tab != "browser")
-                    if workspace.supportsGit {
-                        if model.supportsGitHub {
-                            GitHubPane(workspace: workspace, visible: tab == "github" && model.selectedId == workspace.id)
-                                .opacity(tab == "github" ? 1 : 0).allowsHitTesting(tab == "github").accessibilityHidden(tab != "github")
-                        } else if tab == "github" {
-                            // A saved tab selection must not issue requests to an older daemon.
-                            VStack(spacing: 12) {
-                                Text(model.connected ? "GitHub 連携には Daemon の更新が必要です" : "Daemon への接続を確認しています…").font(.headline)
-                                Text("作業を保存してから Daemon を更新・再起動してください。再起動すると実行中のターミナルは終了します。")
-                                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
-                    }
                     if let diff = selectedDiff, tab == "diff" {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(diff.path).font(.system(size: 12, design: .monospaced)).padding(14)
@@ -66,30 +48,46 @@ struct WorkspaceView: View {
                         }
                     }
                 }.frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
-                if model.showInspector && workspace.supportsGit {
-                    VStack(alignment: .leading, spacing: 0) {
-                        HStack {Text("変更").font(.system(size: 12, weight: .medium)); Text("\(git.changes.count)").font(.system(size: 11)).foregroundStyle(.tertiary); Spacer(); Button {Task {await refreshGit()}} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("差分を更新")}.padding(15)
-                        if let gitError {Text(gitError).font(.system(size: 11)).foregroundStyle(.secondary).padding(15)}
-                        if git.changes.isEmpty && gitError == nil {
-                            VStack(spacing: 9) {Image(systemName: "checkmark.circle").font(.system(size: 22, weight: .light)); Text("変更はありません").font(.system(size: 11))}.foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.top, 48)
-                        }
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(git.changes) {change in
-                                    Button {Task {do {selectedDiff = try await model.api.get("v1/workspaces/\(workspace.id)/diff", query: ["path": change.path]); tab = "diff"} catch {model.report(error)}}} label: {
-                                        HStack(spacing: 8) {Text(change.status.trimmingCharacters(in: .whitespaces)).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(change.status == "??" ? .green : .orange).frame(width: 17); Text(change.path).font(.system(size: 11)).lineLimit(1).truncationMode(.middle); Spacer(minLength: 0)}.padding(.horizontal, 12).padding(.vertical, 7).contentShape(Rectangle())
-                                    }.buttonStyle(.plain).help(change.path)
+                if model.showInspector {
+                    VStack(spacing: 0) {
+                        Picker("右サイドバー", selection: $inspector) {Text("エクスプローラー").tag("files"); Text("Git").tag("git"); Text("GitHub").tag("github")}.pickerStyle(.segmented).labelsHidden().padding(6)
+                        Divider()
+                        if inspector == "files" {
+                            HStack {Text((workspace.path as NSString).lastPathComponent).lineLimit(1); Spacer(); Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")}.font(.system(size: 11)).padding(10)
+                            ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: requestedFile, onSelect: {path in requestedFile = path; tab = "files"}).id(treeVersion).padding(.horizontal, 8)}
+                        } else if inspector == "github" {
+                            GitHubSidebar(workspace: workspace, visible: model.showInspector && model.selectedId == workspace.id, openTerminal: {tab = "shell"})
+                        } else if workspace.supportsGit {
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack {Text("変更").font(.system(size: 12, weight: .medium)); Text("\(git.changes.count)").font(.system(size: 11)).foregroundStyle(.tertiary); Spacer(); Button {Task {await refreshGit()}} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("差分を更新")}.padding(15)
+                                if let gitError {Text(gitError).font(.system(size: 11)).foregroundStyle(.secondary).padding(15)}
+                                if git.changes.isEmpty && gitError == nil {
+                                    VStack(spacing: 9) {Image(systemName: "checkmark.circle").font(.system(size: 22, weight: .light)); Text("変更はありません").font(.system(size: 11))}.foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.top, 48)
                                 }
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        ForEach(git.changes) {change in
+                                            Button {Task {do {selectedDiff = try await model.api.get("v1/workspaces/\(workspace.id)/diff", query: ["path": change.path]); tab = "diff"} catch {model.report(error)}}} label: {
+                                                HStack(spacing: 8) {Text(change.status.trimmingCharacters(in: .whitespaces)).font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(change.status == "??" ? .green : .orange).frame(width: 17); Text(change.path).font(.system(size: 11)).lineLimit(1).truncationMode(.middle); Spacer(minLength: 0)}.padding(.horizontal, 12).padding(.vertical, 7).contentShape(Rectangle())
+                                            }.buttonStyle(.plain).help(change.path)
+                                        }
+                                    }
+                                }
+                                Spacer(minLength: 0)
                             }
-                        }
-                        Spacer(minLength: 0)
-                    }.frame(minWidth: 180, idealWidth: 235, maxWidth: 280)
+                        } else {Text("このフォルダではGitを使用していません。").font(.system(size: 12)).foregroundStyle(.secondary).padding(12); Spacer()}
+                    }.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)
                 }
             }
             Rectangle().fill(Palette.line).frame(height: 1)
             HStack {Text(workspace.path).lineLimit(1).truncationMode(.middle); Spacer(); if model.busy {ProgressView().controlSize(.mini)}; if workspace.supportsGit {Text("\(git.changes.count) files changed")}}.font(.system(size: 10)).foregroundStyle(.tertiary).padding(.horizontal, 16).frame(height: 27)
         }
-        .onAppear {tab = UserDefaults.standard.string(forKey: "tab.\(workspace.id)") ?? "codex"}
+        .onAppear {
+            tab = UserDefaults.standard.string(forKey: "tab.\(workspace.id)") ?? "codex"
+            inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
+            if tab == "github" {tab = "codex"; inspector = "github"; model.showInspector = true}
+        }
+        .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
         .onChange(of: tab) {_, value in UserDefaults.standard.set(value, forKey: "tab.\(workspace.id)")}
         .task {
             while !Task.isCancelled {if model.selectedId == workspace.id {await refreshGit()}; try? await Task.sleep(for: .seconds(3))}
@@ -146,22 +144,17 @@ struct FilePane: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
     let visible: Bool
+    @Binding var requestedFile: String?
     @State private var documents: [String: OpenDocument] = [:]
     @State private var order: [String] = []
     @State private var selected: String?
-    @State private var treeVersion = 0
     @State private var saving = false
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {Text("ファイル").font(.system(size: 11)).foregroundStyle(.secondary); Spacer(); Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")}.padding(13)
-                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: selected, onSelect: open).id(treeVersion).padding(.horizontal, 8)}
-            }.frame(minWidth: 145, idealWidth: 190, maxWidth: 220)
             VStack(spacing: 0) {
                 if let path = selected, let document = documents[path] {
                     ScrollView(.horizontal) {
                         HStack(spacing: 2) {ForEach(order, id: \.self) {name in
-                            Button {selected = name} label: {HStack(spacing: 5) {Text((name as NSString).lastPathComponent); if documents[name]?.dirty == true {Circle().frame(width: 5, height: 5)}}.font(.system(size: 11)).padding(10).background(selected == name ? Color.primary.opacity(0.05) : .clear)}.buttonStyle(.plain).help(name)
+                            Button {selected = name; requestedFile = name} label: {HStack(spacing: 5) {Text((name as NSString).lastPathComponent); if documents[name]?.dirty == true {Circle().frame(width: 5, height: 5)}}.font(.system(size: 11)).padding(10).background(selected == name ? Color.primary.opacity(0.05) : .clear)}.buttonStyle(.plain).help(name)
                         }}
                     }.frame(height: 36)
                     Rectangle().fill(Palette.line).frame(height: 1)
@@ -170,8 +163,8 @@ struct FilePane: View {
                     HStack {Text(document.dirty ? "未保存" : "保存済み").foregroundStyle(.secondary); Spacer(); Button("保存") {save(path)}.keyboardShortcut("s").disabled(!document.dirty || saving || !visible)}.font(.system(size: 11)).padding(10)
                 } else {Text("ファイルを選択").font(.system(size: 12)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, maxHeight: .infinity)}
             }.frame(minWidth: 250, maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first}
+        .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first; if let requestedFile {open(requestedFile)}}
+        .onChange(of: requestedFile) {_, path in if let path {open(path)}}
         .onChange(of: documents) {_, value in DraftCache.shared.update(workspace.id, value)}
     }
     private func open(_ path: String) {
