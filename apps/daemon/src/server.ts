@@ -51,6 +51,10 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
         if(record.kind!=='worktree')throw new Fault('worktree_required','削除できるのは追加したworktreeだけです。');
         if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
         const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
+        // Git removes ignored files even without --force. Protect local secrets,
+        // databases and ignored directories before handing removal over to Git.
+        const ignored=await work.git(record.path,['ls-files','--others','--ignored','--exclude-standard','--directory','-z']);
+        if(ignored.length)throw new Fault('workspace_ignored_files','Gitの無視対象ファイル・フォルダがあります（.envやローカルDBなど）。必要なデータを移動してから削除してください。',409);
         // Never force removal: Git protects dirty, untracked and locked worktrees.
         // Keep the branch so committed work remains recoverable.
         await work.git(project.path,['worktree','remove','--',record.path]);

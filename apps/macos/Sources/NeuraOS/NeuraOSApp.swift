@@ -125,7 +125,7 @@ struct Sidebar: View {
             Button("キャンセル", role: .cancel) {deleting = nil}
             Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
         } message: {workspace in
-            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。未コミットの変更や実行中のターミナルがある場合は削除できません。")
+            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。未コミットの変更、Gitの無視対象ファイル・フォルダ（.envなど）、実行中のターミナルがある場合は削除できません。")
         }
     }
 }

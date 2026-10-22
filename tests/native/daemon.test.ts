@@ -119,6 +119,18 @@ test('worktree deletion protects active work and removes persisted records while
     await writeFile(join(ws.path,'untracked.txt'),'keep');
     assert.equal((await cmd(remove)).json().error,'git_failed');
     await rm(join(ws.path,'untracked.txt'));
+    await writeFile(join(ws.path,'.gitignore'),'.env\nlocal-data/\n');
+    await git(ws.path,['add','.gitignore']);await git(ws.path,['commit','-m','ignore local data']);
+    await writeFile(join(ws.path,'.env'),'LOCAL_SECRET=keep\n');
+    assert.equal((await cmd(remove)).json().error,'workspace_ignored_files');
+    assert.equal(await readFile(join(ws.path,'.env'),'utf8'),'LOCAL_SECRET=keep\n');
+    assert.ok(daemon.store.state().workspaces.some(w=>w.id===ws.id));
+    await rm(join(ws.path,'.env'));
+    await mkdir(join(ws.path,'local-data'));
+    await writeFile(join(ws.path,'local-data','database.sqlite'),'local database');
+    assert.equal((await cmd(remove)).json().error,'workspace_ignored_files');
+    assert.equal(await readFile(join(ws.path,'local-data','database.sqlite'),'utf8'),'local database');
+    await rm(join(ws.path,'local-data'),{recursive:true});
     await git(repo,['worktree','lock',ws.path]);
     assert.equal((await cmd(remove)).json().error,'git_failed');
     await git(repo,['worktree','unlock',ws.path]);
