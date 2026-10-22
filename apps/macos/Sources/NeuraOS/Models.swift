@@ -6,6 +6,8 @@ struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId
 struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
+    var features: [String]?
+    var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
     var projects: [Project] = []; var workspaces: [Workspace] = []; var terminals: [TerminalRecord] = []
 }
 struct FileEntry: Codable, Identifiable {var id: String {path}; let name: String; let path: String; let isDirectory: Bool}
@@ -67,6 +69,7 @@ final class DaemonClient {
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {state.projects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
+    var supportsGitHub: Bool {connected && state.supportsGitHub}
     init() {
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
@@ -76,7 +79,8 @@ final class DaemonClient {
         do {
             let next: Snapshot = try await api.get("v1/state")
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
-            if next.revision != state.revision || !connected {state = next}
+            // A daemon upgrade can change features without changing stored data/revision.
+            if next.revision != state.revision || next.features != state.features || !connected {state = next}
             connected = true
             if !state.workspaces.contains(where: {$0.id == selectedId}) {select(state.workspaces.first?.id)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}

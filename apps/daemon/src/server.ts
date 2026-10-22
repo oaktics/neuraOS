@@ -4,7 +4,7 @@ import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {mkdir,readFile,writeFile,chmod} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
-import {Envelope,Fault,requireValue,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
+import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
 import * as work from './workspace.ts';
@@ -54,8 +54,8 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
       case 'github.push':case 'github.create':case 'github.merge':return github.mutate(gitWorkspace(c.workspaceId).path,c);
     }
   }
-  app.get('/v1/state',async()=>{await sessionNames.refresh();return store.state();});
-  app.get('/v1/capabilities',async()=>({protocolVersion:1,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
+  app.get('/v1/state',async()=>{await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));

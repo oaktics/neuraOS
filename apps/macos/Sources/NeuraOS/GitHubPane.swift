@@ -162,7 +162,7 @@ struct GitHubPane: View {
         }
     }
     @MainActor private func refresh() async {
-        guard !refreshing else {return}; refreshing = true; defer {refreshing = false}
+        guard model.supportsGitHub, !refreshing else {return}; refreshing = true; defer {refreshing = false}
         do {
             let value: GitHubSnapshot = try await model.api.get("v1/workspaces/\(workspace.id)/github")
             snapshot = value; error = nil
@@ -182,7 +182,7 @@ struct GitHubPane: View {
         showConfirmation = true
     }
     @MainActor private func perform(_ command: [String: Any], push: Bool = false) async -> Bool {
-        guard !busy else {return false}; busy = true; notice = nil; defer {busy = false}
+        guard model.supportsGitHub, !busy else {return false}; busy = true; notice = nil; defer {busy = false}
         do {
             if push {
                 var pushCommand = command; pushCommand["type"] = "github.push"
