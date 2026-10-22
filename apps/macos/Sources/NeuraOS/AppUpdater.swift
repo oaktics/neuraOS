@@ -10,6 +10,7 @@ struct NativeRelease: Decodable {
 @MainActor final class AppUpdater: ObservableObject {
     @Published var presented = false
     @Published var busy = false
+    @Published private(set) var restarting = false
     @Published var message = ""
     @Published var release: NativeRelease?
     var currentBuild: Int {Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0}
@@ -48,8 +49,21 @@ struct NativeRelease: Decodable {
             do {
                 _ = try await run(["prepare", release.tag, String(ProcessInfo.processInfo.processIdentifier)])
                 DraftCache.shared.flush()
+                // SwiftUI's dismissal lock can veto application termination while
+                // the update sheet is attached. Unlock and dismiss it first.
+                restarting = true
+                presented = false
+                try await Task.sleep(for: .milliseconds(300))
                 NSApp.terminate(nil)
-            } catch {message = error.localizedDescription; busy = false}
+                // terminate can return if another window cancels termination.
+                // Wait for the installer to abandon its 60-second exit wait before
+                // allowing another install, so two installers cannot race.
+                try await Task.sleep(for: .seconds(65))
+                restarting = false
+                busy = false
+                message = "アプリを終了できなかったため更新を中止しました。作業を保存し、アプリを終了してから再度お試しください。"
+                presented = true
+            } catch {message = error.localizedDescription; restarting = false; busy = false; presented = true}
         }
     }
 
@@ -60,25 +74,8 @@ struct NativeRelease: Decodable {
         guard let node else {throw updateError("更新にはNode.js 24が必要です。初回は配布版をインストールしてください。")}
         let script = resources.appendingPathComponent(bundledScript ? "Runtime/scripts/native/release/update.mjs" : "update.mjs").path
         return try await Task.detached(priority: .utility) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: node)
-            process.arguments = [script] + arguments
-            var environment = ProcessInfo.processInfo.environment
-            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
-            process.environment = environment
-            // File-backed output avoids pipe deadlocks during a long download.
-            let log = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
-            defer {try? FileManager.default.removeItem(at: log)}
-            let handle = try FileHandle(forWritingTo: log)
-            defer {try? handle.close()}
-            process.standardOutput = handle; process.standardError = handle
-            try process.run(); process.waitUntilExit()
-            let data = try Data(contentsOf: log)
-            guard process.terminationStatus == 0 else {
-                throw NSError(domain: "neuraOS.Update", code: 1, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "更新に失敗しました。"])
-            }
-            return data
+            try UpdateProcess.run(executable: node, arguments: [script] + arguments,
+                                  timeout: arguments.first == "prepare" ? nil : 90)
         }.value
     }
     private func updateError(_ text: String) -> NSError {NSError(domain: "neuraOS.Update", code: 1, userInfo: [NSLocalizedDescriptionKey: text])}
@@ -101,6 +98,6 @@ struct AppUpdateView: View {
                 if updater.release != nil {Button("更新して再起動") {updater.install()}.disabled(updater.busy)}
                 else {Button("再確認") {updater.check()}.disabled(updater.busy)}
             }
-        }.padding(24).frame(width: 440).interactiveDismissDisabled(updater.busy)
+        }.padding(24).frame(width: 440).interactiveDismissDisabled(updater.busy && !updater.restarting)
     }
 }
