@@ -26,9 +26,6 @@ export class Terminals {
   private closing=false;
   constructor(readonly store:Store){}
   async open(workspace:Workspace,provider:Provider,resume:boolean){
-    const existing=this.store.list<TerminalRecord>('terminals').find(t=>t.workspaceId===workspace.id&&t.provider===provider&&t.status==='running');
-    if(existing)return existing;
-    if(this.processes.size>=24)throw new Fault('terminal_limit','同時に開けるターミナルは24個までです。');
     const program=await executable(provider),id=randomUUID();
     const env:Record<string,string>={HOME:homedir(),USER:process.env.USER??'',SHELL:'/bin/zsh',TERM:'xterm-256color',LANG:process.env.LANG??'en_US.UTF-8',PATH:[join(homedir(),'.local/bin'),'/opt/homebrew/bin','/usr/local/bin',process.env.PATH??'/usr/bin:/bin'].join(delimiter)};
     // Interactive user CLIs retain normal login/config, with full access selected at launch.
