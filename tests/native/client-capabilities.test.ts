@@ -7,14 +7,16 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 
 const exec=promisify(execFile);
-test('native client decodes legacy v1 and gates GitHub on advertised features',{skip:process.platform!=='darwin',timeout:120000},async()=>{
+test('native client decodes legacy v1 and gates GitHub on advertised features',{skip:process.platform!=='darwin',timeout:210000},async()=>{
   const dir=await mkdtemp(join(tmpdir(),'neura-capabilities-'));
   try {
     const binary=join(dir,'capabilities');
+    // Fresh macOS runners may need over 90s to compile Swift SDK modules.
+    // Keep the executable timeout separate so contract failures still fail quickly.
     await exec('xcrun',['swiftc','-swift-version','5','-parse-as-library',
       resolve('apps/macos/Sources/NeuraOS/Models.swift'),
       resolve('apps/macos/Sources/NeuraOS/SidebarSpaces.swift'),
-      resolve('tests/native/fixtures/daemon-capabilities.swift'),'-o',binary],{timeout:90000});
+      resolve('tests/native/fixtures/daemon-capabilities.swift'),'-o',binary],{timeout:180000});
     const {stdout}=await exec(binary,[],{timeout:10000});
     assert.match(stdout,/Legacy and current daemon feature contracts passed/);
   } finally {await rm(dir,{recursive:true,force:true});}
