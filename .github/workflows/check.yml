@@ -15,4 +15,5 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
+      - run: pnpm test:macos
       - run: pnpm build

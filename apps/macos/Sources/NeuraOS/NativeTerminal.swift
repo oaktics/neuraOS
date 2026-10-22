@@ -6,6 +6,7 @@ import SwiftTerm
 struct NativeTerminal: NSViewRepresentable {
     let terminal: TerminalRecord
     let api: DaemonClient
+    let visible: Bool
     let onError: (Error) -> Void
     func makeCoordinator() -> Coordinator {Coordinator(terminal: terminal, api: api, onError: onError)}
     func makeNSView(context: Context) -> TerminalView {
@@ -15,25 +16,31 @@ struct NativeTerminal: NSViewRepresentable {
         view.terminalDelegate = context.coordinator
         context.coordinator.view = view
         context.coordinator.desiredSize = (view.getTerminal().cols, view.getTerminal().rows)
+        context.coordinator.setVisible(visible)
         context.coordinator.start()
         return view
     }
-    func updateNSView(_ view: TerminalView, context: Context) {context.coordinator.running = terminal.status == "running"}
-    static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {coordinator.polling?.cancel(); view.terminalDelegate = nil}
+    func updateNSView(_ view: TerminalView, context: Context) {
+        context.coordinator.running = terminal.status == "running"
+        context.coordinator.setVisible(visible)
+    }
+    static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {coordinator.stop(); view.terminalDelegate = nil}
     @MainActor final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
         weak var view: TerminalView?
         let terminal: TerminalRecord; let api: DaemonClient; let onError: (Error) -> Void
         var polling: Task<Void, Never>?
+        var delay: Task<Void, Never>?
         var running = true; var cursor = 0; var pendingInput = ""; var pendingSize: (Int, Int)?; var desiredSize: (Int, Int)?
+        var visible = false
         var applying = false; var caughtUp = false; var reportedError = false
-        init(terminal: TerminalRecord, api: DaemonClient, onError: @escaping (Error) -> Void) {self.terminal = terminal; self.api = api; self.onError = onError}
+        init(terminal: TerminalRecord, api: DaemonClient, onError: @escaping (Error) -> Void) {self.terminal = terminal; self.api = api; self.onError = onError; self.running = terminal.status == "running"}
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard !applying, newCols >= 20, newRows >= 5 else {return}
             desiredSize = (min(400, newCols), min(200, newRows))
-            if caughtUp {pendingSize = desiredSize}
+            if caughtUp && visible {pendingSize = desiredSize}
         }
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
-            guard running else {return}
+            guard running, applying || (visible && caughtUp) else {return}
             // Reply sequences from the emulator use the same ordered channel as keystrokes.
             pendingInput += String(decoding: data, as: UTF8.self)
         }
@@ -45,7 +52,57 @@ struct NativeTerminal: NSViewRepresentable {
             guard let url = URL(string: link), ["http", "https"].contains(url.scheme ?? "") else {return}
             NSWorkspace.shared.open(url)
         }
+        func stop() {
+            setVisible(false)
+            delay?.cancel()
+            polling?.cancel()
+            polling = nil
+        }
+        func setVisible(_ value: Bool) {
+            view?.isHidden = !value
+            guard visible != value else {return}
+            visible = value
+            if value {
+                delay?.cancel()
+                if caughtUp {pendingSize = desiredSize}
+                focusIfVisible()
+            } else {
+                pendingSize = nil
+                if let view, view.window?.firstResponder === view {view.window?.makeFirstResponder(nil)}
+            }
+        }
+        private func focusIfVisible() {
+            // SwiftUI may not have attached the view to its window yet.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, self.visible, self.caughtUp, let view = self.view else {return}
+                view.window?.makeFirstResponder(view)
+            }
+        }
+        func apply(_ output: TerminalOutput, to view: TerminalView) {
+            applying = true
+            for chunk in output.chunks {
+                if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
+                if !chunk.data.isEmpty {view.feed(text: chunk.data)}
+            }
+            applying = false; cursor = output.cursor
+            if !caughtUp && !output.more {
+                caughtUp = true
+                if visible, let size = desiredSize {applying = true; view.getTerminal().resize(cols: size.0, rows: size.1); applying = false; pendingSize = size}
+                focusIfVisible()
+            }
+            if visible && !output.chunks.isEmpty {view.needsDisplay = true}
+        }
+        private func pause(milliseconds: Int) async {
+            guard !Task.isCancelled else {return}
+            let wait = Task<Void, Never> {try? await Task.sleep(for: .milliseconds(milliseconds))}
+            // Cancelling this delay wakes a newly selected terminal immediately.
+            delay = wait
+            await withTaskCancellationHandler {await wait.value} onCancel: {wait.cancel()}
+            delay = nil
+        }
         func start() {
+            guard polling == nil else {return}
             polling = Task { [weak self] in
                 guard let self else {return}
                 while !Task.isCancelled {
@@ -54,30 +111,19 @@ struct NativeTerminal: NSViewRepresentable {
                             let input = String(pendingInput.prefix(8192)); pendingInput = String(pendingInput.dropFirst(8192))
                             let _: OK = try await api.command(["type": "terminal.input", "terminalId": terminal.id, "clientId": api.clientId, "data": input])
                         }
-                        if running, caughtUp, let size = pendingSize {
+                        if running, visible, caughtUp, let size = pendingSize {
                             pendingSize = nil
                             let _: OK = try await api.command(["type": "terminal.resize", "terminalId": terminal.id, "clientId": api.clientId, "cols": size.0, "rows": size.1])
                         }
                         let output: TerminalOutput = try await api.get("v1/terminals/\(terminal.id)/output", query: ["after": String(cursor)])
                         guard !Task.isCancelled, let view else {return}
-                        applying = true
-                        for chunk in output.chunks {
-                            if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
-                            if !chunk.data.isEmpty {view.feed(text: chunk.data)}
-                        }
-                        applying = false; cursor = output.cursor
-                        if !caughtUp && !output.more {
-                            caughtUp = true
-                            if let size = desiredSize {applying = true; view.getTerminal().resize(cols: size.0, rows: size.1); applying = false; pendingSize = size}
-                            view.window?.makeFirstResponder(view)
-                        }
-                        view.needsDisplay = true
+                        apply(output, to: view)
                         reportedError = false
-                        try? await Task.sleep(for: .milliseconds(output.more ? 10 : 60))
+                        await pause(milliseconds: output.more ? 10 : visible ? 60 : 500)
                     } catch {
                         applying = false
-                        if !reportedError, !(error is CancellationError) {reportedError = true; onError(error)}
-                        try? await Task.sleep(for: .seconds(2))
+                        if visible, !reportedError, !(error is CancellationError) {reportedError = true; onError(error)}
+                        await pause(milliseconds: 2000)
                     }
                 }
             }
