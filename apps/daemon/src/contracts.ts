@@ -9,7 +9,7 @@ export interface Workspace {id:string; projectId:string; name:string; path:strin
 export interface TerminalRecord {id:string; workspaceId:string; provider:Provider; status:'running'|'exited'|'interrupted'; createdAt:string; exitCode?:number; cols:number; rows:number}
 export const Command = z.discriminatedUnion('type', [
   z.object({type:z.literal('project.add'), path:z.string().min(1).max(4096)}),
-  z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80), baseRef:z.string().min(1).max(200).default('HEAD')}),
+  z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80).optional(), baseRef:z.string().min(1).max(200).default('HEAD')}),
   z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider, resume:z.boolean().default(false)}),
   z.object({type:z.literal('terminal.input'), terminalId:id, clientId:id, data:z.string().max(65536)}),
   z.object({type:z.literal('terminal.resize'), terminalId:id, clientId:id, cols:z.number().int().min(20).max(400), rows:z.number().int().min(5).max(200)}),
