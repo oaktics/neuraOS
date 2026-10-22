@@ -1,0 +1,79 @@
+name: native-release
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.0'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.9.0'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: node --test tests/release/*.test.mjs
+      - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
+      - run: pnpm test:macos
+      - run: pnpm build
+        env:
+          NEURA_BUILD_NUMBER: ${{ github.run_number }}
+      - run: node scripts/native/release/package.mjs
+      - run: node scripts/native/release/smoke.mjs
+      - name: Archive
+        run: |
+          test "$(node -p process.arch)" = '${{ matrix.arch }}'
+          ditto -c -k --sequesterRsrc --keepParent apps/macos/dist/neuraOS.app neuraOS-darwin-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: neuraOS-${{ matrix.arch }}
+          path: neuraOS-darwin-${{ matrix.arch }}.zip
+          retention-days: 7
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: neuraOS-*
+          merge-multiple: true
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: native-${{ github.run_number }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          latest=$(gh release list --limit 100 --json tagName,isDraft --jq '[.[] | select(.isDraft == false) | .tagName | select(test("^native-[0-9]+$")) | ltrimstr("native-") | tonumber] | max // 0')
+          if [ "$latest" -ge "${RELEASE_TAG#native-}" ]; then
+            echo "This release or a newer build is already published."
+            exit 0
+          fi
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --target "$COMMIT" --draft --title "neuraOS $RELEASE_TAG" --notes "Built from main at $COMMIT. Includes the macOS app, Node.js and Daemon. Save your work before updating: terminals restart."
+          fi
+          gh release upload "$RELEASE_TAG" --clobber neuraOS-darwin-arm64.zip neuraOS-darwin-x64.zip
+          gh release edit "$RELEASE_TAG" --draft=false --latest

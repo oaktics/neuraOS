@@ -1,5 +1,7 @@
 name: native-development
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   macos:
     runs-on: macos-latest
@@ -14,6 +16,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: node --test tests/release/*.test.mjs
       - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
       - run: pnpm test:macos
       - run: pnpm build
+      - run: node scripts/native/release/package.mjs
+      - run: node scripts/native/release/smoke.mjs
