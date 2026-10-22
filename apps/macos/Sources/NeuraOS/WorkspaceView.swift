@@ -44,14 +44,18 @@ struct WorkspaceView: View {
             HStack(spacing: 10) {
                 if workspace.supportsGit {
                     Label(git.branch.isEmpty ? workspace.branch : git.branch, systemImage: "arrow.triangle.branch")
-                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: 180, alignment: .leading)
+                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
                         .help(git.branch.isEmpty ? workspace.branch : git.branch)
                 }
-                Text(workspace.path).lineLimit(1).truncationMode(.middle).help(workspace.path)
+                Text((workspace.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(workspace.path)
                 Spacer(minLength: 0)
                 if model.busy {ProgressView().controlSize(.mini)}
-                if workspace.supportsGit {Text("\(git.changes.count) files changed").fixedSize()}
-            }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
+                if workspace.supportsGit && !git.changes.isEmpty {
+                    Text("\(git.changes.count)件の変更").fixedSize()
+                }
+                Rectangle().fill(Palette.line).frame(width: 1, height: 12)
+                ProviderUsageFooter()
+            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .onAppear {restore()}
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}

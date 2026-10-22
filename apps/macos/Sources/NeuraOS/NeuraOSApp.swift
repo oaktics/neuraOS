@@ -93,8 +93,13 @@ struct RootView: View {
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Rectangle().fill(Palette.line).frame(height: 1)
-            ProviderUsageFooter()
+            if model.selected == nil {
+                Rectangle().fill(Palette.line).frame(height: 1)
+                HStack {
+                    Spacer(minLength: 0)
+                    ProviderUsageFooter()
+                }.padding(.horizontal, 12).frame(height: 28)
+            }
             if !model.connected {
                 HStack {Image(systemName: "network.slash"); Text("Daemonへ再接続しています。作業の状態は接続後に更新されます。"); Spacer(); Button("再接続") {Task {await model.refresh()}}}
                     .font(.system(size: 11)).padding(10).background(Color.orange.opacity(0.08))
