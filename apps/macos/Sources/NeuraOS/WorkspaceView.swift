@@ -104,6 +104,8 @@ struct TerminalPane: View {
     let provider: String
     let visible: Bool
     @State private var showStop = false
+    // Mount on first visit, then keep the emulator and output cursor until the session changes.
+    @State private var hasBeenVisible = false
     private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "ターミナル"}
     var body: some View {
         let terminal = model.terminal(workspaceId: workspace.id, provider: provider)
@@ -119,7 +121,7 @@ struct TerminalPane: View {
                         Button("新しく起動") {Task {await model.openTerminal(workspace, provider: provider)}}.font(.system(size: 11))
                     }
                 }.padding(.horizontal, 16).frame(height: 32)
-                if visible {NativeTerminal(terminal: terminal, api: model.api, onError: {model.report($0)}).padding(.horizontal, 14).padding(.bottom, 12).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
+                if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 14).padding(.bottom, 12).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
                 else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
             } else {
                 VStack(spacing: 16) {
@@ -133,6 +135,8 @@ struct TerminalPane: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear {if visible {hasBeenVisible = true}}
+        .onChange(of: visible) {_, value in if value {hasBeenVisible = true}}
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
     }
 }

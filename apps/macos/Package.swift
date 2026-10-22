@@ -5,6 +5,7 @@ let package = Package(
     platforms: [.macOS(.v14)],
     products: [.executable(name: "NeuraOS", targets: ["NeuraOS"])],
     dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0")],
-    targets: [.executableTarget(name: "NeuraOS", dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")])],
+    targets: [.executableTarget(name: "NeuraOS", dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]),
+              .testTarget(name: "NeuraOSTests", dependencies: ["NeuraOS"])],
     swiftLanguageModes: [.v5]
 )
