@@ -124,8 +124,11 @@ struct Sidebar: View {
         .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
             Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
+            if model.state.features?.contains("workspace.delete.discard") == true {
+                Button("変更・未追跡ファイルも含めて削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace, discardChanges: true)}}
+            }
         } message: {workspace in
-            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。未コミットの変更、Gitの無視対象ファイル・フォルダ（.envなど）、実行中のターミナルがある場合は削除できません。")
+            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。通常の削除は未コミットの変更や未追跡・無視対象ファイルがある場合に停止します。「変更・未追跡ファイルも含めて削除」は、それらと.env・node_modulesなども完全に削除し、元に戻せません。実行中のターミナルがある場合は先に停止してください。")
         }
     }
 }
