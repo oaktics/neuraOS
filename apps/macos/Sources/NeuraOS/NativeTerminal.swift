@@ -2,6 +2,25 @@ import SwiftUI
 import AppKit
 import SwiftTerm
 
+/// Cmd-V is a terminal paste action; Codex needs Ctrl-V to read clipboard images.
+class NativeTerminalView: TerminalView {
+    var provider = "shell"
+
+    override func paste(_ sender: Any) {
+        if !pasteImage(from: .general) { super.paste(sender) }
+    }
+
+    @discardableResult
+    func pasteImage(from clipboard: NSPasteboard) -> Bool {
+        if provider == "codex", clipboard.availableType(from: [.png, .tiff]) != nil {
+            // Send a key, not bracketed-paste text. Codex reads the local clipboard.
+            send(source: getTerminal(), data: [0x16][...])
+            return true
+        }
+        return false
+    }
+}
+
 /// Renderer only. The UI never owns a PTY or starts a subprocess.
 struct NativeTerminal: NSViewRepresentable {
     let terminal: TerminalRecord
@@ -10,7 +29,8 @@ struct NativeTerminal: NSViewRepresentable {
     let onError: (Error) -> Void
     func makeCoordinator() -> Coordinator {Coordinator(terminal: terminal, api: api, onError: onError)}
     func makeNSView(context: Context) -> TerminalView {
-        let view = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), font: .monospacedSystemFont(ofSize: 13, weight: .regular))
+        view.provider = terminal.provider
         view.nativeForegroundColor = .labelColor
         view.nativeBackgroundColor = NSColor(name: nil) {appearance in appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.105, alpha: 1) : NSColor(white: 0.985, alpha: 1)}
         view.terminalDelegate = context.coordinator
