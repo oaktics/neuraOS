@@ -49,7 +49,8 @@ struct SidebarSwipeArea: NSViewRepresentable {
                       event.hasPreciseScrollingDeltas else {return event}
                 if event.phase.contains(.began) {self.gesture = SidebarSwipeGesture()}
                 guard event.momentumPhase.isEmpty else {return event}
-                let direction = self.gesture.update(x: event.scrollingDeltaX, y: event.scrollingDeltaY)
+                let direction = self.gesture.update(x: event.scrollingDeltaX, y: event.scrollingDeltaY,
+                                                    isDirectionInvertedFromDevice: event.isDirectionInvertedFromDevice)
                 if let direction {self.onSwipe?(direction)}
                 let consumed = self.gesture.isHorizontal
                 if event.phase.contains(.ended) || event.phase.contains(.cancelled) {self.gesture = SidebarSwipeGesture()}
@@ -66,9 +67,11 @@ struct SidebarSwipeGesture {
     private var fired = false
     private var vertical = false
     private(set) var isHorizontal = false
-    mutating func update(x dx: CGFloat, y dy: CGFloat) -> Int? {
+    mutating func update(x dx: CGFloat, y dy: CGFloat, isDirectionInvertedFromDevice: Bool = false) -> Int? {
         guard !fired, !vertical else {return nil}
-        x += dx; y += dy
+        // Workspace navigation follows the device gesture, independent of scroll preferences.
+        let direction: CGFloat = isDirectionInvertedFromDevice ? -1 : 1
+        x += dx * direction; y += dy * direction
         if !isHorizontal, abs(y) > 12, abs(y) > abs(x) {vertical = true; return nil}
         if abs(x) > 12, abs(x) > abs(y) * 1.5 {isHorizontal = true}
         guard isHorizontal, abs(x) >= 65 else {return nil}

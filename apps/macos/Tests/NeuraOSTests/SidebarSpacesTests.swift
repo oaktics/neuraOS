@@ -38,6 +38,21 @@ final class SidebarSpacesTests: XCTestCase {
         gesture = SidebarSwipeGesture()
         XCTAssertEqual(gesture.update(x: 70, y: 0), -1)
     }
+    func testSwipeDirectionIsIndependentOfNaturalScrollingPreference() {
+        for inverted in [false, true] {
+            let sign: CGFloat = inverted ? -1 : 1
+            for deviceX in [CGFloat(-1), CGFloat(1)] {
+                var gesture = SidebarSwipeGesture()
+                XCTAssertNil(gesture.update(x: deviceX * 30 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted))
+                XCTAssertEqual(gesture.update(x: deviceX * 40 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted), deviceX < 0 ? 1 : -1)
+                XCTAssertNil(gesture.update(x: deviceX * 100 * sign, y: 0, isDirectionInvertedFromDevice: inverted))
+            }
+            var vertical = SidebarSwipeGesture()
+            XCTAssertNil(vertical.update(x: 3 * sign, y: 25 * sign, isDirectionInvertedFromDevice: inverted))
+            XCTAssertNil(vertical.update(x: 100 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted))
+            XCTAssertFalse(vertical.isHorizontal)
+        }
+    }
     func testVerticalScrollAndSmallMotionsDoNotSwitchSpaces() {
         var gesture = SidebarSwipeGesture()
         XCTAssertNil(gesture.update(x: 3, y: 25))
