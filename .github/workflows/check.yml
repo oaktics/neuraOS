@@ -1,24 +1,30 @@
 name: native-development
-on: [push, pull_request]
+on:
+  push:
+    branches: [staging]
+  pull_request:
+    branches: [staging, main]
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-development-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   macos:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.13.0'
       - uses: pnpm/action-setup@v4
         with:
           version: '11.9.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.0'
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
       - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
       - run: pnpm test:macos
-      - run: pnpm build
-      - run: node scripts/native/release/package.mjs
-      - run: node scripts/native/release/smoke.mjs

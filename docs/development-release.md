@@ -1,12 +1,27 @@
 # 開発・配布フロー
 
-1. neuraOSでworktreeを作成し、機能ブランチで変更・commitする。
-2. GitHubサイドバーからPush → PR作成。PR本文に変更内容と確認結果を書く。
-3. CI `native-development / macos` とレビューを確認してmainへマージする。
-4. `native-release` がmainのソースを検証し、Apple Silicon向けをビルドする。パッケージ試験が成功したときだけGitHub Release `native-N` を公開する。Intel向けのビルド・配布は廃止。
-5. neuraOSメニュー → **アップデートを確認…** → **更新して再起動**。
+1. `staging`を起点にneuraOSでworktreeを作成し、機能ブランチで変更・commitする。
+2. GitHubサイドバーからPush → `staging`向けにPR作成。PR本文に変更内容と確認結果を書く。
+3. CI `native-development / macos` とレビューを確認して`staging`へマージする。この段階ではリリースしない。
+4. 複数の変更をまとめて動作確認したら、`staging` → `main` のリリースPRを作成する。`native-release / build` がApple Silicon向けのアプリ・配布パッケージをビルドし、パッケージ試験まで実行する。PRでは公開しない。
+5. 確認後、リリースPRを**merge commit**で`main`へマージする。`native-release`がマージ後のソースを再検証し、成功したときだけGitHub Release `native-N` を公開する。Intel向けのビルド・配布は廃止。
+6. neuraOSメニュー → **アップデートを確認…** → **更新して再起動**。
 
-リポジトリ管理者はmainのrulesetでPR経由の変更と`macos`チェックを必須にする。ワークフローファイルだけでは直接pushを禁止できない。
+## ブランチ設定
+
+GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポジトリのdefault branchを初期値に使うため、通常のPRは`staging`向けになる。リリースPRだけマージ先を`main`へ変更する。既存PRのマージ先は自動変更されないので、機能PRは個別に`staging`へ変更する。
+
+リポジトリ管理者はrulesetでPR経由の変更と必須チェックを設定する。`staging`は`macos`、`main`は`macos`と`build`を必須にする。ワークフローファイルだけでは直接pushやチェック前のマージを禁止できない。
+
+長期運用する`staging` → `main`はsquash/rebaseせずmerge commitで履歴をつなぐ。リリース後は`main` → `staging`の同期PRをマージして履歴を揃える。緊急修正を`main`へ入れた場合も、同じように`staging`へ戻す。
+
+## 通常CIと配布検証
+
+- 通常CIは型チェック、Daemon等のテスト、更新処理のテスト、Swiftテストまで。アプリの配布ビルド・パッケージ作成・同梱Daemonのsmoke試験はリリース時に行う。
+- 機能ブランチのpushではCIを起動せず、PR作成・更新で実行する。`staging`へのマージ後は統合されたソースを検証する。`main`へのpushはリリース側で検証する。
+- 同じPR／ブランチの通常CIと、同じリリースPRの配布検証は、新しい更新が来たら古い実行をキャンセルする。公開処理を含む`main`のリリースはキャンセルせず直列実行する。
+- pnpmのダウンロードキャッシュを再利用する。Swiftテストはネイティブ側のコンパイルも行うため、通常CIでもコンパイル時間は必要。
+- 手動の通常CIは任意のブランチで実行できる。手動リリースは`main`を指定する。`staging`等を選んだ場合はビルド・公開ともスキップする。
 
 ## 配布と初回導入
 
