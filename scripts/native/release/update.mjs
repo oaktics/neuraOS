@@ -24,15 +24,18 @@ async function latest() {
   if (response.ok) return {...validateRelease(await response.json()), authenticated: false};
   // Private repositories use gh's own credential store. Never persist or print tokens.
   try {
-    const {stdout} = await exec('gh', ['api', `repos/${repository}/releases/latest`], {timeout: 30000});
+    const {stdout} = await exec('gh', ['api', `repos/${repository}/releases/latest`], {timeout: 30000, killSignal: 'SIGKILL'});
     return {...validateRelease(JSON.parse(stdout)), authenticated: true};
   } catch {throw new Error('更新を取得できません。リリースの公開状況・ネット接続・gh auth loginを確認してください。');}
 }
 const data = join(homedir(), 'Library/Application Support/neuraOS/Updates');
 const target = join(homedir(), 'Applications/neuraOS.app');
 const delay = ms => new Promise(r => setTimeout(r, ms));
-async function prepare(tag, parentPID) {
-  const release = await latest();
+export async function prepare(tag, parentPID, {
+  home = homedir(), getRelease = latest, execute = exec, request = fetch, commandTimeout = 120000,
+} = {}) {
+  const data = join(home, 'Library/Application Support/neuraOS/Updates');
+  const release = await getRelease();
   if (release.tag !== tag) throw new Error('新しいリリースが公開されました。もう一度確認してください。');
   if (!Number.isSafeInteger(parentPID) || parentPID <= 1) throw new Error('Invalid application PID');
   await mkdir(data, {recursive: true, mode: 0o700});
@@ -42,18 +45,21 @@ async function prepare(tag, parentPID) {
   try {
     stage = await mkdtemp(join(data, 'stage-'));
     const archive = join(stage, release.name);
-    if (release.authenticated) await exec('gh', ['release', 'download', release.tag, '--repo', repository, '--pattern', release.name, '--dir', stage], {timeout: 600000});
+    // Keep deadlines inside this process. execFile settles after the killed
+    // command exits, then our catch removes only this preparation's state.
+    const run = (command, args, timeout = commandTimeout) => execute(command, args, {timeout, killSignal: 'SIGKILL'});
+    if (release.authenticated) await run('gh', ['release', 'download', release.tag, '--repo', repository, '--pattern', release.name, '--dir', stage], 600000);
     else {
-      const response = await fetch(release.url, {signal: AbortSignal.timeout(600000)});
+      const response = await request(release.url, {signal: AbortSignal.timeout(600000)});
       if (!response.ok) throw new Error('更新ファイルのダウンロードに失敗しました。');
       await writeFile(archive, Buffer.from(await response.arrayBuffer()));
     }
     verifyArchive(await readFile(archive), release.digest);
-    await exec('/usr/bin/ditto', ['-x', '-k', archive, stage]);
+    await run('/usr/bin/ditto', ['-x', '-k', archive, stage]);
     const app = join(stage, 'neuraOS.app');
-    await exec('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
     const plist = join(app, 'Contents/Info.plist');
-    const readPlist = async key => (await exec('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist])).stdout.trim();
+    const readPlist = async key => (await run('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist])).stdout.trim();
     if (await readPlist('CFBundleIdentifier') !== 'app.neuraos.native' || await readPlist('CFBundleVersion') !== String(release.build)) throw new Error('アプリのバージョン情報が一致しません。');
     await access(join(app, 'Contents/Resources/Runtime/bin/node'));
     await copyFile(fileURLToPath(import.meta.url), join(stage, 'install.mjs'));

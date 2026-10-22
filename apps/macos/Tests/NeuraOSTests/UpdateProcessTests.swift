@@ -2,6 +2,11 @@ import XCTest
 @testable import NeuraOS
 
 final class UpdateProcessTests: XCTestCase {
+    func testPreparationCanOwnItsDeadline() throws {
+        let data = try UpdateProcess.run(executable: "/bin/sleep", arguments: ["0.15"], timeout: nil)
+        XCTAssertTrue(data.isEmpty)
+    }
+
     func testLargeOutputDoesNotBlockProcessExit() throws {
         let data = try UpdateProcess.run(executable: "/bin/sh", arguments: ["-c", "yes update | head -c 200000"], timeout: 5)
         XCTAssertEqual(data.count, 200000)

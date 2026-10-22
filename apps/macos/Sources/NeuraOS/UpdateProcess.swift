@@ -2,9 +2,9 @@ import Foundation
 import Darwin
 
 enum UpdateProcess {
-    // Run off the main actor. Every updater command has an outer deadline,
-    // including extraction, signature verification and subprocess shutdown.
-    static func run(executable: String, arguments: [String], timeout: TimeInterval) throws -> Data {
+    // Run off the main actor. Preparation owns its deadlines in JavaScript so
+    // errors can release its install lock before returning to the UI.
+    static func run(executable: String, arguments: [String], timeout: TimeInterval?) throws -> Data {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -21,13 +21,14 @@ enum UpdateProcess {
         process.standardError = handle
         try process.run()
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(timeout))
+        let deadline = timeout.map {clock.now.advanced(by: .seconds($0))}
         while process.isRunning {
-            if clock.now >= deadline {
+            if let deadline, clock.now >= deadline {
                 process.terminate()
                 let grace = clock.now.advanced(by: .seconds(2))
                 while process.isRunning && clock.now < grace {Thread.sleep(forTimeInterval: 0.05)}
                 if process.isRunning {kill(process.processIdentifier, SIGKILL)}
+                while process.isRunning {Thread.sleep(forTimeInterval: 0.05)}
                 throw NSError(domain: "neuraOS.Update", code: 2, userInfo: [NSLocalizedDescriptionKey:
                     "更新処理が時間内に完了しませんでした。ネット接続を確認して再度お試しください。"])
             }
