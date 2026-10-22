@@ -47,6 +47,7 @@ struct ProviderUsageFooter: View {
             }
             .font(.system(size: 11)).monospacedDigit().lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
+            .frame(height: 28)
         }
     }
     private func usageHelp(provider: String, usage: ProviderUsage?, at date: Date) -> String {
