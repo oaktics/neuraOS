@@ -91,3 +91,64 @@ test('workspace names follow the latest provider conversation, persist, and neve
     assert.deepEqual(store.get('workspaces',workspace.id),{...workspace,name:codex.name});
   } finally {store.close();await rm(home,{recursive:true,force:true});}
 });
+
+test('only running or newly stopped CLIs read history; stopped worktrees and daemon restarts stay idle',async()=>{
+  const store=new Store(':memory:');
+  const workspace:Workspace={id:randomUUID(),projectId:randomUUID(),name:'保存済みの名前',path:'/repo/active',branch:'neura/active',kind:'worktree',createdAt:new Date().toISOString()};
+  const terminal=(workspaceId:string,provider:TerminalRecord['provider'],status:TerminalRecord['status']):TerminalRecord=>({id:randomUUID(),workspaceId,provider,status,createdAt:new Date().toISOString(),cols:100,rows:30});
+  try {
+    store.put('workspaces',workspace);
+    // Historical worktrees must cost zero provider reads, not one scan each per poll.
+    for(let i=0;i<50;i++){
+      const old={...workspace,id:randomUUID(),path:`/repo/old-${i}`};store.put('workspaces',old);
+      store.put('terminals',terminal(old.id,'claude',i%2?'exited':'interrupted'));
+    }
+    store.put('terminals',terminal(workspace.id,'claude','exited'));
+    let codexReads=0,claudeReads=0,failClaude=false;
+    let codexTitle={name:'Codexの名前',updatedAt:1000},claudeTitle={name:'Claudeの名前',updatedAt:2000};
+    const readers={
+      codex:async(path:string)=>{assert.equal(path,workspace.path);codexReads++;return codexTitle;},
+      claude:async(path:string)=>{assert.equal(path,workspace.path);claudeReads++;if(failClaude)throw new Error('unavailable');return claudeTitle;},
+    };
+    const names=new SessionNames(store,readers,0);
+    for(let i=0;i<5;i++)await names.refresh();
+    assert.equal(claudeReads,0);assert.equal(codexReads,0);
+    const claude=terminal(workspace.id,'claude','running'),codex=terminal(workspace.id,'codex','running');
+    store.put('terminals',claude);store.put('terminals',codex);
+    await Promise.all([names.refresh(),names.refresh()]);
+    assert.equal(claudeReads,1);assert.equal(codexReads,1);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
+    claudeTitle={name:'終了直前のClaudeの名前',updatedAt:3000};
+    store.put('terminals',{...claude,status:'exited'});
+    await names.refresh();assert.equal(claudeReads,2);
+    for(let i=0;i<5;i++)await names.refresh();
+    assert.equal(claudeReads,2);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
+    codexTitle={name:'更新されたCodexの名前',updatedAt:4000};
+    await names.refresh();assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,codexTitle.name);
+    store.put('terminals',{...codex,status:'interrupted'});await names.refresh();
+    const stoppedCodexReads=codexReads;
+    for(let i=0;i<5;i++)await names.refresh();
+    assert.equal(codexReads,stoppedCodexReads);assert.equal(claudeReads,2);
+    // A daemon restart does not schedule historical terminal reads again.
+    const restarted=new SessionNames(store,readers,0);
+    await restarted.refresh();assert.equal(codexReads,stoppedCodexReads);assert.equal(claudeReads,2);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,codexTitle.name);
+    // Even a CLI that starts and exits between polls gets one final read.
+    claudeTitle={name:'短い会話の名前',updatedAt:5000};
+    store.put('terminals',terminal(workspace.id,'claude','exited'));
+    await restarted.refresh();assert.equal(claudeReads,3);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
+    await restarted.refresh();assert.equal(claudeReads,3);
+    // A failed final read is bounded too; existing names remain usable.
+    failClaude=true;store.put('terminals',terminal(workspace.id,'claude','exited'));
+    await restarted.refresh();await restarted.refresh();assert.equal(claudeReads,4);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
+    // Starting a new CLI after idle resumes polling and picks up a new title.
+    failClaude=false;claudeTitle={name:'再開後の名前',updatedAt:6000};
+    store.put('terminals',terminal(workspace.id,'claude','running'));
+    await restarted.refresh();await restarted.refresh();assert.equal(claudeReads,6);
+    assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
+    await names.close();await restarted.close();
+  } finally {store.close();}
+});

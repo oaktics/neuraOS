@@ -43,7 +43,13 @@ export async function claudeSessionName(path:string,readSessions=listSessions):P
 export class SessionNames {
   private pending:Promise<void>|undefined;
   private refreshedAt=0;
-  constructor(private store:Store,private readers:Readers={codex:codexSessionName,claude:claudeSessionName},private interval=3000){}
+  private observedTerminals:Map<string,TerminalRecord['status']>;
+  private names=new Map<string,SessionName>();
+  constructor(private store:Store,private readers:Readers={codex:codexSessionName,claude:claudeSessionName},private interval=3000){
+    // Already stopped terminals (including those interrupted by a daemon restart)
+    // keep their persisted workspace name without re-reading provider history.
+    this.observedTerminals=new Map(store.list<TerminalRecord>('terminals').map(t=>[t.id,t.status]));
+  }
   refresh():Promise<void> {
     if(this.pending)return this.pending;
     if(Date.now()-this.refreshedAt<this.interval)return Promise.resolve();
@@ -52,9 +58,21 @@ export class SessionNames {
   }
   private async update() {
     const terminals=this.store.list<TerminalRecord>('terminals');
+    // Poll running CLIs and read once after exit to collect their final title.
+    // A newly observed stopped terminal may have run entirely between polls.
+    const refreshable=terminals.filter(t=>t.status==='running'||!this.observedTerminals.has(t.id)||this.observedTerminals.get(t.id)==='running');
+    this.observedTerminals=new Map(terminals.map(t=>[t.id,t.status]));
     await Promise.all(this.store.list<Workspace>('workspaces').filter(w=>w.kind==='worktree').map(async workspace=>{
-      const providers=new Set<Provider>(terminals.filter(t=>t.workspaceId===workspace.id).map(t=>t.provider));
-      const names=await Promise.all((['codex','claude'] as const).filter(p=>providers.has(p)).map(p=>this.readers[p](workspace.path).catch(()=>undefined)));
+      const providers=new Set<Provider>(refreshable.filter(t=>t.workspaceId===workspace.id).map(t=>t.provider));
+      const active=(['codex','claude'] as const).filter(p=>providers.has(p));
+      if(!active.length)return;
+      await Promise.all(active.map(async provider=>{
+        const name=await this.readers[provider](workspace.path).catch(()=>undefined);
+        if(name&&displayName(name.name)&&Number.isFinite(name.updatedAt))this.names.set(`${workspace.id}:${provider}`,name);
+      }));
+      // Retain stopped providers' last title so an older title from another
+      // running provider cannot replace it merely because polling stopped.
+      const names=(['codex','claude'] as const).map(provider=>this.names.get(`${workspace.id}:${provider}`));
       const latest=names.filter((n):n is SessionName=>!!n&&Number.isFinite(n.updatedAt)).sort((a,b)=>b.updatedAt-a.updatedAt)[0];
       const name=displayName(latest?.name),current=this.store.get<Workspace>('workspaces',workspace.id);
       if(name&&current&&current.name!==name)this.store.put('workspaces',{...current,name});
