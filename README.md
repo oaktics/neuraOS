@@ -37,7 +37,7 @@ pnpm service restart
 
 1. `⌘O`で作業するフォルダを開く。Gitリポジトリでなくても利用できます。
 2. Gitリポジトリの場合は`⌘N`でプロジェクトと作成元（既定は`HEAD`）を選び、専用ブランチとworktreeを作成。名前の入力は不要です。Codex・Claude Codeの会話名が付くと、左サイドバーのworktree表示名に自動反映されます（通常3秒程度）。会話名がない間は仮名を表示し、ブランチ名とフォルダのパスは変更しません。
-3. Codex／Claude Codeのタブから対話CLIを起動。ログイン、権限確認、会話再開はCLI自身の画面で行います。
+3. Codex／Claude Codeのタブから対話CLIをfull accessで起動。ログイン、会話再開はCLI自身の画面で行います。
 4. ターミナル、ファイル、変更一覧、ブラウザのタブで作業。
 5. アプリを終了してもDaemonは継続。再度開くと同じPTYへ接続し、出力を復元。
 
@@ -48,7 +48,8 @@ pnpm service restart
 「メイン」は元のフォルダ／リポジトリです。専用作業はworktree上で行います。worktreeはファイル変更を分離するもので、セキュリティ境界ではありません。
 
 - 同じworktreeでCodex、Claude Code、シェルをそれぞれ1つ開けます。別worktreeでも並行して起動できます。
-- Codexは`workspace-write` / `on-request`、Claude Codeは`manual`を指定します。承認を自動応答・迂回しません。
+- 新規起動・会話再開ともに、Codexは`--sandbox danger-full-access --ask-for-approval never`、Claude Codeは`--permission-mode bypassPermissions`を指定します。ファイル操作やコマンド実行の都度の権限承認なしで動作します。CLIや組織の管理ポリシーによる制限は引き続き適用されます。
+- 起動済みの端末へ再接続しても権限は変わりません。起動設定の変更は、更新済みDaemonから新しくCLIを起動したときに適用されます。
 - CLIのログイン情報をneuraOSが読み取ってコピーする方式は使いません。CLIが通常のユーザー環境で自身の設定と認証を利用します。
 - ファイル編集は1MB以下のUTF-8テキスト。保存時のハッシュ照合で外部更新を検知します。未保存の編集はUI端末へ自動退避し、通常の終了・再起動後に復元します。強制終了時は直近約0.5秒分が失われる可能性があります。
 - Git操作のうち作成・状態取得・差分表示をUIから利用できます。commit、merge、push、worktree削除は現在ターミナルで行います。
