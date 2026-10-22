@@ -7,10 +7,11 @@ import {Store,hash} from './store.ts';
 import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
+import {ProviderUsageService} from './provider-usage.ts';
 import * as work from './workspace.ts';
 import {GitHub} from './github.ts';
 
-export async function createDaemon(dataDir:string,github=new GitHub()){
+export async function createDaemon(dataDir:string,github=new GitHub(),usage=new ProviderUsageService()){
   await mkdir(dataDir,{recursive:true,mode:0o700});await chmod(dataDir,0o700);
   const tokenPath=join(dataDir,'daemon-token');
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
@@ -97,6 +98,8 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
     return folderRefresh;
   }
   app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  app.get('/v1/usage',async()=>({providers:await usage.read()}));
+  app.addHook('onClose',async()=>{await usage.close();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
