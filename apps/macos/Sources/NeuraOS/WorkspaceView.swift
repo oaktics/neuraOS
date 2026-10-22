@@ -25,6 +25,13 @@ struct WorkspaceView: View {
                             .overlay(alignment: .bottom) {if tab == item.0 {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
                     }.buttonStyle(.plain)
                 }
+                if workspace.supportsGit {
+                    Button {tab = "github"} label: {
+                        Label("GitHub", systemImage: "arrow.triangle.pull").font(.system(size: 12, weight: tab == "github" ? .medium : .regular))
+                            .foregroundStyle(tab == "github" ? .primary : .secondary).frame(height: 35)
+                            .overlay(alignment: .bottom) {if tab == "github" {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
+                    }.buttonStyle(.plain)
+                }
                 if selectedDiff != nil {Button {tab = "diff"} label: {Label("差分", systemImage: "plus.forwardslash.minus").font(.system(size: 12)).foregroundStyle(tab == "diff" ? .primary : .secondary)}.buttonStyle(.plain)}
                 Spacer(minLength: 0)
             }.padding(.horizontal, 20)
@@ -37,6 +44,10 @@ struct WorkspaceView: View {
                     }
                     FilePane(workspace: workspace, visible: tab == "files" && model.selectedId == workspace.id).opacity(tab == "files" ? 1 : 0).allowsHitTesting(tab == "files").accessibilityHidden(tab != "files")
                     BrowserPane(workspaceId: workspace.id, visible: tab == "browser" && model.selectedId == workspace.id).opacity(tab == "browser" ? 1 : 0).allowsHitTesting(tab == "browser").accessibilityHidden(tab != "browser")
+                    if workspace.supportsGit {
+                        GitHubPane(workspace: workspace, visible: tab == "github" && model.selectedId == workspace.id)
+                            .opacity(tab == "github" ? 1 : 0).allowsHitTesting(tab == "github").accessibilityHidden(tab != "github")
+                    }
                     if let diff = selectedDiff, tab == "diff" {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(diff.path).font(.system(size: 12, design: .monospaced)).padding(14)

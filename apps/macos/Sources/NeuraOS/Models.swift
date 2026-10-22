@@ -33,15 +33,16 @@ final class DaemonClient {
         config.timeoutIntervalForRequest = 15
         session = URLSession(configuration: config)
     }
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query)}
+    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
-        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command])
+        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: (command["type"] as? String)?.hasPrefix("github.") == true ? 240 : 15)
     }
-    private func request<T: Decodable>(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil) async throws -> T {
+    private func request<T: Decodable>(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> T {
         var components = URLComponents(url: endpoint.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         components.queryItems = query.isEmpty ? nil : query.sorted(by: {$0.key < $1.key}).map {URLQueryItem(name: $0.key, value: $0.value)}
         var request = URLRequest(url: components.url!)
+        request.timeoutInterval = timeout
         let token = try String(contentsOf: dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         if let body {request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONSerialization.data(withJSONObject: body)}
