@@ -75,6 +75,7 @@ struct Sidebar: View {
     @EnvironmentObject var model: AppModel
     @State private var query = ""
     @State private var collapsed: Set<String> = []
+    @State private var deleting: Workspace?
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
@@ -102,6 +103,15 @@ struct Sidebar: View {
                                         }.font(.system(size: 12)).padding(.vertical, 8).padding(.horizontal, 12).padding(.leading, 14).contentShape(Rectangle())
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
+                                    .contextMenu {
+                                        if workspace.kind == "worktree" {
+                                            Button("worktreeを削除…", role: .destructive) {
+                                                if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
+                                                    model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
+                                                } else {deleting = workspace}
+                                            }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -111,6 +121,12 @@ struct Sidebar: View {
             Spacer(minLength: 0)
             HStack {Image(systemName: "desktopcomputer"); Text("ローカル開発"); Spacer(); Text("0.2").foregroundStyle(.quaternary)}.font(.system(size: 11)).foregroundStyle(.tertiary).padding(17)
         }.background(Palette.surface)
+        .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
+            Button("キャンセル", role: .cancel) {deleting = nil}
+            Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
+        } message: {workspace in
+            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。未コミットの変更、Gitの無視対象ファイル・フォルダ（.envなど）、実行中のターミナルがある場合は削除できません。")
+        }
     }
 }
 struct WelcomeView: View {
