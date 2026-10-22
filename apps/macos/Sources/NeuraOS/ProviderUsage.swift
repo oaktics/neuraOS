@@ -12,6 +12,7 @@ struct ProviderUsageFooter: View {
                     let usage = model.providerUsage.first {$0.provider == provider}
                     HStack(spacing: 6) {
                         Image(systemName: provider == "claude" ? "asterisk" : "sparkle")
+                            .accessibilityLabel(provider == "codex" ? "Codex" : "Claude")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(provider == "claude" ? Color.orange : Color.primary)
                         if !model.connected {Text("未接続").foregroundStyle(.secondary)}
@@ -33,7 +34,6 @@ struct ProviderUsageFooter: View {
                     }
                     .help("\(provider == "codex" ? "Codex" : "Claude")\n\(usage?.details ?? "アカウント共通の5時間・週間の利用枠を表示します。")")
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel(provider == "codex" ? "Codex" : "Claude")
                 }
                 Button {
                     refreshing = true
