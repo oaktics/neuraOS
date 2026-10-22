@@ -7,6 +7,7 @@ struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: S
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
+    var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
     var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
     var projects: [Project] = []; var workspaces: [Workspace] = []; var terminals: [TerminalRecord] = []
 }
@@ -75,7 +76,8 @@ final class DaemonClient {
     var gitProjects: [Project] {state.projects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
-    init() {
+    init(startPolling: Bool = true) {
+        guard startPolling else {return}
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
         }
@@ -118,12 +120,12 @@ final class DaemonClient {
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
         busy = true; defer {busy = false}
-        let existingIds = Set(state.terminals.map(\.id))
         do {
-            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
-            guard !existingIds.contains(terminal.id) else {
+            // Check before sending: concurrent opens against legacy daemons can return the same PTY.
+            guard state.supportsMultipleTerminals else {
                 throw APIError(error: "daemon_update_required", message: "Daemonの更新が必要です。実行中の作業を終えてから pnpm service restart を実行してください。")
             }
+            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
             await refresh(); return terminal
         } catch {report(error); return nil}
     }
