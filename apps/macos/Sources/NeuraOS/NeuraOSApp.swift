@@ -4,13 +4,19 @@ import AppKit
 @main struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
+    @StateObject private var updater = AppUpdater()
     var body: some Scene {
         Window("neuraOS", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
+                .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
+                .task {await updater.bootstrap()}
         }
         .defaultSize(width: 1380, height: 880)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("アップデートを確認…") {updater.check()}.disabled(updater.busy)
+            }
             CommandGroup(replacing: .newItem) {
                 Button("新しいWorkspace…") {model.showNewSpace = true}.keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("フォルダを開く…") {model.addProject()}.keyboardShortcut("o")

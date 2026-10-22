@@ -1,0 +1,106 @@
+import Foundation
+import SwiftUI
+import AppKit
+
+struct NativeRelease: Decodable {
+    let tag: String
+    let build: Int
+}
+
+@MainActor final class AppUpdater: ObservableObject {
+    @Published var presented = false
+    @Published var busy = false
+    @Published var message = ""
+    @Published var release: NativeRelease?
+    var currentBuild: Int {Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0}
+
+    func bootstrap() async {
+        guard let resources = Bundle.main.resourceURL,
+              FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("Runtime/bin/node").path) else {return}
+        do {_ = try await run(["bootstrap"], bundledScript: true)}
+        catch {message = error.localizedDescription; presented = true}
+        let errorFile = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/neuraOS/Updates/last-error.txt")
+        if let error = try? String(contentsOf: errorFile, encoding: .utf8) {
+            message = "前回の更新に失敗しました: " + error; presented = true
+        }
+    }
+
+    func check() {
+        guard !busy else {return}
+        presented = true; busy = true; release = nil; message = "アップデートを確認しています…"
+        Task {
+            do {
+                let data = try await run(["check"])
+                let candidate = try JSONDecoder().decode(NativeRelease.self, from: data)
+                if candidate.build > currentBuild {
+                    release = candidate
+                    message = "新しいバージョン（\(candidate.tag)）を利用できます。"
+                } else {message = "最新バージョンです。"}
+            } catch {message = error.localizedDescription}
+            busy = false
+        }
+    }
+
+    func install() {
+        guard let release, !busy else {return}
+        busy = true; message = "ダウンロードして検証しています。完了するとアプリを再起動します…"
+        Task {
+            do {
+                _ = try await run(["prepare", release.tag, String(ProcessInfo.processInfo.processIdentifier)])
+                DraftCache.shared.flush()
+                NSApp.terminate(nil)
+            } catch {message = error.localizedDescription; busy = false}
+        }
+    }
+
+    private func run(_ arguments: [String], bundledScript: Bool = false) async throws -> Data {
+        guard let resources = Bundle.main.resourceURL else {throw updateError("更新プログラムがありません。")}
+        let bundled = resources.appendingPathComponent("Runtime/bin/node").path
+        let node = [bundled, "/opt/homebrew/bin/node", "/usr/local/bin/node"].first {FileManager.default.isExecutableFile(atPath: $0)}
+        guard let node else {throw updateError("更新にはNode.js 24が必要です。初回は配布版をインストールしてください。")}
+        let script = resources.appendingPathComponent(bundledScript ? "Runtime/scripts/native/release/update.mjs" : "update.mjs").path
+        return try await Task.detached(priority: .utility) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: node)
+            process.arguments = [script] + arguments
+            var environment = ProcessInfo.processInfo.environment
+            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (environment["PATH"] ?? "")
+            process.environment = environment
+            // File-backed output avoids pipe deadlocks during a long download.
+            let log = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            FileManager.default.createFile(atPath: log.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            defer {try? FileManager.default.removeItem(at: log)}
+            let handle = try FileHandle(forWritingTo: log)
+            defer {try? handle.close()}
+            process.standardOutput = handle; process.standardError = handle
+            try process.run(); process.waitUntilExit()
+            let data = try Data(contentsOf: log)
+            guard process.terminationStatus == 0 else {
+                throw NSError(domain: "neuraOS.Update", code: 1, userInfo: [NSLocalizedDescriptionKey: String(data: data, encoding: .utf8) ?? "更新に失敗しました。"])
+            }
+            return data
+        }.value
+    }
+    private func updateError(_ text: String) -> NSError {NSError(domain: "neuraOS.Update", code: 1, userInfo: [NSLocalizedDescriptionKey: text])}
+}
+
+struct AppUpdateView: View {
+    @ObservedObject var updater: AppUpdater
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("neuraOSのアップデート").font(.headline)
+            Text(updater.message).textSelection(.enabled)
+            if updater.busy {ProgressView().controlSize(.small)}
+            if updater.release != nil {
+                Text("適用するとDaemonも再起動し、実行中のターミナル・エージェントが停止します。作業を保存してから更新してください。アプリはホームフォルダのApplicationsへインストールされます。")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("閉じる") {updater.presented = false}.disabled(updater.busy)
+                if updater.release != nil {Button("更新して再起動") {updater.install()}.disabled(updater.busy)}
+                else {Button("再確認") {updater.check()}.disabled(updater.busy)}
+            }
+        }.padding(24).frame(width: 440).interactiveDismissDisabled(updater.busy)
+    }
+}
