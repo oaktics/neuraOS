@@ -4,12 +4,13 @@ import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {mkdir,readFile,writeFile,chmod} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
-import {Envelope,Fault,requireValue,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
+import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
 import * as work from './workspace.ts';
+import {GitHub} from './github.ts';
 
-export async function createDaemon(dataDir:string){
+export async function createDaemon(dataDir:string,github=new GitHub()){
   await mkdir(dataDir,{recursive:true,mode:0o700});await chmod(dataDir,0o700);
   const tokenPath=join(dataDir,'daemon-token');
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
@@ -18,6 +19,7 @@ export async function createDaemon(dataDir:string){
   const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
   let queue:Promise<unknown>=Promise.resolve();
+  let githubQueue:Promise<unknown>=Promise.resolve();
   app.addHook('onRequest',async(req,reply)=>{
     const supplied=Buffer.from((req.headers.authorization??'').replace(/^Bearer /,'')),expected=Buffer.from(token);
     if(req.headers.origin||supplied.length!==expected.length||!timingSafeEqual(supplied,expected))return reply.code(401).send({error:'unauthorized',message:'接続の認証に失敗しました。'});
@@ -49,14 +51,17 @@ export async function createDaemon(dataDir:string){
       case 'terminal.resize':return terminals.resize(c.terminalId,c.clientId,c.cols,c.rows);
       case 'terminal.stop':return terminals.stop(c.terminalId);
       case 'file.save':return work.saveFile(workspace(c.workspaceId).path,c.path,c.content,c.expectedHash);
+      case 'github.push':case 'github.create':case 'github.merge':return github.mutate(gitWorkspace(c.workspaceId).path,c);
     }
   }
-  app.get('/v1/state',async()=>{await sessionNames.refresh();return store.state();});
-  app.get('/v1/capabilities',async()=>({protocolVersion:1,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
+  app.get('/v1/state',async()=>{await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));
-    const result=queue.catch(()=>{}).then(async()=>{
+    // Network operations must not block PTY input/resize or local file saves.
+    const isGitHub=command.type.startsWith('github.');
+    const result=(isGitHub?githubQueue:queue).catch(()=>{}).then(async()=>{
       const existing=store.db.prepare('SELECT * FROM operations WHERE id=?').get(operationId);
       if(existing){
         if(existing.hash!==digest)throw new Fault('operation_conflict','同じ操作IDに別の内容が指定されています。',409);
@@ -67,7 +72,7 @@ export async function createDaemon(dataDir:string){
       store.db.prepare('INSERT INTO operations(id,hash,status) VALUES(?,?,?)').run(operationId,digest,'pending');
       try{const value=await execute(command,operationId);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('done',JSON.stringify(value),operationId);return value;}
       catch(e){const fault=e instanceof Fault?e:new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('failed',JSON.stringify({code:fault.code,message:fault.message,status:fault.status}),operationId);throw fault;}
-    });queue=result;return result;
+    });if(isGitHub)githubQueue=result;else queue=result;return result;
   });
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
@@ -77,7 +82,8 @@ export async function createDaemon(dataDir:string){
   app.get('/v1/workspaces/:id/file',async req=>work.file(workspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
   const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
+  app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await queue.catch(()=>{});await sessionNames.close();await terminals.shutdown();store.close();});
+  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue]);await sessionNames.close();await terminals.shutdown();store.close();});
   return {app,store,token};
 }

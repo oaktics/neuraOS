@@ -25,6 +25,14 @@ struct WorkspaceView: View {
                             .overlay(alignment: .bottom) {if tab == item.0 {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
                     }.buttonStyle(.plain)
                 }
+                if workspace.supportsGit {
+                    Button {tab = "github"} label: {
+                        Label("GitHub", systemImage: "arrow.triangle.pull").font(.system(size: 12, weight: tab == "github" ? .medium : .regular))
+                            .foregroundStyle(tab == "github" ? .primary : .secondary).frame(height: 35)
+                            .overlay(alignment: .bottom) {if tab == "github" {Rectangle().fill(Color.primary.opacity(0.65)).frame(height: 2)}}
+                    }.buttonStyle(.plain).disabled(!model.supportsGitHub)
+                        .help(model.supportsGitHub ? "PR・レビュー・CI を確認" : "GitHub 連携には更新済みの Daemon が必要です。作業を保存してから Daemon を更新・再起動してください。")
+                }
                 if selectedDiff != nil {Button {tab = "diff"} label: {Label("差分", systemImage: "plus.forwardslash.minus").font(.system(size: 12)).foregroundStyle(tab == "diff" ? .primary : .secondary)}.buttonStyle(.plain)}
                 Spacer(minLength: 0)
             }.padding(.horizontal, 20)
@@ -37,6 +45,19 @@ struct WorkspaceView: View {
                     }
                     FilePane(workspace: workspace, visible: tab == "files" && model.selectedId == workspace.id).opacity(tab == "files" ? 1 : 0).allowsHitTesting(tab == "files").accessibilityHidden(tab != "files")
                     BrowserPane(workspaceId: workspace.id, visible: tab == "browser" && model.selectedId == workspace.id).opacity(tab == "browser" ? 1 : 0).allowsHitTesting(tab == "browser").accessibilityHidden(tab != "browser")
+                    if workspace.supportsGit {
+                        if model.supportsGitHub {
+                            GitHubPane(workspace: workspace, visible: tab == "github" && model.selectedId == workspace.id)
+                                .opacity(tab == "github" ? 1 : 0).allowsHitTesting(tab == "github").accessibilityHidden(tab != "github")
+                        } else if tab == "github" {
+                            // A saved tab selection must not issue requests to an older daemon.
+                            VStack(spacing: 12) {
+                                Text(model.connected ? "GitHub 連携には Daemon の更新が必要です" : "Daemon への接続を確認しています…").font(.headline)
+                                Text("作業を保存してから Daemon を更新・再起動してください。再起動すると実行中のターミナルは終了します。")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                            }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                    }
                     if let diff = selectedDiff, tab == "diff" {
                         VStack(alignment: .leading, spacing: 0) {
                             Text(diff.path).font(.system(size: 12, design: .monospaced)).padding(14)

@@ -1,7 +1,10 @@
 import {z} from 'zod';
 
 export const protocolVersion = 1;
+// Additive features are negotiated separately so existing v1 clients keep working.
+export const daemonFeatures = ['github'] as const;
 const id = z.uuid();
+const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);
 export type Provider = z.infer<typeof Provider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; createdAt:string}
@@ -15,6 +18,9 @@ export const Command = z.discriminatedUnion('type', [
   z.object({type:z.literal('terminal.resize'), terminalId:id, clientId:id, cols:z.number().int().min(20).max(400), rows:z.number().int().min(5).max(200)}),
   z.object({type:z.literal('terminal.stop'), terminalId:id}),
   z.object({type:z.literal('file.save'), workspaceId:id, path:z.string().min(1).max(4096), content:z.string().max(1048576), expectedHash:z.string().length(64)}),
+  z.object({type:z.literal('github.push'), ...githubTarget}),
+  z.object({type:z.literal('github.create'), ...githubTarget, title:z.string().trim().min(1).max(256), body:z.string().max(65536), base:z.string().min(1).max(255), draft:z.boolean()}),
+  z.object({type:z.literal('github.merge'), ...githubTarget, number:z.number().int().positive(), method:z.enum(['merge','squash','rebase']), expectedPRHead:z.string().regex(/^[a-f0-9]{40}$/)}),
 ]);
 export type Command = z.infer<typeof Command>;
 export const Envelope = z.object({operationId:id, command:Command});
