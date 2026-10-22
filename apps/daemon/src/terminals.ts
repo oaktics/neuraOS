@@ -20,6 +20,9 @@ export function argumentsFor(provider:Provider,resume:boolean){
   if(provider==='codex')return [...(resume?['resume']:[]),'--sandbox','danger-full-access','--ask-for-approval','never'];
   return [...(resume?['--resume']:[]),'--permission-mode','bypassPermissions'];
 }
+export function terminalEnvironment():Record<string,string>{
+  return {HOME:homedir(),USER:process.env.USER??'',SHELL:'/bin/zsh',TERM:'xterm-256color',LANG:process.env.LANG??'en_US.UTF-8',PATH:[join(homedir(),'.local/bin'),'/opt/homebrew/bin','/usr/local/bin',process.env.PATH??'/usr/bin:/bin'].join(delimiter)};
+}
 export class Terminals {
   private processes=new Map<string,pty.IPty>();
   private owners=new Map<string,{clientId:string;until:number}>();
@@ -27,7 +30,7 @@ export class Terminals {
   constructor(readonly store:Store){}
   async open(workspace:Workspace,provider:Provider,resume:boolean){
     const program=await executable(provider),id=randomUUID();
-    const env:Record<string,string>={HOME:homedir(),USER:process.env.USER??'',SHELL:'/bin/zsh',TERM:'xterm-256color',LANG:process.env.LANG??'en_US.UTF-8',PATH:[join(homedir(),'.local/bin'),'/opt/homebrew/bin','/usr/local/bin',process.env.PATH??'/usr/bin:/bin'].join(delimiter)};
+    const env=terminalEnvironment();
     // Interactive user CLIs retain normal login/config, with full access selected at launch.
     const proc=pty.spawn(program,argumentsFor(provider,resume),{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});
     const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',createdAt:new Date().toISOString(),cols:100,rows:30};

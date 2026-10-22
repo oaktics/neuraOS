@@ -93,6 +93,13 @@ struct RootView: View {
             }
         }
         .background(Palette.surface)
+        .task(id: model.connected && model.state.features?.contains("provider.usage") == true) {
+            guard model.connected, model.state.features?.contains("provider.usage") == true else {return}
+            while !Task.isCancelled {
+                await model.refreshUsage()
+                do {try await Task.sleep(for: .seconds(60))} catch {return}
+            }
+        }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $model.showNewSpace) {NewSidebarSpaceSheet()}
         .sheet(isPresented: $model.showNewWorkspace) {NewWorkspaceSheet()}
@@ -175,6 +182,7 @@ struct Sidebar: View {
             }.id(model.sidebarSpaces.active.id)
                 .transition(.asymmetric(insertion: .move(edge: switchingForward ? .trailing : .leading).combined(with: .opacity), removal: .move(edge: switchingForward ? .leading : .trailing).combined(with: .opacity)))
             Spacer(minLength: 0)
+            ProviderUsageFooter().padding(.horizontal, 12).padding(.vertical, 10)
             Divider()
             HStack(spacing: 6) {
                 Button {step(-1)} label: {Image(systemName: "chevron.left").frame(width: 22, height: 28)}

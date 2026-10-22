@@ -6,11 +6,21 @@ import WebKit
     @Published var address: String
     @Published var message: String?
     let storageId: String
-    init(storageId: String) {
+    init(storageId: String, workspaceId: String) {
         self.storageId = storageId
-        address = UserDefaults.standard.string(forKey: "browser.\(storageId)") ?? "http://localhost:3000"
+        address = Self.savedAddress(storageId: storageId, workspaceId: workspaceId)
         // Browser content gets no terminal/API bridge and no daemon credentials.
         webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+    }
+    static func savedAddress(storageId: String, workspaceId: String, defaults: UserDefaults = .standard) -> String {
+        let key = "browser.\(storageId)", legacyKey = "browser.\(workspaceId)"
+        if let saved = defaults.string(forKey: key) {return saved}
+        if let legacy = defaults.string(forKey: legacyKey) {
+            defaults.set(legacy, forKey: key)
+            defaults.removeObject(forKey: legacyKey)
+            return legacy
+        }
+        return "http://localhost:3000"
     }
     func navigate() {
         let value = address.contains("://") ? address : "https://" + address
@@ -21,7 +31,7 @@ import WebKit
 struct BrowserPane: View {
     let visible: Bool
     @StateObject private var browser: BrowserModel
-    init(storageId: String, visible: Bool) {self.visible = visible; _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId))}
+    init(storageId: String, workspaceId: String, visible: Bool) {self.visible = visible; _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId))}
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {

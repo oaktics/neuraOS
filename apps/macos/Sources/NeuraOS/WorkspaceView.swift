@@ -123,7 +123,7 @@ struct WorkspaceView: View {
                 let visible = active && model.selectedId == workspace.id
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
-                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", visible: visible)}
+                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible)}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }

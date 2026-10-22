@@ -7,6 +7,7 @@ struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: S
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
+    var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
     var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
     var projects: [Project] = []; var workspaces: [Workspace] = []; var terminals: [TerminalRecord] = []
 }
@@ -61,6 +62,8 @@ final class DaemonClient {
     @Published var state = Snapshot()
     @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
     @Published var connected = false
+    @Published var providerUsage: [ProviderUsage] = []
+    @Published var usageFailed = false
     @Published var error: String?
     @Published var busy = false
     @Published var showNewWorkspace = false
@@ -102,7 +105,8 @@ final class DaemonClient {
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
-    init() {
+    init(startPolling: Bool = true) {
+        guard startPolling else {return}
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
         }
@@ -128,6 +132,13 @@ final class DaemonClient {
         sidebarSpaces.remember(id)
         selectedId = id; if let id {openedIds.insert(id)}; UserDefaults.standard.set(id, forKey: "selectedWorkspace")}
     func report(_ error: Error) {self.error = error.localizedDescription}
+    func refreshUsage() async {
+        do {
+            let response: ProviderUsageResponse = try await api.get("v1/usage")
+            providerUsage = response.providers
+            usageFailed = false
+        } catch {usageFailed = true; providerUsage = []}
+    }
     func addProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
         panel.message = "作業するフォルダを選択（Gitは不要です）"; panel.prompt = "追加"
@@ -154,12 +165,12 @@ final class DaemonClient {
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
         busy = true; defer {busy = false}
-        let existingIds = Set(state.terminals.map(\.id))
         do {
-            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
-            guard !existingIds.contains(terminal.id) else {
+            // Check before sending: concurrent opens against legacy daemons can return the same PTY.
+            guard state.supportsMultipleTerminals else {
                 throw APIError(error: "daemon_update_required", message: "Daemonの更新が必要です。実行中の作業を終えてから pnpm service restart を実行してください。")
             }
+            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
             await refresh(); return terminal
         } catch {report(error); return nil}
     }
@@ -167,4 +178,48 @@ final class DaemonClient {
         do {let _: OK = try await api.command(["type": "terminal.stop", "terminalId": terminal.id]); await refresh(); return true} catch {report(error); return false}
     }
     func terminal(id: String?) -> TerminalRecord? {state.terminals.first {$0.id == id}}
+}
+
+
+struct ProviderUsageResponse: Decodable {let providers: [ProviderUsage]}
+struct UsageWindow: Decodable {
+    let label: String
+    let usedPercent: Double
+    let resetsAt: String?
+    var percentage: String {String(format: "%.0f%%", usedPercent)}
+}
+struct ProviderUsage: Decodable, Identifiable {
+    var id: String {provider}
+    let provider: String
+    let status: String
+    let windows: [UsageWindow]
+    let checkedAt: String
+    static func date(_ value: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: value) {return date}
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
+    func isStale(at now: Date) -> Bool {
+        guard let date = Self.date(checkedAt) else {return true}
+        return now.timeIntervalSince(date) > 150
+    }
+    var statusLabel: String {
+        switch status {
+        case "signed_out": return "ログインが必要"
+        case "unsupported": return "情報なし"
+        default: return "取得できません"
+        }
+    }
+    var details: String {
+        var lines = ["アカウント共通の利用枠の使用率（約1分ごとに更新）"]
+        for window in windows {
+            let reset = window.resetsAt.flatMap(Self.date).map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "不明"
+            lines.append("\(window.label): \(window.percentage) 使用・リセット \(reset)")
+        }
+        if let date = Self.date(checkedAt) {lines.append("確認: \(date.formatted(date: .omitted, time: .standard))")}
+        if status == "signed_out" {lines.append("CLIでログインを確認してください。")}
+        return lines.joined(separator: "\n")
+    }
 }
