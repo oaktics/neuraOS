@@ -75,7 +75,7 @@ struct NativeRelease: Decodable {
         let script = resources.appendingPathComponent(bundledScript ? "Runtime/scripts/native/release/update.mjs" : "update.mjs").path
         return try await Task.detached(priority: .utility) {
             try UpdateProcess.run(executable: node, arguments: [script] + arguments,
-                                  timeout: arguments.first == "prepare" ? nil : 90)
+                                  timeout: ["prepare", "bootstrap"].contains(arguments.first ?? "") ? nil : 90)
         }.value
     }
     private func updateError(_ text: String) -> NSError {NSError(domain: "neuraOS.Update", code: 1, userInfo: [NSLocalizedDescriptionKey: text])}
