@@ -9,18 +9,22 @@ permissions:
   contents: read
 concurrency:
   group: native-release-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
-  cancel-in-progress: false
+  # Main keeps the running release and only the newest pending run.
+  # Older pending runs may be replaced even when cancellation is false.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   build:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24.13.0'
       - uses: pnpm/action-setup@v4
         with:
           version: '11.9.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.0'
+          cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
