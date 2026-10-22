@@ -87,6 +87,8 @@ struct RootView: View {
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            Rectangle().fill(Palette.line).frame(height: 1)
+            ProviderUsageFooter()
             if !model.connected {
                 HStack {Image(systemName: "network.slash"); Text("Daemonへ再接続しています。作業の状態は接続後に更新されます。"); Spacer(); Button("再接続") {Task {await model.refresh()}}}
                     .font(.system(size: 11)).padding(10).background(Color.orange.opacity(0.08))
@@ -182,7 +184,6 @@ struct Sidebar: View {
             }.id(model.sidebarSpaces.active.id)
                 .transition(.asymmetric(insertion: .move(edge: switchingForward ? .trailing : .leading).combined(with: .opacity), removal: .move(edge: switchingForward ? .leading : .trailing).combined(with: .opacity)))
             Spacer(minLength: 0)
-            ProviderUsageFooter().padding(.horizontal, 12).padding(.vertical, 10)
             Divider()
             HStack(spacing: 6) {
                 Button {step(-1)} label: {Image(systemName: "chevron.left").frame(width: 22, height: 28)}

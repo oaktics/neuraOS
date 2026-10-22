@@ -187,6 +187,15 @@ struct UsageWindow: Decodable {
     let usedPercent: Double
     let resetsAt: String?
     var percentage: String {String(format: "%.0f%%", usedPercent)}
+    func resetCountdown(at now: Date) -> String? {
+        guard let resetsAt, let reset = ProviderUsage.date(resetsAt) else {return nil}
+        let seconds = reset.timeIntervalSince(now)
+        guard seconds > 0 else {return "更新待ち"}
+        let minutes = Int(ceil(seconds / 60))
+        if minutes >= 1440 {return "\(minutes / 1440)d \((minutes % 1440) / 60)h"}
+        if minutes >= 60 {return "\(minutes / 60)h \(minutes % 60)m"}
+        return "\(minutes)m"
+    }
 }
 struct ProviderUsage: Decodable, Identifiable {
     var id: String {provider}
