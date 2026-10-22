@@ -4,8 +4,14 @@ let package = Package(
     name: "NeuraOS",
     platforms: [.macOS(.v14)],
     products: [.executable(name: "NeuraOS", targets: ["NeuraOS"])],
-    dependencies: [.package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0")],
-    targets: [.executableTarget(name: "NeuraOS", dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")]),
+    dependencies: [
+        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1")
+    ],
+    targets: [.executableTarget(name: "NeuraOS", dependencies: [
+        .product(name: "SwiftTerm", package: "SwiftTerm"),
+        .product(name: "MarkdownUI", package: "swift-markdown-ui")
+    ]),
               .testTarget(name: "NeuraOSTests", dependencies: ["NeuraOS"])],
     swiftLanguageModes: [.v5]
 )
