@@ -46,6 +46,17 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
         const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
       }
+      case 'workspace.delete':{
+        const record=workspace(c.workspaceId);
+        if(record.kind!=='worktree')throw new Fault('worktree_required','削除できるのは追加したworktreeだけです。');
+        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
+        const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
+        // Never force removal: Git protects dirty, untracked and locked worktrees.
+        // Keep the branch so committed work remains recoverable.
+        await work.git(project.path,['worktree','remove','--',record.path]);
+        store.deleteWorkspace(record.id);
+        return {ok:true};
+      }
       case 'terminal.open':return terminals.open(workspace(c.workspaceId),c.provider,c.resume);
       case 'terminal.input':return terminals.input(c.terminalId,c.clientId,c.data);
       case 'terminal.resize':return terminals.resize(c.terminalId,c.clientId,c.cols,c.rows);
@@ -61,7 +72,10 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));
     // Network operations must not block PTY input/resize or local file saves.
     const isGitHub=command.type.startsWith('github.');
-    const result=(isGitHub?githubQueue:queue).catch(()=>{}).then(async()=>{
+    // Deletion is a barrier: finish GitHub mutations before removing their cwd.
+    const isDelete=command.type==='workspace.delete';
+    const preceding=isDelete?Promise.allSettled([queue,githubQueue]):isGitHub?githubQueue:queue;
+    const result=preceding.catch(()=>{}).then(async()=>{
       const existing=store.db.prepare('SELECT * FROM operations WHERE id=?').get(operationId);
       if(existing){
         if(existing.hash!==digest)throw new Fault('operation_conflict','同じ操作IDに別の内容が指定されています。',409);
@@ -72,7 +86,7 @@ export async function createDaemon(dataDir:string,github=new GitHub()){
       store.db.prepare('INSERT INTO operations(id,hash,status) VALUES(?,?,?)').run(operationId,digest,'pending');
       try{const value=await execute(command,operationId);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('done',JSON.stringify(value),operationId);return value;}
       catch(e){const fault=e instanceof Fault?e:new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('failed',JSON.stringify({code:fault.code,message:fault.message,status:fault.status}),operationId);throw fault;}
-    });if(isGitHub)githubQueue=result;else queue=result;return result;
+    });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else queue=result;return result;
   });
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);

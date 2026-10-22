@@ -99,3 +99,48 @@ test('ordinary folders support files, PTY and persistence without initializing G
     const state=(await get('/v1/state')).json();assert.equal(state.workspaces.length,1);assert.equal(state.workspaces[0].id,ws.id);assert.equal(state.workspaces[0].kind,'root');
   } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
 });
+
+test('worktree deletion protects active work and removes persisted records while retaining branches',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'neura-delete-')),repo=join(root,'repo'),data=join(root,'data');
+  await mkdir(repo);await git(repo,['init','-b','main']);await git(repo,['config','user.name','Test']);await git(repo,['config','user.email','test@example.invalid']);
+  await writeFile(join(repo,'hello.txt'),'hello\n');await git(repo,['add','.']);await git(repo,['commit','-m','initial']);
+  let daemon=await createDaemon(data);
+  const cmd=(command:unknown,operationId=randomUUID())=>daemon.app.inject({method:'POST',url:'/v1/commands',headers:{authorization:`Bearer ${daemon.token}`},payload:{operationId,command}});
+  try {
+    const project=(await cmd({type:'project.add',path:repo})).json();
+    const main=daemon.store.state().workspaces[0];
+    assert.equal((await cmd({type:'workspace.delete',workspaceId:main.id})).json().error,'worktree_required');
+    const ws=(await cmd({type:'workspace.create',projectId:project.id})).json();
+    const remove={type:'workspace.delete',workspaceId:ws.id};
+    await writeFile(join(ws.path,'hello.txt'),'unsaved changes');
+    assert.equal((await cmd(remove)).json().error,'git_failed');
+    assert.equal(await readFile(join(ws.path,'hello.txt'),'utf8'),'unsaved changes');
+    await git(ws.path,['restore','hello.txt']);
+    await writeFile(join(ws.path,'untracked.txt'),'keep');
+    assert.equal((await cmd(remove)).json().error,'git_failed');
+    await rm(join(ws.path,'untracked.txt'));
+    await git(repo,['worktree','lock',ws.path]);
+    assert.equal((await cmd(remove)).json().error,'git_failed');
+    await git(repo,['worktree','unlock',ws.path]);
+    const terminal=(await cmd({type:'terminal.open',workspaceId:ws.id,provider:'shell'})).json();
+    assert.ok(terminal.id);
+    assert.equal((await cmd(remove)).json().error,'workspace_running');
+    await cmd({type:'terminal.stop',terminalId:terminal.id});
+    for(let i=0;i<100&&daemon.store.state().terminals.some(t=>t.id===terminal.id&&t.status==='running');i++)await new Promise(r=>setTimeout(r,50));
+    assert.notEqual(daemon.store.state().terminals.find(t=>t.id===terminal.id)?.status,'running');
+    const revision=daemon.store.state().revision,operation=randomUUID();
+    assert.equal((await cmd(remove,operation)).statusCode,200);
+    assert.equal((await cmd(remove,operation)).statusCode,200);
+    await assert.rejects(stat(ws.path),{code:'ENOENT'});
+    assert.ok(!(await git(repo,['worktree','list','--porcelain'])).includes(ws.path));
+    assert.ok((await git(repo,['branch','--list',ws.branch])).includes(ws.branch));
+    assert.equal(await readFile(join(repo,'hello.txt'),'utf8'),'hello\n');
+    assert.ok(daemon.store.state().revision>revision);
+    assert.equal(daemon.store.state().workspaces.length,1);
+    assert.equal(daemon.store.state().terminals.length,0);
+    assert.equal(daemon.store.output(terminal.id,0).chunks.length,0);
+    await daemon.app.close();daemon=await createDaemon(data);
+    assert.equal(daemon.store.state().workspaces.length,1);
+    assert.equal((await cmd(remove)).json().error,'workspace_missing');
+  } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
+});

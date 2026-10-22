@@ -28,6 +28,18 @@ export class Store {
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
+  deleteWorkspace(id:string){
+    this.db.exec('BEGIN IMMEDIATE');try{
+      const terminals=this.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===id);
+      for(const terminal of terminals){
+        this.db.prepare('DELETE FROM output WHERE terminalId=?').run(terminal.id);
+        this.db.prepare('DELETE FROM terminals WHERE id=?').run(terminal.id);
+      }
+      this.db.prepare('DELETE FROM workspaces WHERE id=?').run(id);
+      this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run('workspaces',id,new Date().toISOString());
+      this.db.exec('COMMIT');
+    }catch(e){this.db.exec('ROLLBACK');throw e;}
+  }
   state(){return {protocolVersion:1,hostName:process.env.NEURA_HOST_NAME??'このMac',revision:Number(this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS n FROM events').get()!.n),projects:this.list<Project>('projects'),workspaces:this.list<Workspace>('workspaces'),terminals:this.list<TerminalRecord>('terminals')};}
   append(terminalId:string,data:string){this.db.prepare('INSERT INTO output(terminalId,data) VALUES(?,?)').run(terminalId,data);}
   resize(terminalId:string,cols:number,rows:number){this.db.prepare('INSERT INTO output(terminalId,data,cols,rows) VALUES(?,?,?,?)').run(terminalId,'',cols,rows);}
