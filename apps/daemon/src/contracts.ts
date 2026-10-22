@@ -2,7 +2,7 @@ import {z} from 'zod';
 
 export const protocolVersion = 1;
 // Additive features are negotiated separately so existing v1 clients keep working.
-export const daemonFeatures = ['github','workspace.delete','workspace.delete.discard','terminal.multiple'] as const;
+export const daemonFeatures = ['github','workspace.delete','workspace.delete.discard','terminal.multiple','provider.usage'] as const;
 const id = z.uuid();
 const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);

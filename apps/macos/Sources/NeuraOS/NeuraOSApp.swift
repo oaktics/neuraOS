@@ -90,6 +90,13 @@ struct RootView: View {
             }
         }
         .background(Palette.surface)
+        .task(id: model.connected && model.state.features?.contains("provider.usage") == true) {
+            guard model.connected, model.state.features?.contains("provider.usage") == true else {return}
+            while !Task.isCancelled {
+                await model.refreshUsage()
+                do {try await Task.sleep(for: .seconds(60))} catch {return}
+            }
+        }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $model.showNewWorkspace) {NewWorkspaceSheet()}
         .alert("操作を完了できませんでした", isPresented: Binding(get: {model.error != nil}, set: {if !$0 {model.error = nil}})) {Button("閉じる") {model.error = nil}} message: {Text(model.error ?? "")}
@@ -143,6 +150,7 @@ struct Sidebar: View {
                 }.padding(.horizontal, 8)
             }
             Spacer(minLength: 0)
+            ProviderUsageFooter().padding(.horizontal, 12).padding(.vertical, 10)
         }.background(Palette.surface)
         .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
