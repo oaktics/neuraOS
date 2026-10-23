@@ -71,3 +71,34 @@ test('checks endpoint is authenticated and does not fetch GitHub for ordinary fo
     assert.equal(response.statusCode,200);assert.equal(response.json().state,'unsupported');assert.equal(calls,0);
   }finally{await daemon.app.close();await rm(dir,{recursive:true,force:true});}
 });
+
+test('detached HEAD can read CI while branch-dependent GitHub operations still reject it',async()=>{
+  let branchReads=0,requests=0;
+  const github=new GitHub(async(_root,args)=>{
+    requests++;assert.ok(args.includes(`head=${head}`));
+    return JSON.stringify([page([{name:'build',conclusion:'SUCCESS'}])]);
+  },async(_root,args)=>{
+    if(args[0]==='remote')return 'git@github.com:owner/repo.git';
+    if(args[0]==='branch'){branchReads++;return '';}
+    assert.deepEqual(args,['rev-parse','--verify','HEAD']);return head;
+  });
+  const result=await github.checks('/detached-worktree');
+  assert.equal(result.state,'success');assert.equal(result.head,head);
+  assert.equal(requests,1);assert.equal(branchReads,0);
+  await assert.rejects(github.status('/detached-worktree'),{code:'github_detached'});
+});
+
+test('detached CI invalidates results when the commit or origin changes during the request',async()=>{
+  for(const change of ['head','origin']){
+    let currentHead=head,origin='git@github.com:owner/repo.git';
+    const github=new GitHub(async()=>{
+      if(change==='head')currentHead=nextHead;else origin='git@github.com:owner/other.git';
+      return JSON.stringify([page([{name:'build',conclusion:'SUCCESS'}])]);
+    },async(_root,args)=>{
+      if(args[0]==='remote')return origin;
+      if(args[0]==='branch')return '';
+      return currentHead;
+    });
+    assert.equal((await github.checks('/detached-worktree')).state,'unknown');
+  }
+});
