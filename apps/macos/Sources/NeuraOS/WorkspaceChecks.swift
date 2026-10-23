@@ -20,7 +20,12 @@ struct WorkspaceChecksSnapshot: Decodable {
         }
     }
     var help: String {
-        ([label] + (head.map {["コミット: \($0.prefix(7))"]} ?? []) + checks.map {"\($0.name): \($0.state)"} + (message.map {[$0]} ?? []) + ["表示中は60秒ごとに更新"]).joined(separator: "\n")
+        var lines: [String] = [label]
+        if let head {lines.append("コミット: \(head.prefix(7))")}
+        for check in checks {lines.append("\(check.name): \(check.state)")}
+        if let message {lines.append(message)}
+        lines.append("表示中は60秒ごとに更新")
+        return lines.joined(separator: "\n")
     }
 }
 
