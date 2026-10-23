@@ -116,9 +116,14 @@ for await(const line of createInterface({input:process.stdin})){
     const revision=store.state().revision;
     terminals.input(first.id,'client','ask\r');await waitFor(()=>record(first.id).activity==='waiting');
     assert.ok(store.state().revision>revision);assert.equal(record(second.id).activity,'idle');
+    assert.equal(record(first.id).notification?.kind,'waiting');
+    assert.equal(record(second.id).notification,undefined);
     terminals.input(first.id,'client','answer\r');await waitFor(()=>record(first.id).activity==='working');
+    terminals.input(first.id,'client','done\r');await waitFor(()=>record(first.id).notification?.kind==='completed');
+    const completed=record(first.id).notification;
     terminals.input(first.id,'client','exit\r');await waitFor(()=>record(first.id).status==='exited');
     assert.equal(record(first.id).activity,undefined);assert.equal(record(second.id).status,'running');
+    assert.deepEqual(record(first.id).notification,completed);
   }finally{await terminals.shutdown();store.close();if(previous===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=previous;await rm(dir,{recursive:true,force:true});}
 });
 
@@ -129,4 +134,22 @@ test('Codex child turn completion cannot stop a parent when transcript paths are
   assert.equal(tracker.accept({hook_event_name:'SessionStart',session_id:'root',source:'startup'}),'working');
   assert.equal(tracker.accept({hook_event_name:'Stop',session_id:'root',turn_id:'child'}),'working');
   assert.equal(tracker.accept({hook_event_name:'Stop',session_id:'root',turn_id:'parent'}),'idle');
+});
+
+test('notification events distinguish completion from interrupt and suppress duplicate or child hooks',()=>{
+  for(const tool_name of ['request_user_input','AskUserQuestion']) {
+    const tracker=new ActivityTracker();
+    const event=(hook_event_name:string,extra={})=>tracker.accept({hook_event_name,...extra});
+    event('SessionStart');assert.equal(tracker.notification,undefined);
+    event('UserPromptSubmit');
+    event('PreToolUse',{tool_name});assert.equal(tracker.notification,'waiting');
+    event('PermissionRequest',{tool_name});assert.equal(tracker.notification,undefined);
+    event('Stop',{agent_id:'child'});assert.equal(tracker.notification,undefined);
+    event('PostToolUse',{tool_name});
+    event('Stop');assert.equal(tracker.notification,'completed');
+    event('Stop');assert.equal(tracker.notification,undefined);
+    event('UserPromptSubmit');event('Interrupt');assert.equal(tracker.notification,undefined);
+    event('Stop');assert.equal(tracker.notification,undefined);
+    event('UserPromptSubmit');event('StopFailure');assert.equal(tracker.notification,undefined);
+  }
 });

@@ -13,7 +13,7 @@ struct WorkspaceCommandRequest {
 
 struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
-struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
+struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var notification: AgentNotificationEvent? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
@@ -112,12 +112,19 @@ final class DaemonClient {
     }
     let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     @Published var openedIds: Set<String> = []
+    @Published var requestedTerminalId: String?
+    private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
     init(startPolling: Bool = true) {
         guard startPolling else {return}
+        agentNotifications = AgentNotifications { [weak self] terminalId in
+            guard let self, let terminal = self.terminal(id: terminalId) else {return}
+            self.select(terminal.workspaceId)
+            self.requestedTerminalId = terminalId
+        }
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
         }
@@ -128,6 +135,7 @@ final class DaemonClient {
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
             // A daemon upgrade can change features without changing stored data/revision.
             if next.revision != state.revision || next.features != state.features || !connected {state = next}
+            agentNotifications?.receive(state)
             openedIds.formIntersection(Set(state.workspaces.map(\.id)))
             connected = true
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {

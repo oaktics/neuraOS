@@ -43,7 +43,8 @@ export class Terminals {
           const current=this.store.get<TerminalRecord>('terminals',id);
           if(!current||current.status!=='running')return;
           const activity=tracker.accept(event);
-          if(current.activity!==activity)this.store.put('terminals',{...current,activity});
+          const notification=tracker.notification?{id:randomUUID(),kind:tracker.notification,createdAt:new Date().toISOString()}:current.notification;
+          if(current.activity!==activity||notification!==current.notification)this.store.put('terminals',{...current,activity,notification});
         });
         this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
         extraArgs=activityArguments(provider);
