@@ -1,10 +1,22 @@
 import SwiftUI
 import AppKit
+import Darwin
 
 @main struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
     @StateObject private var updater = AppUpdater()
+    init() {
+        // Exercise the actual packaged executable without opening a window or
+        // starting the daemon. Release smoke checks run this after relocation.
+        if CommandLine.arguments.contains("--check-bundled-resources") {
+            let available = GitHubMarkdownHTML.resourcesAvailable
+            if !available {
+                FileHandle.standardError.write(Data("Missing GitHub Markdown resources\n".utf8))
+            }
+            exit(available ? 0 : 1)
+        }
+    }
     var body: some Scene {
         Window("neuraOS", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
