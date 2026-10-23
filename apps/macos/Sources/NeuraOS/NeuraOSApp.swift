@@ -1,8 +1,22 @@
 import SwiftUI
 import AppKit
 import Darwin
+import ChromiumBridge
 
-@main struct NeuraOSApp: App {
+@main enum NeuraOSMain {
+    static func main() {
+        NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
+            exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
+        }
+        if !CommandLine.arguments.contains("--check-bundled-resources") {
+            if let error = NCInitializeChromium() {NSLog("%@", error)}
+        }
+        NeuraOSApp.main()
+    }
+}
+
+struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
     @StateObject private var updater = AppUpdater()

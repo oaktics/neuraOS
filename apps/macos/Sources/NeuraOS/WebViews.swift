@@ -1,63 +1,107 @@
 import SwiftUI
-import WebKit
+import ChromiumBridge
 
 @MainActor final class BrowserModel: ObservableObject {
-    let webView: WKWebView
+    let view: NCChromiumView
     @Published var address: String
+    @Published var title = ""
     @Published var message: String?
-    let storageId: String
-    init(storageId: String, workspaceId: String) {
+    @Published var canGoBack = false
+    @Published var canGoForward = false
+    @Published var isLoading = false
+    private let storageId: String
+    private var observedURL = ""
+
+    init(storageId: String, workspaceId: String, view: NCChromiumView? = nil) {
         self.storageId = storageId
         address = Self.savedAddress(storageId: storageId, workspaceId: workspaceId)
-        // Browser content gets no terminal/API bridge and no daemon credentials.
-        webView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        self.view = view ?? NCChromiumView(frame: .zero)
+        self.view.onState = { [weak self] url, title, back, forward, loading in
+            DispatchQueue.main.async {
+                guard let self else {return}
+                self.title = title
+                // CEF callbacks arrive on its UI thread (the AppKit main thread).
+                self.canGoBack = back; self.canGoForward = forward; self.isLoading = loading
+                if loading {self.message = nil}
+                if !url.isEmpty, url != self.observedURL {
+                    self.observedURL = url; self.address = url
+                    UserDefaults.standard.set(url, forKey: "browser.\(self.storageId)")
+                }
+            }
+        }
+        self.view.onError = { [weak self] message in DispatchQueue.main.async {self?.message = message} }
+        // A popup already owns a Chromium navigation/opener. Do not reload it.
+        if view == nil {navigate()}
     }
     static func savedAddress(storageId: String, workspaceId: String, defaults: UserDefaults = .standard) -> String {
         let key = "browser.\(storageId)", legacyKey = "browser.\(workspaceId)"
         if let saved = defaults.string(forKey: key) {return saved}
         if let legacy = defaults.string(forKey: legacyKey) {
-            defaults.set(legacy, forKey: key)
-            defaults.removeObject(forKey: legacyKey)
-            return legacy
+            defaults.set(legacy, forKey: key); defaults.removeObject(forKey: legacyKey); return legacy
         }
         return "http://localhost:3000"
     }
+    static func navigationURL(_ input: String) -> URL? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value == "about:blank" {return URL(string: value)}
+        guard !value.isEmpty else {return nil}
+        let normalized = value.contains("://") ? value : "https://" + value
+        guard let url = URL(string: normalized), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil else {return nil}
+        return url
+    }
     func navigate() {
-        let value = address.contains("://") ? address : "https://" + address
-        guard let url = URL(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else {message = "httpまたはhttpsのURLを入力してください。"; return}
-        message = nil; address = value; UserDefaults.standard.set(value, forKey: "browser.\(storageId)"); webView.load(URLRequest(url: url))
+        guard let url = Self.navigationURL(address) else {message = "httpまたはhttpsのURLを入力してください。"; return}
+        message = nil; address = url.absoluteString
+        UserDefaults.standard.set(address, forKey: "browser.\(storageId)")
+        view.loadURL(address)
     }
 }
+
 struct BrowserPane: View {
     let visible: Bool
+    @Binding var title: String?
+    let onPopup: (NCChromiumView, String) -> Bool
+    let onClosed: () -> Void
     @StateObject private var browser: BrowserModel
-    init(storageId: String, workspaceId: String, visible: Bool) {self.visible = visible; _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId))}
+    init(storageId: String, workspaceId: String, visible: Bool, title: Binding<String?>, view: NCChromiumView? = nil,
+         onPopup: @escaping (NCChromiumView, String) -> Bool, onClosed: @escaping () -> Void) {
+        self.visible = visible; self._title = title; self.onPopup = onPopup; self.onClosed = onClosed
+        _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, view: view))
+    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Button {browser.webView.goBack()} label: {Image(systemName: "chevron.left")}.help("戻る")
-                Button {browser.webView.goForward()} label: {Image(systemName: "chevron.right")}.help("進む")
-                Button {browser.webView.reload()} label: {Image(systemName: "arrow.clockwise")}.help("再読み込み")
+                Button {browser.view.goBack()} label: {Image(systemName: "chevron.left")}.help("戻る").disabled(!browser.canGoBack)
+                Button {browser.view.goForward()} label: {Image(systemName: "chevron.right")}.help("進む").disabled(!browser.canGoForward)
+                Button {if browser.isLoading {browser.view.stop()} else {browser.view.reload()}} label: {
+                    Image(systemName: browser.isLoading ? "xmark" : "arrow.clockwise")
+                }.help(browser.isLoading ? "読み込みを停止" : "再読み込み")
                 TextField("URL", text: $browser.address).textFieldStyle(.roundedBorder).onSubmit {browser.navigate()}
                 Button {browser.navigate()} label: {Image(systemName: "arrow.right")}.help("開く")
+                Button {if let url = BrowserModel.navigationURL(browser.address), url.scheme != "about" {NSWorkspace.shared.open(url)}} label: {
+                    Image(systemName: "arrow.up.right.square")
+                }.help("デフォルトのブラウザで開く")
             }.buttonStyle(.plain).font(.system(size: 12)).padding(.horizontal, 8).frame(height: 34)
             if let message = browser.message {Text(message).font(.system(size: 11)).foregroundStyle(.secondary).padding(8)}
-            if visible {BrowserWebView(browser: browser, visible: true).frame(maxWidth: .infinity, maxHeight: .infinity)} else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
-        }
+            BrowserWebView(browser: browser, visible: visible, onPopup: onPopup, onClosed: onClosed)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.onChange(of: browser.title) {_, value in title = value.isEmpty ? nil : value}
     }
 }
 struct BrowserWebView: NSViewRepresentable {
     @ObservedObject var browser: BrowserModel
     let visible: Bool
-    func makeCoordinator() -> Coordinator {Coordinator(browser)}
-    func makeNSView(context: Context) -> WKWebView {browser.webView.navigationDelegate = context.coordinator; browser.webView.uiDelegate = context.coordinator; return browser.webView}
-    func updateNSView(_ view: WKWebView, context: Context) {view.isHidden = !visible}
-    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
-        let browser: BrowserModel
-        init(_ browser: BrowserModel) {self.browser = browser}
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {browser.address = webView.url?.absoluteString ?? browser.address; UserDefaults.standard.set(browser.address, forKey: "browser.\(browser.storageId)")}
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {browser.message = error.localizedDescription}
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {decisionHandler(["http", "https", "about"].contains(navigationAction.request.url?.scheme ?? "") ? .allow : .cancel)}
-        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {if navigationAction.targetFrame == nil, ["http", "https"].contains(navigationAction.request.url?.scheme ?? "") {webView.load(navigationAction.request)}; return nil}
+    let onPopup: (NCChromiumView, String) -> Bool
+    let onClosed: () -> Void
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NCChromiumView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 800, height: proposal.height ?? 600)
     }
+    func makeNSView(context: Context) -> NCChromiumView {browser.view}
+    func updateNSView(_ view: NCChromiumView, context: Context) {
+        view.isHidden = !visible
+        view.onPopup = onPopup
+        view.onClosed = {DispatchQueue.main.async {onClosed()}}
+    }
+    static func dismantleNSView(_ view: NCChromiumView, coordinator: ()) {view.onClosed = nil; view.close()}
 }

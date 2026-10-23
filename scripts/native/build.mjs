@@ -1,6 +1,9 @@
 import {execFileSync} from 'node:child_process';
 import {mkdir,cp,writeFile,copyFile,rm,readdir,readFile} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
+import {prepareChromium} from './chromium/prepare.mjs';
+import {bundleChromium} from './chromium/bundle.mjs';
+await prepareChromium();
 const root=resolve(import.meta.dirname,'../..'),native=join(root,'apps/macos');
 const output=process.env.NEURA_APP_OUTPUT??join(native,'dist/neuraOS.app');
 const version=JSON.parse(await readFile(join(root,'package.json'),'utf8')).version;
@@ -31,5 +34,6 @@ await cp(join(root,'scripts/native/release/update.mjs'),join(output,'Contents/Re
 const bundleId=process.env.NEURA_APP_ID??'app.neuraos.native';
 const extra=(process.env.NEURA_DEV_DATA_DIR?`<key>NeuraDataDirectory</key><string>${escape(process.env.NEURA_DEV_DATA_DIR)}</string>`:'')+(process.env.NEURA_DEV_PORT?`<key>NeuraEndpoint</key><string>http://127.0.0.1:${Number(process.env.NEURA_DEV_PORT)}</string>`:'');
 await writeFile(join(output,'Contents/Info.plist'),`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>NeuraOS</string><key>CFBundleIdentifier</key><string>${escape(bundleId)}</string><key>CFBundleName</key><string>neuraOS</string><key>CFBundleDisplayName</key><string>neuraOS</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${escape(version)}</string><key>CFBundleVersion</key><string>${build}</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>NSHighResolutionCapable</key><true/><key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>${extra}</dict></plist>`);
+await bundleChromium(output,bundleId);
 execFileSync('codesign',['--force','--deep','--sign','-',output],{stdio:'inherit'});
 console.log(output);
