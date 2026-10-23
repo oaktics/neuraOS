@@ -98,6 +98,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     return folderRefresh;
   }
   app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return w.kind==='folder'?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
   app.get('/v1/usage',async()=>({providers:await usage.read()}));
   app.addHook('onClose',async()=>{await usage.close();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));

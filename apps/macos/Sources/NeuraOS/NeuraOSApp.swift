@@ -232,7 +232,8 @@ struct Sidebar: View {
                                         HStack(spacing: 8) {
                                             Text(workspace.name).lineLimit(1)
                                             Spacer(minLength: 0)
-                                            if model.state.terminals.contains(where: {$0.workspaceId == workspace.id && $0.status == "running"}) {Circle().fill(Color.green.opacity(0.8)).frame(width: 5, height: 5)}
+                                            WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
+                                            WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspace.id}, connected: model.connected)
                                         }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
