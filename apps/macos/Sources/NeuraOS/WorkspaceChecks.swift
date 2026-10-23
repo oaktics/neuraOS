@@ -31,11 +31,11 @@ struct WorkspaceChecksIndicator: View {
     @State private var snapshot: WorkspaceChecksSnapshot?
     @State private var failed = false
     private var enabled: Bool {visible && workspace.supportsGit && model.connected && model.state.features?.contains("github.checks") == true}
-    private var visible: Bool {failed || snapshot.map {!["none", "unpublished", "unsupported"].contains($0.state)} == true}
+    private var showsBadge: Bool {failed || snapshot.map {!["none", "unpublished", "unsupported"].contains($0.state)} == true}
     private var state: String {(!enabled || failed) ? "unavailable" : snapshot?.state ?? "unknown"}
     var body: some View {
         Group {
-            if visible {
+            if showsBadge {
                 WorkspaceChecksBadge(state: state,
                     help: (!enabled || failed) ? "CIを取得できません。接続を確認しています。" : snapshot?.help ?? "CI 状態不明",
                     label: (!enabled || failed) ? "CI 取得不可" : snapshot?.label ?? "CI 状態不明")
