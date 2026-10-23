@@ -31,6 +31,15 @@ export class Store {
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
+  putProjectWorkspace(project:Project,workspace:Workspace){
+    this.db.exec('BEGIN IMMEDIATE');try{
+      for(const [table,value] of [['projects',project],['workspaces',workspace]] as const){
+        this.db.prepare(`INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`).run(value.id,JSON.stringify(value));
+        this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run(table,value.id,new Date().toISOString());
+      }
+      this.db.exec('COMMIT');
+    }catch(e){this.db.exec('ROLLBACK');throw e;}
+  }
   deleteWorkspace(id:string){
     this.db.exec('BEGIN IMMEDIATE');try{
       const terminals=this.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===id);

@@ -30,11 +30,32 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
   async function execute(c:Command,operationId:string):Promise<unknown>{
     switch(c.type){
+      case 'project.create':{
+        const directory=join(dataDir,'projects',operationId);
+        await mkdir(directory,{recursive:true,mode:0o700});
+        const path=await realpath(directory);
+        const project:Project={id:operationId,name:c.name,path,folderless:true,isGit:false,createdAt:new Date().toISOString()};
+        store.putProjectWorkspace(project,{id:randomUUID(),projectId:project.id,name:'フリー',path,branch:'',kind:'scratch',createdAt:project.createdAt});
+        return project;
+      }
+      case 'project.attach':{
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        if(!project.folderless)throw new Fault('folder_already_attached','このプロジェクトにはすでにフォルダが紐づいています。',409);
+        const {path,isGit}=await work.projectFolder(c.path);
+        if(store.list<Project>('projects').some(p=>p.path===path))throw new Fault('project_exists','このフォルダはすでにプロジェクトに追加されています。',409);
+        if(store.list<Workspace>('workspaces').some(w=>w.path===path))throw new Fault('workspace_exists','このフォルダはすでに作業領域として使用されています。',409);
+        const branch=isGit?(await work.git(path,['branch','--show-current'])).trim()||'(detached)':'';
+        const attached:Project={...project,path,isGit,folderless:false};
+        // Keep scratch IDs and cwd stable, including resumable CLI sessions and browser storage.
+        store.putProjectWorkspace(attached,{id:operationId,projectId:project.id,name:basename(path),path,branch,kind:isGit?'root':'folder',createdAt:new Date().toISOString()});
+        return attached;
+      }
       case 'project.add':{
         const {path,isGit}=await work.projectFolder(c.path),existing=store.list<Project>('projects').find(p=>p.path===path);
+        if(store.list<Workspace>('workspaces').some(w=>w.kind==='scratch'&&w.path===path))throw new Fault('managed_folder','フリーの作業領域はフォルダとして追加できません。',409);
         const project:Project=existing?{...existing,isGit}:{id:operationId,name:basename(path),path,isGit,createdAt:new Date().toISOString()};
         const branch=isGit?(await work.git(path,['branch','--show-current'])).trim()||'(detached)':'';
-        const root=existing?store.list<Workspace>('workspaces').find(w=>w.projectId===existing.id&&w.kind!=='worktree'):undefined;
+        const root=existing?store.list<Workspace>('workspaces').find(w=>w.projectId===existing.id&&(w.kind==='root'||w.kind==='folder')):undefined;
         store.put('projects',project);store.put('workspaces',{id:root?.id??randomUUID(),projectId:project.id,name:root?.name??'メイン',path,branch,kind:isGit?'root':'folder',createdAt:root?.createdAt??project.createdAt} as Workspace);return project;
       }
       case 'workspace.create':{
@@ -69,7 +90,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'terminal.input':return terminals.input(c.terminalId,c.clientId,c.data);
       case 'terminal.resize':return terminals.resize(c.terminalId,c.clientId,c.cols,c.rows);
       case 'terminal.stop':return terminals.stop(c.terminalId);
-      case 'file.save':return work.saveFile(workspace(c.workspaceId).path,c.path,c.content,c.expectedHash);
+      case 'file.save':return work.saveFile(fileWorkspace(c.workspaceId).path,c.path,c.content,c.expectedHash);
       case 'github.push':case 'github.create':case 'github.merge':return github.mutate(gitWorkspace(c.workspaceId).path,c);
     }
   }
@@ -77,7 +98,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   function refreshFolderProjects(){
     // State polling discovers git init without reopening the folder or replacing its IDs.
     // Share concurrent probes, and do not put filesystem/Git reads on the PTY command queue.
-    folderRefresh??=Promise.all(store.list<Project>('projects').filter(p=>p.isGit===false).map(async candidate=>{
+    folderRefresh??=Promise.all(store.list<Project>('projects').filter(p=>p.isGit===false&&!p.folderless).map(async candidate=>{
       try {
         const marker=await stat(join(candidate.path,'.git'));
         if(!marker.isDirectory()&&!marker.isFile())return;
@@ -98,7 +119,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     return folderRefresh;
   }
   app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
-  app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return w.kind==='folder'?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
+  app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return (w.kind==='folder'||w.kind==='scratch')?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
   app.get('/v1/usage',async()=>({providers:await usage.read()}));
   app.addHook('onClose',async()=>{await usage.close();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
@@ -128,9 +149,10 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
     const record=requireValue(store.get<TerminalRecord>('terminals',id),'terminal_missing','ターミナルがありません。');return {...store.output(id,after),status:record.status,cols:record.cols,rows:record.rows};
   });
-  app.get('/v1/workspaces/:id/files',async req=>work.files(workspace((req.params as {id:string}).id).path,z.string().max(4096).default('').parse((req.query as Record<string,string>).path)));
-  app.get('/v1/workspaces/:id/file',async req=>work.file(workspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
+  app.get('/v1/workspaces/:id/files',async req=>work.files(fileWorkspace((req.params as {id:string}).id).path,z.string().max(4096).default('').parse((req.query as Record<string,string>).path)));
+  app.get('/v1/workspaces/:id/file',async req=>work.file(fileWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
+  const fileWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='scratch')throw new Fault('folder_required','ファイルを操作するにはフォルダを紐づけてください。');return value;};
+  const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder'||value.kind==='scratch')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));

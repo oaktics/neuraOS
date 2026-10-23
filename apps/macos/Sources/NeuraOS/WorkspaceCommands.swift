@@ -4,7 +4,7 @@ import AppKit
 extension AppModel {
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
-        guard let workspace = selected, !showNewSpace, !showNewWorkspace,
+        guard let workspace = selected, !showNewSpace, !showNewWorkspace, !showNewProject,
               WorkspaceCommandContext.allowsCommands(in: NSApp.keyWindow),
               NSApp.modalWindow == nil else {return}
         workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspace.id, action: action))
@@ -39,18 +39,18 @@ struct WorkspaceCommands: Commands {
                         .keyboardShortcut(KeyEquivalent(Character(String(number))))
                 }
             }
-            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace)
+            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace || model.showNewProject)
         }
         CommandMenu("サイドバー") {
             Group {
                 Button("エクスプローラーを表示") {send(.inspector("files"))}
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                    .keyboardShortcut("e", modifiers: [.command, .shift]).disabled(model.selected?.hasFolder != true)
                 Button("Gitを表示") {send(.inspector("git"))}
                     .keyboardShortcut("g", modifiers: [.command, .shift]).disabled(model.selected?.supportsGit != true)
                 Button("GitHubを表示") {send(.inspector("github"))}
                     .keyboardShortcut("g", modifiers: [.command, .option]).disabled(model.selected?.supportsGit != true)
             }
-            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace)
+            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace || model.showNewProject)
         }
     }
 
