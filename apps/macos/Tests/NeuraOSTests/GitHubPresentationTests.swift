@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
+import WebKit
 @testable import NeuraOS
 
 final class GitHubPresentationTests: XCTestCase {
@@ -35,6 +36,31 @@ final class GitHubPresentationTests: XCTestCase {
         let old = try JSONDecoder().decode(GitHubSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(old.pullRequest?.files)
         XCTAssertFalse(try XCTUnwrap(old.pullRequest).canMerge)
+    }
+
+    @MainActor func testLargeConversationBoundsWebViewCount() async throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData()) as? [String: Any])
+        var prObject = try XCTUnwrap(object["pullRequest"] as? [String: Any])
+        let original = try XCTUnwrap((prObject["comments"] as? [[String: Any]])?.first)
+        prObject["comments"] = (0..<200).map { index in
+            var comment = original
+            comment["id"] = "comment-\(index)"
+            return comment
+        }
+        object["pullRequest"] = prObject
+        let snapshot = try JSONDecoder().decode(GitHubSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        let pr = try XCTUnwrap(snapshot.pullRequest)
+        let view = GitHubPullRequestView(pr: pr, snapshot: snapshot, disabled: false, method: .constant("squash"), merge: {}, tab: "conversation").frame(width: 380)
+        let host = NSHostingView(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 380, height: 800), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        defer {window.contentView = nil}
+        try await Task.sleep(for: .milliseconds(300))
+        host.layoutSubtreeIfNeeded()
+        func webViewCount(_ view: NSView) -> Int {
+            (view is WKWebView ? 1 : 0) + view.subviews.reduce(0) {$0 + webViewCount($1)}
+        }
+        XCTAssertEqual(webViewCount(host), 20, "A conversation must only instantiate the current page's renderers")
     }
 
     @MainActor func testRichTabsRenderAtSidebarWidths() async throws {
