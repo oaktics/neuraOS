@@ -57,7 +57,8 @@ struct WorkspaceView: View {
                 if workspace.supportsGit {Text("\(git.changes.count) files changed").fixedSize()}
             }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
         }
-        .onAppear {restore()}
+        .onAppear {restore(); openRequestedTerminal()}
+        .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
         .onReceive(model.workspaceCommands) {request in
             guard request.workspaceId == workspace.id, model.selectedId == workspace.id,
                   closingTab == nil else {return}
@@ -225,6 +226,18 @@ struct WorkspaceView: View {
         guard let index = layout.tabs.firstIndex(where: {$0.id == item.id}) else {return}
         layout.tabs.remove(at: index)
         if layout.selectedId == item.id {layout.selectedId = layout.tabs.isEmpty ? nil : layout.tabs[min(index, layout.tabs.count - 1)].id}
+    }
+    private func openRequestedTerminal() {
+        guard let id = model.requestedTerminalId,
+              let terminal = model.terminal(id: id), terminal.workspaceId == workspace.id else {return}
+        restore()
+        if let tab = layout.tabs.first(where: {$0.terminalId == id}) {layout.selectedId = tab.id}
+        else {
+            let tab = WorkspaceTab(kind: terminal.provider, number: (layout.tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1, terminalId: id)
+            layout.tabs.append(tab); layout.selectedId = tab.id
+        }
+        model.requestedTerminalId = nil
+        persist()
     }
     private func restore() {
         guard !restored else {return}; restored = true

@@ -49,6 +49,7 @@ struct NeuraOSApp: App {
                 Button("新しい作業…") {model.showNewWorkspace = true}.keyboardShortcut("n").disabled(model.gitProjects.isEmpty)
             }
             WorkspaceCommands(model: model)
+            AgentNotificationCommands()
             CommandMenu("表示") {
                 Button("前のWorkspace") {if let id = model.sidebarSpaces.adjacent(-1) {model.switchSpace(id)}}.keyboardShortcut(.leftArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(-1) == nil)
                 Button("次のWorkspace") {if let id = model.sidebarSpaces.adjacent(1) {model.switchSpace(id)}}.keyboardShortcut(.rightArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(1) == nil)
