@@ -54,6 +54,18 @@ struct WorkspaceView: View {
             }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
         }
         .onAppear {restore()}
+        .onReceive(model.workspaceCommands) {request in
+            guard request.workspaceId == workspace.id, model.selectedId == workspace.id,
+                  closingTab == nil else {return}
+            switch request.action {
+            case .add(let kind): add(kind)
+            case .close:
+                if !model.busy, let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
+            case .move(let offset): layout.moveSelection(by: offset)
+            case .select(let number): layout.select(number: number)
+            case .inspector(let pane): inspector = pane; model.showInspector = true
+            }
+        }
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
         .onChange(of: layout.tabs) {_, _ in persist()}
         .onChange(of: layout.selectedId) {_, _ in persist()}
@@ -86,7 +98,7 @@ struct WorkspaceView: View {
                                         if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
                                 }.buttonStyle(.plain)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.busy).help("\(item.title)を閉じる")
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.busy).help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
                             .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
@@ -98,7 +110,7 @@ struct WorkspaceView: View {
                 .onChange(of: layout.selectedId) {_, id in if let id {proxy.scrollTo(id)}}
             }
             Menu {addTabButtons} label: {Image(systemName: "plus").frame(width: 28, height: 32)}
-                .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加")
+                .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加（Terminal: ⌘T）。その他のキーは「タブ」メニュー")
         }.frame(height: 32)
     }
     @ViewBuilder private var addTabButtons: some View {
