@@ -2,6 +2,15 @@ import Foundation
 import SwiftUI
 import Combine
 
+enum WorkspaceAction: Equatable {
+    case add(String), close, move(Int), select(Int), inspector(String)
+}
+
+struct WorkspaceCommandRequest {
+    let workspaceId: String
+    let action: WorkspaceAction
+}
+
 struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
 struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int}

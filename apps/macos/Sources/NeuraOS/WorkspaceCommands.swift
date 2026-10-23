@@ -1,15 +1,6 @@
 import SwiftUI
 import AppKit
 
-enum WorkspaceAction: Equatable {
-    case add(String), close, move(Int), select(Int), inspector(String)
-}
-
-struct WorkspaceCommandRequest {
-    let workspaceId: String
-    let action: WorkspaceAction
-}
-
 extension AppModel {
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
