@@ -6,6 +6,7 @@ import {join,delimiter} from 'node:path';
 import {z} from 'zod';
 import {Fault,type Command} from './contracts.ts';
 import {git} from './workspace.ts';
+import {ChecksCache,parseChecks,type CISnapshot} from './github-checks.ts';
 
 type Runner=(cwd:string,args:string[])=>Promise<string>;
 type Mutation=Extract<Command,{type:'github.push'|'github.create'|'github.merge'}>;
@@ -44,15 +45,20 @@ export const runGitHub:Runner=async(cwd,args)=>{
 };
 
 export class GitHub {
+  private checksCache=new ChecksCache();
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
   private async api(root:string,endpoint:string,args:string[]=[]){return JSON.parse(await this.run(root,['api','--hostname','github.com',endpoint,...args])) as unknown;}
   private async pages(root:string,endpoint:string){return z.array(z.array(z.unknown())).parse(await this.api(root,endpoint,['--paginate','--slurp'])).flat();}
-  private async context(root:string){
+  private async commitContext(root:string){
     const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
+    const head=(await this.gitRun(root,['rev-parse','--verify','HEAD'])).trim();
+    return {repository,head};
+  }
+  private async context(root:string){
+    const context=await this.commitContext(root);
     const branch=(await this.gitRun(root,['branch','--show-current'])).trim();
     if(!branch)throw new Fault('github_detached','ブランチをチェックアウトしてから GitHub を利用してください。');
-    const head=(await this.gitRun(root,['rev-parse','--verify','HEAD'])).trim();
-    return {repository,branch,head};
+    return {...context,branch};
   }
   private async repository(root:string,repository:string){return repositorySchema.parse(await this.api(root,`repos/${repository}`));}
   private async pulls(root:string,context:Awaited<ReturnType<GitHub['context']>>){
@@ -67,6 +73,22 @@ export class GitHub {
     const query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}';
     const result=threadsSchema.parse(await this.api(root,'graphql',['--paginate','--slurp','-f',`query=${query}`,'-f',`owner=${owner}`,'-f',`name=${name}`,'-F',`number=${number}`]));
     return result.flatMap(page=>page.data.repository.pullRequest.reviewThreads.nodes).filter(thread=>!thread.isResolved).length;
+  }
+  async checks(root:string):Promise<CISnapshot>{
+    let context:Awaited<ReturnType<GitHub['commitContext']>>;
+    try{context=await this.commitContext(root);}
+    catch(error){return {state:error instanceof Fault&&error.code==='github_remote'?'unsupported':'unavailable',checks:[],fetchedAt:new Date().toISOString(),message:error instanceof Fault?error.message:'Git の状態を取得できません。'};}
+    const {repository,head}=context;
+    const result=await this.checksCache.read(`${repository}:${head}`,async()=>{
+      const [owner,name]=repository.split('/');
+      const query='query($owner:String!,$name:String!,$head:String!,$endCursor:String){repository(owner:$owner,name:$name){object(expression:$head){... on Commit{oid statusCheckRollup{contexts(first:100,after:$endCursor){nodes{... on CheckRun{name status conclusion detailsUrl} ... on StatusContext{context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}';
+      const value=await this.api(root,'graphql',['--paginate','--slurp','-f',`query=${query}`,'-f',`owner=${owner}`,'-f',`name=${name}`,'-f',`head=${head}`]);
+      return {...parseChecks(value,head),repository,head,fetchedAt:new Date().toISOString()};
+    });
+    // A checkout/commit during the network request invalidates that result.
+    try{const current=await this.commitContext(root);if(current.repository!==repository||current.head!==head)return {state:'unknown',checks:[],fetchedAt:new Date().toISOString(),message:'コミットが変わりました。次の更新でCIを確認します。'};}
+    catch{return {state:'unavailable',checks:[],fetchedAt:new Date().toISOString()};}
+    return result;
   }
   async status(root:string){
     const context=await this.context(root);
