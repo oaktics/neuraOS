@@ -6,6 +6,31 @@ import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const exec = promisify(execFile);
+// Bootstrap owns its timeout so the UI never kills only the outer updater.
+export function runBootstrapCommand(command, args, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false, output = '';
+    const child = spawn(command, args, {detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+    // Keep diagnostics bounded; status output is small.
+    const collect = chunk => {output = (output + chunk.toString()).slice(-65536);};
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // The service command and its launchctl children share this isolated group.
+      try {process.kill(-child.pid, 'SIGKILL');} catch (error) {
+        if (error.code !== 'ESRCH') child.kill('SIGKILL');
+      }
+    }, timeout);
+    child.once('error', error => {clearTimeout(timer); reject(error);});
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error('Daemon bootstrap timed out'));
+      else if (code !== 0) reject(new Error(output || `Daemon bootstrap exited with ${code}`));
+      else resolve({stdout: output});
+    });
+  });
+}
 export const repository = 'oaktics/neuraOS';
 export function validateRelease(release, arch = process.arch) {
   if (release.draft || release.prerelease || !/^native-\d+$/.test(release.tag_name)) throw new Error('対応する正式リリースではありません。');
@@ -132,8 +157,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const bundledNode = join(runtime, 'bin/node');
       await access(bundledNode);
       const service = ['--import', join(runtime, 'node_modules/tsx/dist/loader.mjs'), join(runtime, 'scripts/native/service.ts')];
-      try {await exec(bundledNode, [...service, 'status']);}
-      catch {await exec(bundledNode, [...service, 'install'], {timeout: 30000});}
+      try {await runBootstrapCommand(bundledNode, [...service, 'status']);}
+      catch {await runBootstrapCommand(bundledNode, [...service, 'install']);}
     } else if (command === 'check') console.log(JSON.stringify(await latest()));
     else if (command === 'prepare') console.log(JSON.stringify(await prepare(arg, Number(pid))));
     else if (command === 'apply') await install(arg, Number(pid));
