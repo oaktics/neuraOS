@@ -112,12 +112,19 @@ final class DaemonClient {
     }
     let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     @Published var openedIds: Set<String> = []
+    @Published var requestedTerminalId: String?
+    private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
     init(startPolling: Bool = true) {
         guard startPolling else {return}
+        agentNotifications = AgentNotifications { [weak self] terminalId in
+            guard let self, let terminal = self.terminal(id: terminalId) else {return}
+            self.select(terminal.workspaceId)
+            self.requestedTerminalId = terminalId
+        }
         polling = Task { [weak self] in
             while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
         }
@@ -136,6 +143,7 @@ final class DaemonClient {
             }
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
+            await agentNotifications?.receive(state, api: api)
         } catch {connected = false}
     }
     func select(_ id: String?) {

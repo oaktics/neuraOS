@@ -14,12 +14,14 @@ export interface ActivityEvent {
 // Activity is driven by lifecycle events, never by output frequency or keystrokes.
 export class ActivityTracker {
   activity:AgentActivity='unknown';
+  notification?:'waiting'|'completed';
   private session?:string;
   private transcript?:string;
   private turn?:string;
   private waiting=new Set<string>();
   interrupt(){this.waiting.clear();this.activity='unknown';}
   accept(event:ActivityEvent):AgentActivity {
+    this.notification=undefined;
     if(event.agent_id)return this.activity;
     const name=event.hook_event_name;
     if(name==='SessionStart'){
@@ -32,6 +34,7 @@ export class ActivityTracker {
     if(this.session&&event.session_id!==this.session)return this.activity;
     if(this.transcript&&event.transcript_path!==this.transcript)return this.activity;
     if(this.turn&&event.turn_id&&event.turn_id!==this.turn&&name!=='UserPromptSubmit')return this.activity;
+    const previous=this.activity;
     const key=event.tool_use_id??event.tool_name??'permission';
     switch(name){
       case 'UserPromptSubmit':this.turn=event.turn_id;this.waiting.clear();this.activity='working';break;
@@ -52,6 +55,8 @@ export class ActivityTracker {
       case 'StopFailure':this.interrupt();break;
       case 'SessionEnd':this.interrupt();this.session=undefined;this.transcript=undefined;this.turn=undefined;break;
     }
+    if(this.activity==='waiting'&&previous!=='waiting')this.notification='waiting';
+    if(name==='Stop'&&(previous==='working'||previous==='waiting'))this.notification='completed';
     return this.activity;
   }
 }
