@@ -13,9 +13,13 @@ struct GitHubMarkdown: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        GitHubMarkdownWebView(source: source, baseURL: baseURL, dark: colorScheme == .dark, height: $height)
-            .frame(height: height)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        if GitHubMarkdownHTML.resourcesAvailable {
+            GitHubMarkdownWebView(source: source, baseURL: baseURL, dark: colorScheme == .dark, height: $height)
+                .frame(height: height)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            Text(source).textSelection(.enabled)
+        }
     }
 }
 
@@ -39,8 +43,27 @@ enum GitHubMarkdownHTML {
         return String(cString: html)
     }
 
-    static let script = try! String(contentsOf: Bundle.module.url(forResource: "GitHubMarkdown", withExtension: "js")!, encoding: .utf8)
-    static let style = try! String(contentsOf: Bundle.module.url(forResource: "GitHubMarkdown", withExtension: "css")!, encoding: .utf8)
+    // SwiftPM's command-line build generates a Bundle.module accessor that only
+    // searches in the .app root and in the build directory. Signed macOS apps
+    // keep resource bundles in Contents/Resources instead.
+    private static let resourceBundle: Bundle? = {
+        if let url = Bundle.main.resourceURL?.appendingPathComponent("NeuraOS_NeuraOS.bundle"),
+           let bundle = Bundle(url: url) {return bundle}
+        // Never invoke SwiftPM's fatal accessor in an installed application.
+        if Bundle.main.bundleURL.pathExtension == "app" {return nil}
+        return Bundle.module
+    }()
+
+    static func loadResource(_ name: String, extension ext: String, in bundle: Bundle?) -> String? {
+        guard let url = bundle?.url(forResource: name, withExtension: ext) else {return nil}
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    private static let loadedScript = loadResource("GitHubMarkdown", extension: "js", in: resourceBundle)
+    private static let loadedStyle = loadResource("GitHubMarkdown", extension: "css", in: resourceBundle)
+    static var resourcesAvailable: Bool {loadedScript != nil && loadedStyle != nil}
+    static let script = loadedScript ?? ""
+    static let style = loadedStyle ?? ""
     static let page = """
     <!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
