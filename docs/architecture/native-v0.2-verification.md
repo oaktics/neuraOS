@@ -6,7 +6,7 @@
 
 ## 今回の範囲
 
-SwiftUI / AppKit UIとNode.js Daemonを別プロセスに分離した、個人用の開発ワークスペース。旧タスク・組織・記憶エンジンは新しい実行経路に含めない。DaemonがGit、worktree、PTY、ファイル、SQLiteを所有し、UIは認証付きv1 APIを使う。
+SwiftUI / AppKit UIとNode.js Daemonを別プロセスに分離した、個人用の開発ワークスペース。DaemonがGit、worktree、PTY、ファイル、SQLiteを所有し、UIは認証付きv1 APIを使う。
 
 ターミナルはSwiftTermで表示し、Codex / Claude Codeの対話CLIをそのまま起動する。独自のAI会話・権限承認エンジンは実装していない。ブラウザは独立したWKWebView。
 
@@ -34,6 +34,5 @@ QAのCLI・Daemonは検証後に停止。通常利用用のLaunchAgent `app.neur
 
 ## 保全と未実装
 
-旧ソースと旧データは保持。旧Runnerは停止し、LaunchAgentのplistはユーザーデータのLegacyディレクトリへ退避した。
 
 別PC・スマホ用クライアント、遠隔端末ペアリング、TLS・中継、ポート転送、公証済み単体配布、自動更新、LSP、UIからのcommit/merge/push/worktree削除は未実装。現時点はローカルの開発版であり、旧v1構想の完成版ではない。遠隔拡張はDaemonのID・API・イベントカーソルを境界として追加する。

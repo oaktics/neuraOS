@@ -1,2 +1,0 @@
-import { defineConfig } from '@playwright/test';
-export default defineConfig({testDir:'tests/desktop',fullyParallel:false,workers:1,retries:0,reporter:'list',use:{baseURL:'http://127.0.0.1:1420',channel:'chrome',viewport:{width:1320,height:960},trace:'retain-on-failure'},webServer:{command:'pnpm exec tsx scripts/ui-test-server.ts',url:'http://127.0.0.1:1420',reuseExistingServer:false,timeout:30000}});

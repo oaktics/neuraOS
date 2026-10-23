@@ -2,7 +2,7 @@
 
 macOS向けの、自分用のAI開発ワークスペース。SwiftUIのネイティブUIと、独立したローカルDaemonで構成します。ターミナル表示には[SwiftTerm](https://github.com/migueldeicaza/SwiftTerm/tree/v1.20.0)のAppKitビューを使用し、PTYはDaemon側に置きます。
 
-**0.2.0 開発版。** 旧版の「副社長・部長・社員」「タスク生成・記憶・クラウド同期」は新しい製品の対象から外しました。まずリポジトリ、worktree、対話CLI、ファイル、差分、プレビューを一つの画面で扱います。
+**0.2.0 開発版。** リポジトリ、worktree、対話CLI、ファイル、差分、プレビューを一つの画面で扱います。
 
 ## 起動
 
@@ -56,7 +56,7 @@ Workspaceはプロジェクトを用途別にまとめるサイドバーのグ�
 「メイン」は元のフォルダ／リポジトリです。専用作業はworktree上で行います。worktreeはファイル変更を分離するもので、セキュリティ境界ではありません。
 
 - 同じworktreeでCodex、Claude Code、Terminal、Browserを複数の独立したタブとして追加できます。タブ数の固定上限は設けていません（利用可能な数はMacのリソースに依存します）。タブ構成・選択中のタブ・ブラウザごとのURLは再起動後も復元します。実行中の端末タブを閉じる際は停止を確認します。アプリを終了するだけならPTYは継続します。
-- 複数端末の起動には対応済みDaemon（`terminal.multiple`機能）が必要です。旧Daemonでは既存PTYへの再接続は継続できますが、新規起動時は更新案内を表示します。旧版で保存したブラウザURLは、最初の新しいブラウザタブに一度だけ引き継ぎます。
+- 複数端末の起動には対応済みDaemon（`terminal.multiple`機能）が必要です。旧Daemonでは既存PTYへの再接続は継続できますが、新規起動時は更新案内を表示します。保存済みのワークスペース単位のブラウザURLは、最初のブラウザタブに一度だけ引き継ぎます。
 - 新規起動・会話再開ともに、Codexは`--sandbox danger-full-access --ask-for-approval never`、Claude Codeは`--permission-mode bypassPermissions`を指定します。ファイル操作やコマンド実行の都度の権限承認なしで動作します。CLIや組織の管理ポリシーによる制限は引き続き適用されます。
 - 起動済みの端末へ再接続しても権限は変わりません。起動設定の変更は、更新済みDaemonから新しくCLIを起動したときに適用されます。
 - エージェントの起動ではCLIが通常のユーザー環境で自身の設定と認証を利用します。利用枠の表示では、CodexはApp Serverの読み取りAPI、Claudeは既存のKeychain（または標準の認証ファイル）のアクセストークンをメモリ内で利用します。トークンはneuraOSのDB・ログ・UIには保存・送信しません。
@@ -126,9 +126,3 @@ pnpm build
 ```
 
 自動試験は独立した一時GitリポジトリとSQLiteで、認証、Origin拒否、重複操作、並行worktree、ファイルの競合・境界検査、PTYの入力・履歴、再接続、Daemon再起動時の中断表示を検証します。実際のモデルによる開発完了とは別の試験です。
-
-## 旧版の保全
-
-旧実装は`apps/desktop`、`apps/runner`、`apps/cloud-api`と既存の`packages`に残しています。新Daemonは旧タスクエンジンをimportしません。旧データも削除しません。旧READMEは`docs/legacy/development-v0.1.md`。旧コマンドには`legacy:`を付けています。
-
-以前のv1仕様と受け入れ基準は旧構想の記録です。現在の製品方針・起動手順はこのREADMEを正とします。
