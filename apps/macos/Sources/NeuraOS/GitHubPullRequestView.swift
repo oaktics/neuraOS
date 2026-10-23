@@ -57,11 +57,19 @@ struct GitHubPullRequestView: View {
     @State var tab = "overview"
     @State private var reviewsOnly = false
     @State private var search = ""
+    @State private var commentPage = 0
+    private let commentsPerPage = 20
     private var failures: Int {pr.checks.filter {GitHubPresentation.failed($0.state)}.count}
     private var passed: Int {pr.checks.filter(\.passed).count}
     private var statusColor: Color {pr.state == "MERGED" ? .purple : pr.state == "CLOSED" ? .red : pr.isDraft ? .secondary : .green}
     private var filteredComments: [GitHubComment] {
         pr.comments.filter {(!reviewsOnly || $0.kind != "comment") && (search.isEmpty || "\($0.body) \($0.author) \($0.path ?? "")".localizedCaseInsensitiveContains(search))}
+    }
+
+    private var commentPageCount: Int {max(1, (filteredComments.count + commentsPerPage - 1) / commentsPerPage)}
+    private var currentCommentPage: Int {min(commentPage, commentPageCount - 1)}
+    private var visibleComments: [GitHubComment] {
+        Array(filteredComments.dropFirst(currentCommentPage * commentsPerPage).prefix(commentsPerPage))
     }
 
     var body: some View {
@@ -168,7 +176,8 @@ struct GitHubPullRequestView: View {
             TextField("コメント・投稿者・ファイルを検索", text: $search).textFieldStyle(.roundedBorder)
             Toggle("レビューのみ", isOn: $reviewsOnly).toggleStyle(.checkbox).font(.system(size: 11))
             if filteredComments.isEmpty {empty(pr.comments.isEmpty ? "コメントはまだありません" : "一致するコメントはありません", icon: "bubble.left.and.bubble.right")}
-            ForEach(filteredComments) {comment in
+            if commentPageCount > 1 { commentPagination }
+            ForEach(visibleComments) {comment in
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .top, spacing: 8) {
                         Text(String(comment.author.prefix(1)).uppercased()).font(.system(size: 11, weight: .semibold))
@@ -192,7 +201,21 @@ struct GitHubPullRequestView: View {
                     .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.secondary.opacity(0.16)))
             }
+            if commentPageCount > 1 { commentPagination }
         }
+        .onChange(of: search) {_, _ in commentPage = 0}
+        .onChange(of: reviewsOnly) {_, _ in commentPage = 0}
+        .onChange(of: pr.url) {_, _ in commentPage = 0}
+    }
+
+    private var commentPagination: some View {
+        HStack {
+            Button("前へ") {commentPage = currentCommentPage - 1}.disabled(currentCommentPage == 0)
+            Spacer(minLength: 4)
+            Text("\(currentCommentPage + 1) / \(commentPageCount) ページ").font(.system(size: 11)).foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Button("次へ") {commentPage = currentCommentPage + 1}.disabled(currentCommentPage + 1 >= commentPageCount)
+        }.controlSize(.small)
     }
 
     private var files: some View {
