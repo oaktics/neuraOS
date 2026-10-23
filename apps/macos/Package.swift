@@ -1,5 +1,7 @@
 // swift-tools-version: 6.0
 import PackageDescription
+import Foundation
+let cefSDK = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent(".cef/sdk").path
 let package = Package(
     name: "NeuraOS",
     platforms: [.macOS(.v14)],
@@ -9,12 +11,17 @@ let package = Package(
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
         .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0")
     ],
-    targets: [.executableTarget(name: "NeuraOS", dependencies: [
+    targets: [.target(name: "ChromiumBridge", publicHeadersPath: "include",
+                      cxxSettings: [.unsafeFlags(["-I", cefSDK, "-fobjc-arc"])],
+                      linkerSettings: [.linkedFramework("AppKit")]),
+              .executableTarget(name: "NeuraOS", dependencies: [
+        "ChromiumBridge",
         .product(name: "SwiftTerm", package: "SwiftTerm"),
         .product(name: "MarkdownUI", package: "swift-markdown-ui"),
         .product(name: "cmark-gfm", package: "swift-cmark"),
         .product(name: "cmark-gfm-extensions", package: "swift-cmark")
     ], resources: [.process("Resources")]),
               .testTarget(name: "NeuraOSTests", dependencies: ["NeuraOS"])],
-    swiftLanguageModes: [.v5]
+    swiftLanguageModes: [.v5],
+    cxxLanguageStandard: .cxx20
 )

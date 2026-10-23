@@ -34,6 +34,7 @@ jobs:
       - run: pnpm build
         env:
           NEURA_BUILD_NUMBER: ${{ github.run_number }}
+      - run: node scripts/native/chromium/smoke.mjs
       - run: node scripts/native/release/package.mjs
       - run: node scripts/native/release/smoke.mjs
       - name: Archive

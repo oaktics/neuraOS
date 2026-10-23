@@ -14,7 +14,7 @@
     "desktop:build": "node scripts/native/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/native/*.test.ts",
-    "test:macos": "swift test --package-path apps/macos",
+    "test:macos": "node scripts/native/chromium/prepare.mjs && swift test --package-path apps/macos",
     "check": "pnpm typecheck && pnpm test && pnpm test:macos && pnpm build",
     "service": "tsx scripts/native/service.ts",
     "postinstall": "node scripts/prepare-native.mjs"
