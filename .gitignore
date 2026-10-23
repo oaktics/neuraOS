@@ -8,3 +8,5 @@ dist/
 .DS_Store
 apps/macos/.build/
 apps/macos/dist/
+
+apps/macos/.cef/
