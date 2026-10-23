@@ -6,12 +6,15 @@ let package = Package(
     products: [.executable(name: "NeuraOS", targets: ["NeuraOS"])],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
-        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1")
+        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
+        .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0")
     ],
     targets: [.executableTarget(name: "NeuraOS", dependencies: [
         .product(name: "SwiftTerm", package: "SwiftTerm"),
-        .product(name: "MarkdownUI", package: "swift-markdown-ui")
-    ]),
+        .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+        .product(name: "cmark-gfm", package: "swift-cmark"),
+        .product(name: "cmark-gfm-extensions", package: "swift-cmark")
+    ], resources: [.process("Resources")]),
               .testTarget(name: "NeuraOSTests", dependencies: ["NeuraOS"])],
     swiftLanguageModes: [.v5]
 )
