@@ -1,5 +1,15 @@
 import Foundation
 import SwiftUI
+import Combine
+
+enum WorkspaceAction: Equatable {
+    case add(String), close, move(Int), select(Int), inspector(String)
+}
+
+struct WorkspaceCommandRequest {
+    let workspaceId: String
+    let action: WorkspaceAction
+}
 
 struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
@@ -100,6 +110,7 @@ final class DaemonClient {
     @Published var showInspector = UserDefaults.standard.object(forKey: "showRightSidebar") as? Bool ?? true {
         didSet {UserDefaults.standard.set(showInspector, forKey: "showRightSidebar")}
     }
+    let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     @Published var openedIds: Set<String> = []
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
