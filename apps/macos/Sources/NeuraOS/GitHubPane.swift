@@ -10,9 +10,15 @@ struct GitHubSnapshot: Decodable {
 struct GitHubPR: Decodable {
     let number: Int; let title: String; let body: String; let url: String; let state: String; let isDraft: Bool
     let headRefName: String; let headRefOid: String; let baseRefName: String; let mergeStateStatus: String; let reviewDecision: String?
+    let author: GitHubAuthor?; let additions: Int?; let deletions: Int?; let changedFiles: Int?; let files: [GitHubFile]?
     let unresolvedThreads: Int; let comments: [GitHubComment]; let checks: [GitHubCheck]
     var label: String {isDraft ? "Draft" : state == "OPEN" ? "Open" : state == "MERGED" ? "Merged" : "Closed"}
     var canMerge: Bool {state == "OPEN" && !isDraft && mergeStateStatus == "CLEAN" && reviewDecision != "CHANGES_REQUESTED" && unresolvedThreads == 0}
+}
+struct GitHubAuthor: Decodable {let login: String}
+struct GitHubFile: Decodable, Identifiable {
+    let path: String; let additions: Int; let deletions: Int
+    var id: String {path}
 }
 struct GitHubComment: Decodable, Identifiable {
     let id: String; let kind: String; let body: String; let author: String; let url: String; let createdAt: String
@@ -23,7 +29,7 @@ struct GitHubCheck: Decodable, Identifiable {
     var passed: Bool {["SUCCESS", "NEUTRAL", "SKIPPED"].contains(state)}
 }
 struct GitHubResult: Decodable {let ok: Bool; let message: String; let url: String?}
-private func methodLabel(_ method: String) -> String {method == "squash" ? "Squash" : method == "rebase" ? "Rebase" : "Merge commit"}
+func methodLabel(_ method: String) -> String {method == "squash" ? "Squash" : method == "rebase" ? "Rebase" : "Merge commit"}
 
 struct GitHubSidebar: View {
     @EnvironmentObject var model: AppModel
@@ -106,7 +112,7 @@ struct GitHubPane: View {
                                 Text("変更をコミットしたら、PR を作成してレビューへ進めます。").foregroundStyle(.secondary)
                             }.padding(.vertical, 12)
                         }
-                        Text("取得: \(snapshot.fetchedAt) · 表示中は30秒ごとに更新").font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Text("更新 \(GitHubPresentation.relativeDate(snapshot.fetchedAt)) · 30秒ごとに自動更新").font(.system(size: 10)).foregroundStyle(.tertiary)
                     } else if error == nil {Text("GitHub に接続しています…").foregroundStyle(.secondary).padding(.vertical, 12)}
                 }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(10).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -132,63 +138,10 @@ struct GitHubPane: View {
             Button("キャンセル", role: .cancel) {pending = nil}
         }
     }
-    @ViewBuilder private func pullRequest(_ pr: GitHubPR, snapshot: GitHubSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("#\(pr.number)").foregroundStyle(.secondary)
-                Text(pr.label).fontWeight(.medium).foregroundStyle(pr.state == "MERGED" ? .purple : pr.isDraft ? .secondary : .green)
-                Spacer()
-                if let url = URL(string: pr.url) {Link("開く ↗", destination: url)}
-            }
-            Text(pr.title).font(.system(size: 15, weight: .semibold)).textSelection(.enabled)
-            Text("\(pr.headRefName) → \(pr.baseRefName)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-            if !pr.body.isEmpty {GitHubMarkdown(source: pr.body, baseURL: URL(string: pr.url))}
-        }
-        Divider()
-        VStack(alignment: .leading, spacing: 10) {
-            Text("チェックとレビュー").font(.system(size: 14, weight: .medium))
-            Text("マージ状態: \(pr.mergeStateStatus) · レビュー: \(pr.reviewDecision.flatMap {$0.isEmpty ? nil : $0} ?? "指定なし") · 未解決スレッド: \(pr.unresolvedThreads)").foregroundStyle(.secondary)
-            if pr.checks.isEmpty {Text("チェックはありません").foregroundStyle(.secondary)}
-            ForEach(pr.checks) {check in
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(check.name, systemImage: check.passed ? "checkmark.circle" : "circle.dotted")
-                        .foregroundStyle(check.passed ? .green : .orange)
-                    HStack {
-                        Text(check.state).foregroundStyle(.secondary)
-                        Spacer(minLength: 4)
-                        if let value = check.url, let url = URL(string: value), url.scheme == "https" {Link("詳細 ↗", destination: url)}
-                    }.font(.system(size: 11))
-                }
-            }
-            if pr.state == "OPEN" {
-                if pr.headRefOid != snapshot.head {Text("PR とローカルのコミットが異なります。Push またはローカルの更新後に確認してください。").foregroundStyle(.orange)}
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("マージ方式", selection: $method) {ForEach(snapshot.mergeMethods, id: \.self) {Text(methodLabel($0)).tag($0)}}
-                    Button("マージ…") {confirmMerge(snapshot, pr: pr)}
-                        .disabled(disabled || !pr.canMerge || pr.headRefOid != snapshot.head || !snapshot.mergeMethods.contains(method))
-                }
-                if !pr.canMerge {Text(pr.isDraft ? "Draft をレビュー可能にするには GitHub で開いてください。" : "CI・レビュー・未解決スレッド・競合の解消後にマージできます。").font(.system(size: 11)).foregroundStyle(.secondary)}
-            }
-        }
-        Divider()
-        VStack(alignment: .leading, spacing: 16) {
-            Text("コメント・レビュー \(pr.comments.count)").font(.system(size: 14, weight: .medium))
-            if pr.comments.isEmpty {Text("コメントはまだありません").foregroundStyle(.secondary)}
-            ForEach(pr.comments) {comment in
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(comment.author).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
-                        if let state = comment.state {Text(state).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)}
-                        Spacer()
-                        if let url = URL(string: comment.url) {Link("開く ↗", destination: url)}
-                    }
-                    if let path = comment.path {Text("\(path)\(comment.line.map {":\($0)"} ?? "")\(comment.outdated ? " · 過去の差分" : "")").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)}
-                    if !comment.body.isEmpty {GitHubMarkdown(source: comment.body, baseURL: URL(string: comment.url))}
-                    Text(comment.createdAt).font(.system(size: 10)).foregroundStyle(.tertiary)
-                }
-                Divider()
-            }
-        }
+    private func pullRequest(_ pr: GitHubPR, snapshot: GitHubSnapshot) -> some View {
+        GitHubPullRequestView(pr: pr, snapshot: snapshot, disabled: disabled, method: $method) {
+            confirmMerge(snapshot, pr: pr)
+        }.id("\(snapshot.repository)#\(pr.number)")
     }
     @MainActor private func refresh() async {
         guard model.supportsGitHub, !refreshing else {return}; refreshing = true; defer {refreshing = false}

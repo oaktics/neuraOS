@@ -13,7 +13,7 @@ const repoName=z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
 const repositorySchema=z.object({full_name:repoName,default_branch:z.string(),allow_merge_commit:z.boolean(),allow_squash_merge:z.boolean(),allow_rebase_merge:z.boolean()});
 const pullSchema=z.object({number:z.number(),state:z.string(),head:z.object({ref:z.string(),repo:z.object({full_name:z.string()}).nullable()})});
 const checkSchema=z.object({name:z.string().optional(),context:z.string().optional(),status:z.string().optional(),conclusion:z.string().nullable().optional(),state:z.string().optional(),detailsUrl:z.string().optional(),targetUrl:z.string().optional()});
-const detailSchema=z.object({number:z.number(),title:z.string(),body:z.string(),url:z.string(),state:z.string(),isDraft:z.boolean(),headRefName:z.string(),headRefOid:z.string(),baseRefName:z.string(),mergeStateStatus:z.string(),reviewDecision:z.string().nullable(),headRepository:z.object({name:z.string()}).nullable(),headRepositoryOwner:z.object({login:z.string()}).nullable(),statusCheckRollup:z.array(checkSchema).nullable()});
+const detailSchema=z.object({number:z.number(),title:z.string(),body:z.string(),url:z.string(),state:z.string(),isDraft:z.boolean(),headRefName:z.string(),headRefOid:z.string(),baseRefName:z.string(),mergeStateStatus:z.string(),reviewDecision:z.string().nullable(),headRepository:z.object({name:z.string()}).nullable(),headRepositoryOwner:z.object({login:z.string()}).nullable(),statusCheckRollup:z.array(checkSchema).nullable(),author:z.object({login:z.string()}).nullable().optional(),additions:z.number().optional(),deletions:z.number().optional(),changedFiles:z.number().optional(),files:z.array(z.object({path:z.string(),additions:z.number(),deletions:z.number()})).optional()});
 const commentSchema=z.object({id:z.number(),body:z.string().nullable().optional(),user:z.object({login:z.string()}).nullable(),html_url:z.string(),created_at:z.string().optional(),submitted_at:z.string().nullable().optional(),path:z.string().optional(),line:z.number().nullable().optional(),original_line:z.number().nullable().optional(),state:z.string().optional()});
 const threadsSchema=z.array(z.object({data:z.object({repository:z.object({pullRequest:z.object({reviewThreads:z.object({nodes:z.array(z.object({isResolved:z.boolean()}))})})})})}));
 
@@ -60,7 +60,7 @@ export class GitHub {
     return z.array(pullSchema).parse(await this.pages(root,`repos/${context.repository}/pulls?${query}`)).filter(pr=>pr.head.ref===context.branch&&pr.head.repo?.full_name.toLowerCase()===context.repository.toLowerCase());
   }
   private async detail(root:string,repository:string,number:number){
-    return detailSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json','number,title,body,url,state,isDraft,headRefName,headRefOid,baseRefName,mergeStateStatus,reviewDecision,headRepository,headRepositoryOwner,statusCheckRollup'])));
+    return detailSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json','number,title,body,url,state,isDraft,headRefName,headRefOid,baseRefName,mergeStateStatus,reviewDecision,headRepository,headRepositoryOwner,statusCheckRollup,author,additions,deletions,changedFiles,files'])));
   }
   private async unresolved(root:string,repository:string,number:number){
     const [owner,name]=repository.split('/');
