@@ -11,8 +11,8 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
-struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
+struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
+struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
 struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
@@ -76,6 +76,7 @@ final class DaemonClient {
     @Published var usageFailed = false
     @Published var error: String?
     @Published var busy = false
+    @Published var showNewProject = false
     @Published var showNewWorkspace = false
     @Published var showNewSpace = false
     @Published var sidebarSpaces: SidebarSpaces = {
@@ -149,6 +150,30 @@ final class DaemonClient {
             providerUsage = response.providers
             usageFailed = false
         } catch {usageFailed = true; providerUsage = []}
+    }
+    var supportsFolderless: Bool {state.features?.contains("project.folderless") == true}
+    func createProject(name: String) async {
+        let targetSpaceId = sidebarSpaces.active.id
+        busy = true; defer {busy = false}
+        do {
+            let project: Project = try await api.command(["type": "project.create", "name": name])
+            sidebarSpaces.projectSpaces[project.id] = targetSpaceId
+            await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
+            showNewProject = false
+        } catch {report(error)}
+    }
+    func attachFolder(to project: Project) {
+        guard supportsFolderless, project.folderless == true, !busy else {return}
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        panel.message = "フォルダ用の作業領域を追加します。現在のタブと会話は「フリー」に残ります。"
+        panel.prompt = "紐づける"
+        guard panel.runModal() == .OK, let path = panel.url?.path else {return}
+        busy = true
+        Task {defer {busy = false}; do {
+            let _: Project = try await api.command(["type": "project.attach", "projectId": project.id, "path": path])
+            await refresh()
+            select(state.workspaces.first {$0.projectId == project.id && $0.hasFolder}?.id)
+        } catch {report(error)}}
     }
     func addProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
