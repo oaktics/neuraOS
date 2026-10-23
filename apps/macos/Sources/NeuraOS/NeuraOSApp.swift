@@ -119,11 +119,13 @@ struct Sidebar: View {
     @State private var query = ""
     @State private var collapsed: Set<String> = []
     @State private var deleting: Workspace?
-    @State private var switchingForward = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var swipeTranslation: CGFloat = 0
+    @State private var sidebarWidth: CGFloat = 260
+    @State private var settling = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Image(systemName: "square.stack.3d.up").foregroundStyle(Color.accentColor)
                 Text(model.sidebarSpaces.active.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
                 Spacer()
                 Menu {
@@ -133,62 +135,25 @@ struct Sidebar: View {
                     Divider()
                     Button("新しいWorkspace…") {model.showNewSpace = true}
                 } label: {Image(systemName: "chevron.down")}
-                .menuStyle(.borderlessButton).fixedSize().help("Workspaceを切り替える")
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Workspaceを切り替える").accessibilityLabel("Workspaceを切り替える")
             }.padding(12)
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
                 .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
             HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Button {model.addProject()} label: {Image(systemName: "plus").frame(width: 24, height: 24)}.buttonStyle(.plain).help("フォルダを開く")}.padding(.horizontal, 10).padding(.bottom, 4)
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(model.visibleProjects) {project in
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: 8) {
-                                Button {if collapsed.contains(project.id) {collapsed.remove(project.id)} else {collapsed.insert(project.id)}} label: {Image(systemName: collapsed.contains(project.id) ? "chevron.right" : "chevron.down").font(.system(size: 9))}.buttonStyle(.plain)
-                                Image(systemName: "folder").foregroundStyle(.secondary)
-                                Text(project.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                                Spacer()
-                                if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
-                            }.padding(.horizontal, 12).padding(.vertical, 5)
-                            .contextMenu {
-                                Menu("Workspaceへ移動") {
-                                    ForEach(model.sidebarSpaces.spaces.filter {$0.id != model.sidebarSpaces.active.id}) {space in
-                                        Button(space.name) {model.moveProject(project.id, to: space.id)}
-                                    }
-                                }.disabled(model.sidebarSpaces.spaces.count < 2)
-                            }
-                            if !collapsed.contains(project.id) {
-                                ForEach(model.state.workspaces.filter {$0.projectId == project.id && (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) || project.name.localizedCaseInsensitiveContains(query))}) {workspace in
-                                    Button {model.select(workspace.id)} label: {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: workspace.kind == "folder" ? "folder" : workspace.kind == "root" ? "square.stack" : "arrow.triangle.branch").foregroundStyle(.secondary).frame(width: 14)
-                                            Text(workspace.name).lineLimit(1)
-                                            Spacer(minLength: 0)
-                                            if model.state.terminals.contains(where: {$0.workspaceId == workspace.id && $0.status == "running"}) {Circle().fill(Color.green.opacity(0.8)).frame(width: 5, height: 5)}
-                                        }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
-                                            .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                                    }.buttonStyle(.plain)
-                                    .contextMenu {
-                                        if workspace.kind == "worktree" {
-                                            Button("worktreeを削除…", role: .destructive) {
-                                                if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
-                                                    model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
-                                                } else {deleting = workspace}
-                                            }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
-                                        }
-                                    }
-                                }
-                            }
-                        }
+            GeometryReader {geometry in
+                ZStack {
+                    ForEach(pagerSpaces) {space in
+                        projectList(space)
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .offset(x: reduceMotion ? 0 : pageOffset(space.id, width: geometry.size.width) + swipeTranslation)
+                            .opacity(reduceMotion && space.id != model.sidebarSpaces.active.id ? 0 : 1)
+                            .allowsHitTesting(space.id == model.sidebarSpaces.active.id && swipeTranslation == 0 && !settling)
+                            .accessibilityHidden(space.id != model.sidebarSpaces.active.id)
                     }
-                    if model.visibleProjects.isEmpty {
-                        VStack(spacing: 10) {
-                            Text("このWorkspaceにフォルダを追加").font(.system(size: 12)).foregroundStyle(.secondary)
-                            Button("フォルダを開く…") {model.addProject()}
-                        }.padding(.vertical, 24)
-                    }
-                }.padding(.horizontal, 8)
-            }.id(model.sidebarSpaces.active.id)
-                .transition(.asymmetric(insertion: .move(edge: switchingForward ? .trailing : .leading).combined(with: .opacity), removal: .move(edge: switchingForward ? .leading : .trailing).combined(with: .opacity)))
+                }.clipped()
+                    .onAppear {sidebarWidth = geometry.size.width}
+                    .onChange(of: geometry.size.width) {_, width in sidebarWidth = width}
+            }
             Spacer(minLength: 0)
             Divider()
             HStack(spacing: 6) {
@@ -210,7 +175,16 @@ struct Sidebar: View {
                 Button {model.showNewSpace = true} label: {Image(systemName: "plus").frame(width: 24, height: 28)}.help("新しいWorkspace")
             }.buttonStyle(.plain).padding(8)
         }.background(Palette.surface).clipped()
-        .background(SidebarSwipeArea(onSwipe: step))
+        .background(SidebarSwipeArea(canBegin: {!settling}, onProgress: {translation in
+            guard !settling else {return}
+            let offset = translation < 0 ? 1 : -1
+            swipeTranslation = SidebarSwipeGesture.resistedTranslation(translation, width: sidebarWidth,
+                canNavigate: model.sidebarSpaces.adjacent(offset) != nil)
+        }, onEnd: finishSwipe))
+        .onChange(of: model.sidebarSpaces.active.id) {_, _ in
+            var transaction = Transaction(); transaction.disablesAnimations = true
+            withTransaction(transaction) {swipeTranslation = 0; settling = false}
+        }
         .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
             Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
@@ -221,14 +195,98 @@ struct Sidebar: View {
             Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。通常の削除は未コミットの変更や未追跡・無視対象ファイルがある場合に停止します。「変更・未追跡ファイルも含めて削除」は、それらと.env・node_modulesなども完全に削除し、元に戻せません。実行中のターミナルがある場合は先に停止してください。")
         }
     }
+    private var pagerSpaces: [SidebarSpace] {
+        let spaces = model.sidebarSpaces.spaces
+        let index = spaces.firstIndex(where: {$0.id == model.sidebarSpaces.active.id}) ?? 0
+        return spaces.enumerated().filter {abs($0.offset - index) <= 1}.map(\.element)
+    }
+    private func pageOffset(_ id: String, width: CGFloat) -> CGFloat {
+        let spaces = model.sidebarSpaces.spaces
+        let index = spaces.firstIndex(where: {$0.id == id}) ?? 0
+        let active = spaces.firstIndex(where: {$0.id == model.sidebarSpaces.active.id}) ?? 0
+        return CGFloat(index - active) * width
+    }
+    private func projectList(_ space: SidebarSpace) -> some View {
+        let projects = model.state.projects.filter {model.sidebarSpaces.owner(of: $0.id) == space.id}
+        let searchQuery = space.id == model.sidebarSpaces.active.id ? query : ""
+        return ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(projects) {project in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Button {if collapsed.contains(project.id) {collapsed.remove(project.id)} else {collapsed.insert(project.id)}} label: {Image(systemName: collapsed.contains(project.id) ? "chevron.right" : "chevron.down").font(.system(size: 9))}.buttonStyle(.plain)
+                                Text(project.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                                Spacer()
+                                if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
+                            }.padding(.horizontal, 12).padding(.vertical, 5)
+                            .contextMenu {
+                                Menu("Workspaceへ移動") {
+                                    ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
+                                        Button(space.name) {model.moveProject(project.id, to: space.id)}
+                                    }
+                                }.disabled(model.sidebarSpaces.spaces.count < 2)
+                            }
+                            if !collapsed.contains(project.id) {
+                                ForEach(model.state.workspaces.filter {$0.projectId == project.id && (searchQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(searchQuery) || project.name.localizedCaseInsensitiveContains(searchQuery))}) {workspace in
+                                    Button {model.select(workspace.id)} label: {
+                                        HStack(spacing: 8) {
+                                            Text(workspace.name).lineLimit(1)
+                                            Spacer(minLength: 0)
+                                            if model.state.terminals.contains(where: {$0.workspaceId == workspace.id && $0.status == "running"}) {Circle().fill(Color.green.opacity(0.8)).frame(width: 5, height: 5)}
+                                        }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
+                                            .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                                    }.buttonStyle(.plain)
+                                    .contextMenu {
+                                        if workspace.kind == "worktree" {
+                                            Button("worktreeを削除…", role: .destructive) {
+                                                if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
+                                                    model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
+                                                } else {deleting = workspace}
+                                            }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if projects.isEmpty {
+                        VStack(spacing: 10) {
+                            Text("このWorkspaceにフォルダを追加").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Button("フォルダを開く…") {model.addProject()}
+                        }.padding(.vertical, 24)
+                    }
+                }.padding(.horizontal, 8)
+            }
+    }
+    private func finishSwipe(_ offset: Int?) {
+        guard !settling else {return}
+        let target = offset.flatMap {model.sidebarSpaces.adjacent($0)}
+        settle(to: target, offset: offset ?? 0)
+    }
+    private func settle(to id: String?, offset: Int) {
+        settling = true
+        let origin = model.sidebarSpaces.active.id
+        withAnimation(reduceMotion ? .linear(duration: 0.01) : .spring(duration: 0.3, bounce: 0), completionCriteria: .removed) {
+            swipeTranslation = id == nil ? 0 : -CGFloat(offset) * sidebarWidth
+        } completion: {
+            guard model.sidebarSpaces.active.id == origin else {return}
+            var transaction = Transaction(); transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                if let id {query = ""; model.switchSpace(id)}
+                swipeTranslation = 0
+                settling = false
+            }
+        }
+    }
     private func step(_ offset: Int) {
         if let id = model.sidebarSpaces.adjacent(offset) {switchSpace(id)}
     }
     private func switchSpace(_ id: String) {
-        query = ""
+        guard !settling, id != model.sidebarSpaces.active.id else {return}
         let spaces = model.sidebarSpaces.spaces
-        switchingForward = (spaces.firstIndex(where: {$0.id == id}) ?? 0) > (spaces.firstIndex(where: {$0.id == model.sidebarSpaces.active.id}) ?? 0)
-        withAnimation(.easeInOut(duration: 0.18)) {model.switchSpace(id)}
+        let offset = (spaces.firstIndex(where: {$0.id == id}) ?? 0) - (spaces.firstIndex(where: {$0.id == model.sidebarSpaces.active.id}) ?? 0)
+        if abs(offset) == 1 {settle(to: id, offset: offset)}
+        else {query = ""; model.switchSpace(id)}
     }
 }
 struct WelcomeView: View {

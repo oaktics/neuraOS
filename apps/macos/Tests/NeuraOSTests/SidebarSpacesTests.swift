@@ -29,37 +29,66 @@ final class SidebarSpacesTests: XCTestCase {
         layout.activeId = main
         XCTAssertNil(layout.adjacent(-1))
     }
-    func testHorizontalSwipeTriggersOnlyOnce() {
-        var gesture = SidebarSwipeGesture()
-        XCTAssertNil(gesture.update(x: -30, y: 2))
-        XCTAssertEqual(gesture.update(x: -40, y: 2), 1)
-        XCTAssertNil(gesture.update(x: -100, y: 0))
-        XCTAssertTrue(gesture.isHorizontal)
-        gesture = SidebarSwipeGesture()
-        XCTAssertEqual(gesture.update(x: 70, y: 0), -1)
-    }
-    func testSwipeDirectionIsIndependentOfNaturalScrollingPreference() {
+    func testSwipeFollowsFingersAndCommitsOnReleaseWithEitherScrollPreference() {
         for inverted in [false, true] {
             let sign: CGFloat = inverted ? -1 : 1
             for deviceX in [CGFloat(-1), CGFloat(1)] {
                 var gesture = SidebarSwipeGesture()
-                XCTAssertNil(gesture.update(x: deviceX * 30 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted))
-                XCTAssertEqual(gesture.update(x: deviceX * 40 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted), deviceX < 0 ? 1 : -1)
-                XCTAssertNil(gesture.update(x: deviceX * 100 * sign, y: 0, isDirectionInvertedFromDevice: inverted))
+                gesture.update(x: deviceX * 30 * sign, y: 2 * sign, timestamp: 1, isDirectionInvertedFromDevice: inverted)
+                XCTAssertEqual(gesture.translation, -deviceX * 30)
+                gesture.update(x: deviceX * 50 * sign, y: 2 * sign, timestamp: 1.05, isDirectionInvertedFromDevice: inverted)
+                XCTAssertEqual(gesture.translation, -deviceX * 80)
+                XCTAssertEqual(gesture.destination(width: 260, timestamp: 1.06), deviceX > 0 ? 1 : -1)
             }
-            var vertical = SidebarSwipeGesture()
-            XCTAssertNil(vertical.update(x: 3 * sign, y: 25 * sign, isDirectionInvertedFromDevice: inverted))
-            XCTAssertNil(vertical.update(x: 100 * sign, y: 2 * sign, isDirectionInvertedFromDevice: inverted))
-            XCTAssertFalse(vertical.isHorizontal)
         }
     }
     func testVerticalScrollAndSmallMotionsDoNotSwitchSpaces() {
         var gesture = SidebarSwipeGesture()
-        XCTAssertNil(gesture.update(x: 3, y: 25))
-        XCTAssertNil(gesture.update(x: 100, y: 2))
+        gesture.update(x: 3, y: 25, timestamp: 1)
+        gesture.update(x: 100, y: 2, timestamp: 1.02)
         XCTAssertFalse(gesture.isHorizontal)
+        XCTAssertNil(gesture.destination(width: 260, timestamp: 1.03))
         gesture = SidebarSwipeGesture()
-        XCTAssertNil(gesture.update(x: 8, y: 2))
+        gesture.update(x: 6, y: 2, timestamp: 1)
         XCTAssertFalse(gesture.isHorizontal)
+        XCTAssertEqual(gesture.translation, 0)
+        XCTAssertNil(gesture.destination(width: 260, timestamp: 1.01))
+    }
+    func testShortSlowDragReturnsButQuickFlickCommits() {
+        var slow = SidebarSwipeGesture()
+        slow.update(x: 15, y: 0, timestamp: 1)
+        slow.update(x: 20, y: 0, timestamp: 1.3)
+        XCTAssertNil(slow.destination(width: 260, timestamp: 1.31))
+        var fast = SidebarSwipeGesture()
+        fast.update(x: 15, y: 0, timestamp: 1)
+        fast.update(x: 20, y: 0, timestamp: 1.02)
+        XCTAssertEqual(fast.destination(width: 260, timestamp: 1.03), 1)
+        XCTAssertNil(fast.destination(width: 260, timestamp: 1.3))
+    }
+    func testReversingBackCancelsAndLatestDirectionWins() {
+        var gesture = SidebarSwipeGesture()
+        gesture.update(x: 95, y: 0, timestamp: 1)
+        gesture.update(x: -90, y: 0, timestamp: 1.2)
+        XCTAssertNil(gesture.destination(width: 260, timestamp: 1.3))
+        gesture.update(x: -90, y: 0, timestamp: 1.4)
+        XCTAssertEqual(gesture.destination(width: 260, timestamp: 1.6), -1)
+    }
+    func testReversingVelocityCancelsInsteadOfSwitchingOppositeToTheVisiblePage() {
+        var gesture = SidebarSwipeGesture()
+        gesture.update(x: 100, y: 0, timestamp: 1)
+        gesture.update(x: -25, y: 0, timestamp: 1.01)
+        XCTAssertLessThan(gesture.translation, 0)
+        XCTAssertNil(gesture.destination(width: 260, timestamp: 1.02))
+    }
+    func testHorizontalLockSurvivesVerticalJitterAndEdgesResist() {
+        var gesture = SidebarSwipeGesture()
+        gesture.update(x: 20, y: 1, timestamp: 1)
+        gesture.update(x: 60, y: 100, timestamp: 1.1)
+        XCTAssertTrue(gesture.isHorizontal)
+        XCTAssertEqual(gesture.destination(width: 260, timestamp: 1.2), 1)
+        XCTAssertEqual(SidebarSwipeGesture.resistedTranslation(-500, width: 260, canNavigate: true), -260)
+        let edge = SidebarSwipeGesture.resistedTranslation(-100, width: 260, canNavigate: false)
+        XCTAssertLessThan(edge, 0)
+        XCTAssertGreaterThan(edge, -22)
     }
 }
