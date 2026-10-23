@@ -2,23 +2,36 @@ import XCTest
 @testable import NeuraOS
 
 final class AgentNotificationTests: XCTestCase {
-    private func terminal(_ id: String = "t", event: String, provider: String = "codex", kind: String = "completed") -> TerminalRecord {
-        TerminalRecord(id: id, workspaceId: "w", provider: provider, status: "running", cols: 80, rows: 24,
-                       notification: AgentNotificationEvent(id: event, kind: kind, createdAt: "2026-10-23T00:00:00Z"))
+    private func event(_ sequence: Int, kind: String = "completed", provider: String = "codex") -> AgentNotificationEvent {
+        AgentNotificationEvent(id: "event-\(sequence)", sequence: sequence, terminalId: "t", workspaceId: "w", provider: provider, kind: kind, createdAt: "2026-10-23T00:00:00Z")
     }
-    func testBaselineDeduplicationAndReconnect() {
+    func testBaselineAndReconnectNeverReplayConsumedEvents() {
         var cursor = AgentNotificationCursor()
-        XCTAssertTrue(cursor.consume([terminal(event: "old")]).isEmpty)
-        XCTAssertEqual(cursor.consume([terminal(event: "new")]).map(\.id), ["t"])
-        XCTAssertTrue(cursor.consume([terminal(event: "new")]).isEmpty)
-        XCTAssertTrue(cursor.consume([]).isEmpty)
-        XCTAssertTrue(cursor.consume([terminal(event: "new")]).isEmpty)
-        XCTAssertEqual(cursor.consume([terminal(event: "next")]).count, 1)
+        cursor.baseline(10)
+        let page = AgentNotificationPage(events: [event(9), event(11), event(12)], cursor: 12, more: false)
+        XCTAssertEqual(cursor.pending(page).map(\.sequence), [11, 12])
+        cursor.acknowledge(11)
+        // Reconnect must not reset to the latest snapshot revision and lose event 12.
+        cursor.baseline(30)
+        XCTAssertEqual(cursor.pending(page).map(\.sequence), [12])
+        cursor.acknowledge(12)
+        cursor.acknowledge(9)
+        XCTAssertTrue(cursor.pending(page).isEmpty)
+        XCTAssertEqual(cursor.after, 12)
     }
-    func testIndependentProvidersAndUnknownKinds() {
+    func testRapidWaitingAndCompletionAreBothDeliveredInOrder() {
         var cursor = AgentNotificationCursor()
-        _ = cursor.consume([])
-        XCTAssertEqual(cursor.consume([terminal("a", event: "1"), terminal("b", event: "2", provider: "claude", kind: "waiting")]).count, 2)
-        XCTAssertTrue(cursor.consume([terminal("c", event: "3", provider: "shell"), terminal("d", event: "4", kind: "future")]).isEmpty)
+        cursor.baseline(0)
+        for provider in ["codex", "claude"] {
+            let start = cursor.after ?? 0
+            let page = AgentNotificationPage(events: [event(start + 2, provider: provider), event(start + 1, kind: "waiting", provider: provider)], cursor: start + 2, more: false)
+            XCTAssertEqual(cursor.pending(page).map(\.kind), ["waiting", "completed"])
+            // A failed delivery leaves the event pending until explicitly acknowledged.
+            XCTAssertEqual(cursor.pending(page).count, 2)
+            cursor.acknowledge(start + 1)
+            XCTAssertEqual(cursor.pending(page).map(\.kind), ["completed"])
+            cursor.acknowledge(page.cursor)
+            XCTAssertTrue(cursor.pending(page).isEmpty)
+        }
     }
 }

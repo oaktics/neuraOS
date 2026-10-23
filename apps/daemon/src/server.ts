@@ -102,6 +102,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/usage',async()=>({providers:await usage.read()}));
   app.addHook('onClose',async()=>{await usage.close();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
+  app.get('/v1/notifications',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return store.notifications(after);});
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));

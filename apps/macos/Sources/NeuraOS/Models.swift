@@ -13,7 +13,7 @@ struct WorkspaceCommandRequest {
 
 struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
-struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var notification: AgentNotificationEvent? = nil}
+struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
@@ -135,7 +135,6 @@ final class DaemonClient {
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
             // A daemon upgrade can change features without changing stored data/revision.
             if next.revision != state.revision || next.features != state.features || !connected {state = next}
-            agentNotifications?.receive(state)
             openedIds.formIntersection(Set(state.workspaces.map(\.id)))
             connected = true
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
@@ -144,6 +143,7 @@ final class DaemonClient {
             }
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
+            await agentNotifications?.receive(state, api: api)
         } catch {connected = false}
     }
     func select(_ id: String?) {

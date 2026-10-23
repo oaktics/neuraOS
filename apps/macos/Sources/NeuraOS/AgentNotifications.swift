@@ -4,28 +4,33 @@ import UserNotifications
 
 struct AgentNotificationEvent: Codable, Equatable {
     let id: String
+    let sequence: Int
+    let terminalId: String
+    let workspaceId: String
+    let provider: String
     let kind: String
     let createdAt: String
 }
+struct AgentNotificationPage: Codable {
+    let events: [AgentNotificationEvent]
+    let cursor: Int
+    let more: Bool
+}
 
-// The first snapshot is a baseline, so launching the app never replays old work.
-// Keep event IDs across reconnects, even if a transient snapshot omits a terminal.
+// Baseline once at launch; subsequent reads retain the cursor across reconnects.
+// Advance only after delivery (or an intentional skip), so a failed read can retry.
 struct AgentNotificationCursor {
-    private var initialized = false
-    private var seen: [String: String] = [:]
-    mutating func consume(_ terminals: [TerminalRecord]) -> [TerminalRecord] {
-        defer {initialized = true}
-        return terminals.filter {terminal in
-            guard let event = terminal.notification else {return false}
-            let previous = seen.updateValue(event.id, forKey: terminal.id)
-            return initialized && previous != event.id && ["codex", "claude"].contains(terminal.provider)
-                && ["waiting", "completed"].contains(event.kind)
-        }
+    private(set) var after: Int?
+    mutating func baseline(_ revision: Int) {if after == nil {after = revision}}
+    func pending(_ page: AgentNotificationPage) -> [AgentNotificationEvent] {
+        page.events.filter {$0.sequence > (after ?? 0)}.sorted {$0.sequence < $1.sequence}
     }
+    mutating func acknowledge(_ sequence: Int) {after = max(after ?? 0, sequence)}
 }
 
 @MainActor final class AgentNotifications: NSObject, UNUserNotificationCenterDelegate {
     private var cursor = AgentNotificationCursor()
+    private var receiving = false
     private let openTerminal: (String) -> Void
     private var center: UNUserNotificationCenter?
     init(openTerminal: @escaping (String) -> Void) {
@@ -35,33 +40,43 @@ struct AgentNotificationCursor {
         guard Bundle.main.bundleURL.pathExtension == "app" else {return}
         center = UNUserNotificationCenter.current()
         center?.delegate = self
-        Task {await requestAuthorization()}
+        Task {_ = try? await requestAuthorization()}
     }
     private func enabled(_ kind: String) -> Bool {
         UserDefaults.standard.object(forKey: "agentNotifications.\(kind)") as? Bool ?? true
     }
-    private func requestAuthorization() async {
-        guard enabled("waiting") || enabled("completed"), let center else {return}
-        do { _ = try await center.requestAuthorization(options: [.alert, .sound]) }
-        catch {NSLog("Agent notification authorization failed: %@", error.localizedDescription)}
+    private func requestAuthorization() async throws -> Bool {
+        guard enabled("waiting") || enabled("completed"), let center else {return false}
+        return try await center.requestAuthorization(options: [.alert, .sound])
     }
-    func receive(_ snapshot: Snapshot) {
-        for terminal in cursor.consume(snapshot.terminals) {
-            guard let event = terminal.notification, enabled(event.kind), let center else {continue}
-            let content = UNMutableNotificationContent()
-            let provider = terminal.provider == "claude" ? "Claude Code" : "Codex"
-            content.title = "\(provider)：\(event.kind == "waiting" ? "回答・承認待ち" : "応答が完了しました")"
-            content.body = snapshot.workspaces.first {$0.id == terminal.workspaceId}?.name ?? "neuraOS"
-            content.sound = .default
-            content.userInfo = ["terminalId": terminal.id]
-            // Replace this terminal's previous banner rather than accumulating stale requests.
-            let request = UNNotificationRequest(identifier: "agent.\(terminal.id)", content: content, trigger: nil)
-            Task {
-                await requestAuthorization()
-                do {try await center.add(request)}
-                catch {NSLog("Agent notification delivery failed: %@", error.localizedDescription)}
+    func receive(_ snapshot: Snapshot, api: DaemonClient) async {
+        guard snapshot.features?.contains("terminal.notifications") == true, !receiving else {return}
+        cursor.baseline(snapshot.revision)
+        receiving = true
+        defer {receiving = false}
+        do {
+            // Bound each polling pass; backlog continues from the same cursor next time.
+            for _ in 0..<4 {
+                let page: AgentNotificationPage = try await api.get("v1/notifications", query: ["after": String(cursor.after ?? 0)])
+                for event in cursor.pending(page) {
+                    if ["codex", "claude"].contains(event.provider), ["waiting", "completed"].contains(event.kind),
+                       enabled(event.kind), let center {
+                        let content = UNMutableNotificationContent()
+                        let provider = event.provider == "claude" ? "Claude Code" : "Codex"
+                        content.title = "\(provider)：\(event.kind == "waiting" ? "回答・承認待ち" : "応答が完了しました")"
+                        content.body = snapshot.workspaces.first {$0.id == event.workspaceId}?.name ?? "neuraOS"
+                        content.sound = .default
+                        content.userInfo = ["terminalId": event.terminalId]
+                        // Distinct IDs preserve rapid transitions instead of replacing a banner.
+                        let request = UNNotificationRequest(identifier: "agent.\(event.id)", content: content, trigger: nil)
+                        if try await requestAuthorization() {try await center.add(request)}
+                    }
+                    cursor.acknowledge(event.sequence)
+                }
+                cursor.acknowledge(page.cursor)
+                if !page.more {break}
             }
-        }
+        } catch {NSLog("Agent notification delivery failed: %@", error.localizedDescription)}
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])

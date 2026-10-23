@@ -43,8 +43,8 @@ export class Terminals {
           const current=this.store.get<TerminalRecord>('terminals',id);
           if(!current||current.status!=='running')return;
           const activity=tracker.accept(event);
-          const notification=tracker.notification?{id:randomUUID(),kind:tracker.notification,createdAt:new Date().toISOString()}:current.notification;
-          if(current.activity!==activity||notification!==current.notification)this.store.put('terminals',{...current,activity,notification});
+          const notification=tracker.notification?{id:randomUUID(),terminalId:id,workspaceId:current.workspaceId,provider:current.provider,kind:tracker.notification,createdAt:new Date().toISOString()}:undefined;
+          if(current.activity!==activity||notification)this.store.put('terminals',{...current,activity},notification);
         });
         this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
         extraArgs=activityArguments(provider);

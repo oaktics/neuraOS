@@ -116,14 +116,15 @@ for await(const line of createInterface({input:process.stdin})){
     const revision=store.state().revision;
     terminals.input(first.id,'client','ask\r');await waitFor(()=>record(first.id).activity==='waiting');
     assert.ok(store.state().revision>revision);assert.equal(record(second.id).activity,'idle');
-    assert.equal(record(first.id).notification?.kind,'waiting');
-    assert.equal(record(second.id).notification,undefined);
+    assert.equal(store.notifications(revision).events.at(-1)?.kind,'waiting');
+    assert.ok(store.notifications(revision).events.every(event=>event.terminalId===first.id));
     terminals.input(first.id,'client','answer\r');await waitFor(()=>record(first.id).activity==='working');
-    terminals.input(first.id,'client','done\r');await waitFor(()=>record(first.id).notification?.kind==='completed');
-    const completed=record(first.id).notification;
+    terminals.input(first.id,'client','done\r');await waitFor(()=>store.notifications(revision).events.at(-1)?.kind==='completed');
+    const completed=store.notifications(revision);
+    assert.deepEqual(completed.events.map(event=>event.kind),['waiting','completed']);
     terminals.input(first.id,'client','exit\r');await waitFor(()=>record(first.id).status==='exited');
     assert.equal(record(first.id).activity,undefined);assert.equal(record(second.id).status,'running');
-    assert.deepEqual(record(first.id).notification,completed);
+    assert.deepEqual(store.notifications(revision),completed);
   }finally{await terminals.shutdown();store.close();if(previous===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=previous;await rm(dir,{recursive:true,force:true});}
 });
 
