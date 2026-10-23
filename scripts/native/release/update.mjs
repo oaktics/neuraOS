@@ -6,6 +6,31 @@ import {homedir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const exec = promisify(execFile);
+// Bootstrap owns its timeout so the UI never kills only the outer updater.
+export function runBootstrapCommand(command, args, timeout = 30000) {
+  return new Promise((resolve, reject) => {
+    let timedOut = false, output = '';
+    const child = spawn(command, args, {detached: true, stdio: ['ignore', 'pipe', 'pipe']});
+    // Keep diagnostics bounded; status output is small.
+    const collect = chunk => {output = (output + chunk.toString()).slice(-65536);};
+    child.stdout.on('data', collect);
+    child.stderr.on('data', collect);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // The service command and its launchctl children share this isolated group.
+      try {process.kill(-child.pid, 'SIGKILL');} catch (error) {
+        if (error.code !== 'ESRCH') child.kill('SIGKILL');
+      }
+    }, timeout);
+    child.once('error', error => {clearTimeout(timer); reject(error);});
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error('Daemon bootstrap timed out'));
+      else if (code !== 0) reject(new Error(output || `Daemon bootstrap exited with ${code}`));
+      else resolve({stdout: output});
+    });
+  });
+}
 export const repository = 'oaktics/neuraOS';
 export function validateRelease(release, arch = process.arch) {
   if (release.draft || release.prerelease || !/^native-\d+$/.test(release.tag_name)) throw new Error('対応する正式リリースではありません。');
@@ -24,15 +49,18 @@ async function latest() {
   if (response.ok) return {...validateRelease(await response.json()), authenticated: false};
   // Private repositories use gh's own credential store. Never persist or print tokens.
   try {
-    const {stdout} = await exec('gh', ['api', `repos/${repository}/releases/latest`], {timeout: 30000});
+    const {stdout} = await exec('gh', ['api', `repos/${repository}/releases/latest`], {timeout: 30000, killSignal: 'SIGKILL'});
     return {...validateRelease(JSON.parse(stdout)), authenticated: true};
   } catch {throw new Error('更新を取得できません。リリースの公開状況・ネット接続・gh auth loginを確認してください。');}
 }
 const data = join(homedir(), 'Library/Application Support/neuraOS/Updates');
 const target = join(homedir(), 'Applications/neuraOS.app');
 const delay = ms => new Promise(r => setTimeout(r, ms));
-async function prepare(tag, parentPID) {
-  const release = await latest();
+export async function prepare(tag, parentPID, {
+  home = homedir(), getRelease = latest, execute = exec, request = fetch, commandTimeout = 120000,
+} = {}) {
+  const data = join(home, 'Library/Application Support/neuraOS/Updates');
+  const release = await getRelease();
   if (release.tag !== tag) throw new Error('新しいリリースが公開されました。もう一度確認してください。');
   if (!Number.isSafeInteger(parentPID) || parentPID <= 1) throw new Error('Invalid application PID');
   await mkdir(data, {recursive: true, mode: 0o700});
@@ -42,18 +70,21 @@ async function prepare(tag, parentPID) {
   try {
     stage = await mkdtemp(join(data, 'stage-'));
     const archive = join(stage, release.name);
-    if (release.authenticated) await exec('gh', ['release', 'download', release.tag, '--repo', repository, '--pattern', release.name, '--dir', stage], {timeout: 600000});
+    // Keep deadlines inside this process. execFile settles after the killed
+    // command exits, then our catch removes only this preparation's state.
+    const run = (command, args, timeout = commandTimeout) => execute(command, args, {timeout, killSignal: 'SIGKILL'});
+    if (release.authenticated) await run('gh', ['release', 'download', release.tag, '--repo', repository, '--pattern', release.name, '--dir', stage], 600000);
     else {
-      const response = await fetch(release.url, {signal: AbortSignal.timeout(600000)});
+      const response = await request(release.url, {signal: AbortSignal.timeout(600000)});
       if (!response.ok) throw new Error('更新ファイルのダウンロードに失敗しました。');
       await writeFile(archive, Buffer.from(await response.arrayBuffer()));
     }
     verifyArchive(await readFile(archive), release.digest);
-    await exec('/usr/bin/ditto', ['-x', '-k', archive, stage]);
+    await run('/usr/bin/ditto', ['-x', '-k', archive, stage]);
     const app = join(stage, 'neuraOS.app');
-    await exec('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
+    await run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
     const plist = join(app, 'Contents/Info.plist');
-    const readPlist = async key => (await exec('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist])).stdout.trim();
+    const readPlist = async key => (await run('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, plist])).stdout.trim();
     if (await readPlist('CFBundleIdentifier') !== 'app.neuraos.native' || await readPlist('CFBundleVersion') !== String(release.build)) throw new Error('アプリのバージョン情報が一致しません。');
     await access(join(app, 'Contents/Resources/Runtime/bin/node'));
     await copyFile(fileURLToPath(import.meta.url), join(stage, 'install.mjs'));
@@ -126,8 +157,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       const bundledNode = join(runtime, 'bin/node');
       await access(bundledNode);
       const service = ['--import', join(runtime, 'node_modules/tsx/dist/loader.mjs'), join(runtime, 'scripts/native/service.ts')];
-      try {await exec(bundledNode, [...service, 'status']);}
-      catch {await exec(bundledNode, [...service, 'install'], {timeout: 30000});}
+      try {await runBootstrapCommand(bundledNode, [...service, 'status']);}
+      catch {await runBootstrapCommand(bundledNode, [...service, 'install']);}
     } else if (command === 'check') console.log(JSON.stringify(await latest()));
     else if (command === 'prepare') console.log(JSON.stringify(await prepare(arg, Number(pid))));
     else if (command === 'apply') await install(arg, Number(pid));
