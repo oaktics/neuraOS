@@ -5,6 +5,28 @@ import SwiftTerm
 /// Cmd-V is a terminal paste action; Codex needs Ctrl-V to read clipboard images.
 class NativeTerminalView: TerminalView {
     var provider = "shell"
+    private var darkAppearance: Bool?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearanceColors()
+    }
+
+    func updateAppearanceColors() {
+        // AppKit can notify us during TerminalView initialization.
+        guard terminal != nil else {return}
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        guard darkAppearance != dark else {return}
+        darkAppearance = dark
+        // SwiftTerm stores concrete RGB defaults and cached text attributes.
+        // A dynamic NSColor alone does not refresh those when appearance changes.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            nativeForegroundColor = NSColor.labelColor.usingColorSpace(.deviceRGB)!
+            nativeBackgroundColor = NSColor(white: dark ? 0.105 : 0.985, alpha: 1)
+        }
+        colorChanged(source: getTerminal(), idx: nil)
+        needsDisplay = true
+    }
 
     override func paste(_ sender: Any) {
         if !pasteImage(from: .general) { super.paste(sender) }
@@ -31,8 +53,7 @@ struct NativeTerminal: NSViewRepresentable {
     func makeNSView(context: Context) -> TerminalView {
         let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         view.provider = terminal.provider
-        view.nativeForegroundColor = .labelColor
-        view.nativeBackgroundColor = NSColor(name: nil) {appearance in appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(white: 0.105, alpha: 1) : NSColor(white: 0.985, alpha: 1)}
+        view.updateAppearanceColors()
         view.terminalDelegate = context.coordinator
         context.coordinator.view = view
         context.coordinator.desiredSize = (view.getTerminal().cols, view.getTerminal().rows)

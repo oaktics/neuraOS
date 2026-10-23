@@ -1,9 +1,19 @@
 import Foundation
 import SwiftUI
+import Combine
+
+enum WorkspaceAction: Equatable {
+    case add(String), close, move(Int), select(Int), inspector(String)
+}
+
+struct WorkspaceCommandRequest {
+    let workspaceId: String
+    let action: WorkspaceAction
+}
 
 struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
-struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int}
+struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
@@ -36,7 +46,7 @@ final class DaemonClient {
         config.timeoutIntervalForRequest = 15
         session = URLSession(configuration: config)
     }
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : 15)}
+    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
         try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || command["type"] as? String == "workspace.delete") ? 240 : 15)
@@ -100,6 +110,7 @@ final class DaemonClient {
     @Published var showInspector = UserDefaults.standard.object(forKey: "showRightSidebar") as? Bool ?? true {
         didSet {UserDefaults.standard.set(showInspector, forKey: "showRightSidebar")}
     }
+    let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     @Published var openedIds: Set<String> = []
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}

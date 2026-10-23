@@ -13,7 +13,7 @@ const target={workspaceId,repository:'owner/repo',branch:'feature/test',expected
 function fixture(){
   const calls:{kind:string;args:string[]}[]=[];
   const state={branch:target.branch,head,remote:'https://github.com/owner/repo.git',pushRemote:'git@github.com:owner/repo.git',remoteHead:head,hasPR:true,unresolved:false,merged:true,fail:false,
-    pr:{number:17,title:'A PR',body:'Description',url:'https://github.com/owner/repo/pull/17',state:'OPEN',isDraft:false,headRefName:target.branch,headRefOid:head,baseRefName:'main',mergeStateStatus:'CLEAN',reviewDecision:'APPROVED',headRepository:{name:'repo'},headRepositoryOwner:{login:'owner'},statusCheckRollup:[{name:'test',status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/owner/repo/actions/runs/1'}]}};
+    pr:{number:17,title:'A PR',body:'Description',url:'https://github.com/owner/repo/pull/17',state:'OPEN',isDraft:false,headRefName:target.branch,headRefOid:head,baseRefName:'main',mergeStateStatus:'CLEAN',reviewDecision:'APPROVED',headRepository:{name:'repo'},headRepositoryOwner:{login:'owner'},author:{login:'alice'},additions:42,deletions:7,changedFiles:1,files:[{path:'src/main.ts',additions:42,deletions:7}],statusCheckRollup:[{name:'test',status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/owner/repo/actions/runs/1'}]}};
   const git=async(_root:string,args:string[])=>{
     calls.push({kind:'git',args});
     if(args[0]==='remote')return args.includes('--push')?state.pushRemote:state.remote;
@@ -54,7 +54,7 @@ test('GitHub remotes accept canonical SSH/HTTPS and reject other hosts or creden
 });
 test('status selects the exact head repository and combines all pages of conversation, reviews, and inline comments',async()=>{
   const {service,calls}=fixture(),status=await service.status('/repo');
-  assert.equal(status.pullRequest?.number,17);assert.deepEqual(status.mergeMethods,['squash','merge']);
+  assert.equal(status.pullRequest?.number,17);assert.equal(status.pullRequest?.author?.login,'alice');assert.equal(status.pullRequest?.additions,42);assert.deepEqual(status.pullRequest?.files,[{path:'src/main.ts',additions:42,deletions:7}]);assert.deepEqual(status.mergeMethods,['squash','merge']);
   assert.deepEqual(status.pullRequest?.comments.map(c=>c.id),['comment-1','review-3','line-1','comment-2']);
   assert.equal(status.pullRequest?.comments[2].line,12);assert.equal(status.pullRequest?.comments[2].outdated,true);
   assert.equal(status.pullRequest?.checks[0].state,'SUCCESS');assert.equal(status.pullRequest?.unresolvedThreads,0);
@@ -112,7 +112,7 @@ test('GitHub HTTP commands retain authentication, validation and durable operati
     for(const url of ['/v1/state','/v1/capabilities']){
       const response=await daemon.app.inject({url,headers});
       assert.equal(response.statusCode,200);assert.equal(response.json().protocolVersion,1);
-      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','terminal.multiple','provider.usage']);
+      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','terminal.multiple','provider.usage','terminal.activity','github.checks']);
     }
     assert.equal((await daemon.app.inject(`/v1/workspaces/${workspaceId}/github`)).statusCode,401);
     assert.equal((await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers})).statusCode,200);

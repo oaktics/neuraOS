@@ -1,101 +1,126 @@
 import AppKit
-import MarkdownUI
 import SwiftUI
+import WebKit
+import cmark_gfm
+import cmark_gfm_extensions
 
-/// Shared rendering for PR descriptions, conversation comments, and reviews.
+/// GFM and GitHub's embedded HTML share one layout engine. Only allowlisted
+/// markup reaches the live DOM; comment scripts never execute.
 struct GitHubMarkdown: View {
     let source: String
     let baseURL: URL?
+    @State private var height: CGFloat = 1
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        Markdown(source, baseURL: baseURL)
-            .markdownTheme(.gitHubSidebar)
-            .textSelection(.enabled)
+        GitHubMarkdownWebView(source: source, baseURL: baseURL, dark: colorScheme == .dark, height: $height)
+            .frame(height: height)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .environment(\.openURL, OpenURLAction { url in
-                guard ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") else {return .discarded}
-                return .systemAction
-            })
     }
 }
 
-private extension Theme {
-    static let gitHubSidebar = Theme.gitHub
-        .text {
-            FontSize(12)
-            ForegroundColor(.primary)
-            BackgroundColor(nil)
+enum GitHubMarkdownHTML {
+    private static let extensionsRegistered: Void = cmark_gfm_core_extensions_ensure_registered()
+
+    static func render(_ source: String) -> String {
+        _ = extensionsRegistered
+        guard let parser = cmark_parser_new(CMARK_OPT_DEFAULT) else {return ""}
+        defer {cmark_parser_free(parser)}
+        for name in ["table", "strikethrough", "autolink", "tagfilter", "tasklist"] {
+            if let ext = cmark_find_syntax_extension(name) {cmark_parser_attach_syntax_extension(parser, ext)}
         }
-        .link {ForegroundColor(.accentColor)}
-        .heading1 {configuration in
-            configuration.label
-                .markdownTextStyle {FontSize(18); FontWeight(.semibold)}
-                .markdownMargin(top: 14, bottom: 8)
+        source.withCString {cmark_parser_feed(parser, $0, source.utf8.count)}
+        guard let document = cmark_parser_finish(parser) else {return ""}
+        defer {cmark_node_free(document)}
+        // Raw HTML is needed for details/summary. It is sanitized in a detached
+        // DOM before insertion, with CSP as a second boundary.
+        guard let html = cmark_render_html(document, CMARK_OPT_UNSAFE, cmark_parser_get_syntax_extensions(parser)) else {return ""}
+        defer {free(html)}
+        return String(cString: html)
+    }
+
+    static let script = try! String(contentsOf: Bundle.module.url(forResource: "GitHubMarkdown", withExtension: "js")!, encoding: .utf8)
+    static let style = try! String(contentsOf: Bundle.module.url(forResource: "GitHubMarkdown", withExtension: "css")!, encoding: .utf8)
+    static let page = """
+    <!doctype html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src https: http:; base-uri 'none'; form-action 'none'">
+    <style>\(style)</style></head><body><main id="markdown"></main></body></html>
+    """
+}
+
+struct GitHubMarkdownWebView: NSViewRepresentable {
+    let source: String
+    let baseURL: URL?
+    let dark: Bool
+    @Binding var height: CGFloat
+
+    func makeCoordinator() -> Coordinator {Coordinator(self)}
+
+    func makeNSView(context: Context) -> WKWebView {
+        let controller = WKUserContentController()
+        controller.addUserScript(WKUserScript(source: GitHubMarkdownHTML.script, injectionTime: .atDocumentEnd,
+                                              forMainFrameOnly: true, in: .defaultClient))
+        controller.add(context.coordinator, contentWorld: .defaultClient, name: "markdownHeight")
+        controller.add(context.coordinator, contentWorld: .defaultClient, name: "markdownCopy")
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController = controller
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.setValue(false, forKey: "drawsBackground")
+        view.navigationDelegate = context.coordinator
+        view.loadHTMLString(GitHubMarkdownHTML.page, baseURL: nil)
+        return view
+    }
+
+    func updateNSView(_ view: WKWebView, context: Context) {
+        context.coordinator.parent = self
+        context.coordinator.render(view)
+    }
+
+    static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
+        view.configuration.userContentController.removeScriptMessageHandler(forName: "markdownHeight", contentWorld: .defaultClient)
+        view.configuration.userContentController.removeScriptMessageHandler(forName: "markdownCopy", contentWorld: .defaultClient)
+        view.navigationDelegate = nil
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        var parent: GitHubMarkdownWebView
+        var ready = false
+        private var renderedSource: String?
+        private var renderedBase: URL?
+        private var renderedDark: Bool?
+        init(_ parent: GitHubMarkdownWebView) {self.parent = parent}
+
+        func render(_ view: WKWebView) {
+            guard ready else {return}
+            guard renderedSource != parent.source || renderedBase != parent.baseURL || renderedDark != parent.dark else {return}
+            renderedSource = parent.source; renderedBase = parent.baseURL; renderedDark = parent.dark
+            view.callAsyncJavaScript("renderMarkdown(html, base, dark)", arguments: [
+                "html": GitHubMarkdownHTML.render(parent.source), "base": parent.baseURL?.absoluteString ?? "https://github.com/", "dark": parent.dark
+            ], in: nil, in: .defaultClient, completionHandler: nil)
         }
-        .heading2 {configuration in
-            configuration.label
-                .markdownTextStyle {FontSize(16); FontWeight(.semibold)}
-                .markdownMargin(top: 12, bottom: 6)
-        }
-        .heading3 {configuration in
-            configuration.label
-                .markdownTextStyle {FontSize(14); FontWeight(.semibold)}
-                .markdownMargin(top: 10, bottom: 6)
-        }
-        .paragraph {configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .relativeLineSpacing(.em(0.25))
-                .markdownMargin(top: 0, bottom: 8)
-        }
-        .blockquote {configuration in
-            configuration.label
-                .markdownTextStyle {ForegroundColor(.secondary)}
-                .padding(.leading, 10)
-                .overlay(alignment: .leading) {Rectangle().fill(Color.secondary.opacity(0.35)).frame(width: 3)}
-                .markdownMargin(top: 0, bottom: 8)
-        }
-        .codeBlock {configuration in
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text(configuration.language ?? "コード")
-                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(configuration.content, forType: .string)
-                    } label: {Image(systemName: "doc.on.doc")}
-                        .buttonStyle(.borderless)
-                        .help("コードをコピー")
-                        .accessibilityLabel("コードをコピー")
-                }.padding(.horizontal, 10).padding(.vertical, 6)
-                Divider()
-                ScrollView(.horizontal) {
-                    configuration.label
-                        .markdownTextStyle {FontFamilyVariant(.monospaced); FontSize(11)}
-                        .fixedSize(horizontal: true, vertical: true)
-                        .padding(10)
-                }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {ready = true; render(webView)}
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "markdownCopy", let code = message.body as? String {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(code, forType: .string)
+                return
             }
-            .background(Color.primary.opacity(0.045))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .markdownMargin(top: 0, bottom: 10)
+            guard let value = message.body as? Double, value.isFinite, value > 0 else {return}
+            let height = CGFloat(ceil(value))
+            if abs(parent.height - height) > 0.5 {parent.height = height}
         }
-        .table {configuration in
-            ScrollView(.horizontal) {
-                configuration.label
-                    .fixedSize(horizontal: true, vertical: true)
-                    .markdownTableBorderStyle(.init(color: .secondary.opacity(0.25)))
-                    .markdownTableBackgroundStyle(.alternatingRows(.clear, .primary.opacity(0.035)))
-            }.markdownMargin(top: 0, bottom: 10)
+
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if action.navigationType == .other, action.request.url?.absoluteString == "about:blank", !ready {
+                decisionHandler(.allow); return
+            }
+            if action.navigationType == .linkActivated, let url = action.request.url,
+               ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {NSWorkspace.shared.open(url)}
+            decisionHandler(.cancel)
         }
-        .tableCell {configuration in
-            configuration.label
-                .markdownTextStyle {
-                    if configuration.row == 0 {FontWeight(.semibold)}
-                    BackgroundColor(nil)
-                }
-                .padding(.vertical, 6).padding(.horizontal, 8)
-        }
+    }
 }
