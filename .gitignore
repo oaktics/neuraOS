@@ -1,15 +1,10 @@
 node_modules/
 dist/
-target/
 .tmp/
 .data/
 .env
 .env.*
-!.env.example
-playwright-report/
-test-results/
 *.log
 .DS_Store
-apps/desktop/src-tauri/gen/
 apps/macos/.build/
 apps/macos/dist/

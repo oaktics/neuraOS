@@ -1,7 +1,0 @@
-{
-  "$schema":"https://schema.tauri.app/config/2",
-  "productName":"neuraOS", "version":"0.1.0", "identifier":"app.neuraos.desktop",
-  "build":{"frontendDist":"../dist","devUrl":"http://127.0.0.1:1420","beforeBuildCommand":"pnpm --dir ../.. build"},
-  "app":{"windows":[{"label":"main","title":"neuraOS","width":1280,"height":900,"minWidth":720,"minHeight":600,"backgroundColor":"#fafafa"}],"security":{"csp":"default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'; worker-src 'self' blob:; object-src 'none'; frame-src 'none'","capabilities":["main"]}},
-  "bundle":{"active":true,"targets":["app"],"category":"Productivity","shortDescription":"タスク駆動のAI作業環境","macOS":{"minimumSystemVersion":"12.0"}}
-}
