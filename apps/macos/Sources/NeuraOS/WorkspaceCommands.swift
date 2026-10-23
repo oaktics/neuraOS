@@ -5,8 +5,16 @@ extension AppModel {
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
         guard let workspace = selected, !showNewSpace, !showNewWorkspace,
-              NSApp.keyWindow?.attachedSheet == nil else {return}
+              WorkspaceCommandContext.allowsCommands(in: NSApp.keyWindow),
+              NSApp.modalWindow == nil else {return}
         workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspace.id, action: action))
+    }
+}
+
+enum WorkspaceCommandContext {
+    static func allowsCommands(in window: NSWindow?) -> Bool {
+        guard let window else {return false}
+        return window.sheetParent == nil && window.attachedSheet == nil
     }
 }
 
