@@ -8,7 +8,8 @@ export async function bundleChromium(app,bundleId){
   await mkdir(frameworks,{recursive:true});
   const framework=join(frameworks,'Chromium Embedded Framework.framework');
   await rm(framework,{recursive:true,force:true});
-  await cp(join(sdk,'Release/Chromium Embedded Framework.framework'),framework,{recursive:true});
+  // Preserve relative framework links so the app remains portable outside the build machine.
+  await cp(join(sdk,'Release/Chromium Embedded Framework.framework'),framework,{recursive:true,verbatimSymlinks:true});
   const helper=join(cefRoot,'NeuraOS Helper');
   execFileSync('xcrun',['clang++','-std=c++20','-fobjc-arc','-mmacosx-version-min=14.0','-I',sdk,join(import.meta.dirname,'helper.mm'),'-framework','Foundation','-o',helper],{stdio:'inherit'});
   for(const [suffix,id] of [['',''],[' (Renderer)','.renderer'],[' (GPU)','.gpu'],[' (Plugin)','.plugin'],[' (Alerts)','.alerts']]){
