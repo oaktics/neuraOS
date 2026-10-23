@@ -56,3 +56,13 @@ node scripts/native/release/smoke.mjs
 ```
 
 パッケージ試験は一時データと空きポートで同梱Node／Daemon／SQLite／PTYを実行する。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
+
+## Chromium browser
+
+Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions are not included.
+
+`pnpm build` and `pnpm test:macos` prepare the pinned CEF SDK from `scripts/native/chromium/version.json`. Direct `swift build/test` users must first run `node scripts/native/chromium/prepare.mjs`. Downloads and extracted SDKs are ignored under `apps/macos/.cef/`. The archive checksum is verified before extraction; updating Chromium requires updating both architecture entries in the manifest and rerunning the packaged smoke test. Chromium is bundled with the application, so security updates require a new neuraOS release.
+
+The bridge loads CEF dynamically, embeds native child views, and keeps the renderer/GPU sandbox enabled. Helpers initialize the sandbox before loading CEF. Browser content has no daemon token or native terminal API bridge. CEF persists cookies/storage in `<NeuraDataDirectory>/Chromium` (default `~/Library/Application Support/neuraOS/Chromium`), separate from the former WebKit store. Existing browser URLs remain; websites require signing in again after migration. Independent development apps should use a separate `NEURA_DEV_DATA_DIR` to avoid profile locks.
+
+After `pnpm build`, run `node scripts/native/chromium/smoke.mjs`. It launches the actual bundled executable against a loopback fixture with a temporary profile and verifies Chromium rendering, back/forward navigation, popup opener preservation, cookies/local storage across two launches, and clean shutdown. It does not authenticate to Gmail or access the normal profile. This is separate from verifying an authenticated Gmail session and from installing a release.

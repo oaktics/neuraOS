@@ -1,12 +1,15 @@
 import SwiftUI
 import AppKit
+import ChromiumBridge
 
 struct WorkspaceTab: Codable, Identifiable, Equatable {
     var id = UUID().uuidString.lowercased()
     var kind: String
     var number = 1
     var terminalId: String?
+    var browserTitle: String?
     var title: String {
+        if kind == "browser", let browserTitle, !browserTitle.isEmpty {return browserTitle}
         let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
         return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
     }
@@ -30,6 +33,7 @@ struct WorkspaceView: View {
     @State private var treeVersion = 0
     @State private var requestedFile: String?
     @State private var closingTab: WorkspaceTab?
+    @State private var popupViews: [String: NCChromiumView] = [:]
     private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
     var body: some View {
@@ -135,7 +139,7 @@ struct WorkspaceView: View {
                 let visible = active && model.selectedId == workspace.id
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
-                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible)}
+                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }
@@ -199,6 +203,13 @@ struct WorkspaceView: View {
             }
         }
     }
+    private func openBrowserPopup(_ view: NCChromiumView, url: String) -> Bool {
+        let item = WorkspaceTab(kind: "browser", number: (layout.tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
+        popupViews[item.id] = view
+        UserDefaults.standard.set(url, forKey: "browser.\(workspace.id).\(item.id)")
+        layout.tabs.append(item); layout.selectedId = item.id
+        return true
+    }
     private func add(_ kind: String) {
         let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
         layout.tabs.append(item); layout.selectedId = item.id
@@ -210,6 +221,7 @@ struct WorkspaceView: View {
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
     }
     private func remove(_ item: WorkspaceTab) {
+        popupViews.removeValue(forKey: item.id)
         guard let index = layout.tabs.firstIndex(where: {$0.id == item.id}) else {return}
         layout.tabs.remove(at: index)
         if layout.selectedId == item.id {layout.selectedId = layout.tabs.isEmpty ? nil : layout.tabs[min(index, layout.tabs.count - 1)].id}
