@@ -5,6 +5,50 @@ import XCTest
 @testable import NeuraOS
 
 final class GitHubMarkdownTests: XCTestCase {
+    private final class ScrollEvent: NSEvent {
+        weak var targetWindow: NSWindow?
+        var point = NSPoint(x: 50, y: 50)
+        var x: CGFloat = 0
+        var y: CGFloat = -10
+        override var window: NSWindow? {targetWindow}
+        override var locationInWindow: NSPoint {point}
+        override var scrollingDeltaX: CGFloat {x}
+        override var scrollingDeltaY: CGFloat {y}
+    }
+
+    private final class RecordingScrollView: NSScrollView {
+        var received: [NSEvent] = []
+        override func scrollWheel(with event: NSEvent) {received.append(event)}
+    }
+
+    @MainActor func testVerticalScrollOverMarkdownReachesNativeList() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        let scroll = RecordingScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
+        let web = GitHubMarkdownScrollingWebView(frame: NSRect(x: 0, y: 0, width: 200, height: 200))
+        document.addSubview(web)
+        scroll.documentView = document
+        window.contentView = scroll
+        defer {window.contentView = nil}
+        let event = ScrollEvent()
+        event.targetWindow = window
+        XCTAssertTrue(web.forwardVerticalScroll(event))
+        XCTAssertTrue(scroll.received.first === event)
+
+        event.x = 20
+        XCTAssertFalse(web.forwardVerticalScroll(event), "Horizontal code/table scrolling stays in WebKit")
+        event.x = 0
+        event.point = NSPoint(x: 250, y: 250)
+        XCTAssertFalse(web.forwardVerticalScroll(event), "Other views keep their events")
+        event.point = NSPoint(x: 50, y: 50)
+        event.targetWindow = nil
+        XCTAssertFalse(web.forwardVerticalScroll(event), "Other windows keep their events")
+        XCTAssertEqual(scroll.received.count, 1)
+        web.removeFromSuperview()
+        XCTAssertFalse(web.forwardVerticalScroll(event))
+    }
+
     private let sample = """
     <!-- codex-pull-request-review-summary -->
     <!-- codex-review-state:v1 {"code_review":{"status":"running","commit_sha":"4de43b6"}} -->
