@@ -40,12 +40,19 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'workspace.create':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。通常のフォルダでは、そのまま作業を開始できます。');
-        const commit=(await work.git(project.path,['rev-parse','--verify','--end-of-options',`${c.baseRef}^{commit}`])).trim();
+        const commit=c.baseRef ? (await work.git(project.path,['rev-parse','--verify','--end-of-options',`${c.baseRef}^{commit}`])).trim() : (await work.fetchDefault(project.path)).commit;
         const name=c.name??`worktree-${operationId.slice(0,8)}`;
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
         const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
+      }
+      case 'workspace.sync-default':{
+        const record=workspace(c.workspaceId);
+        if(record.kind!=='root')throw new Fault('root_required','メインの作業フォルダで実行してください。');
+        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','メインで実行中のターミナルとエージェントを停止してください。',409);
+        const target=await work.syncDefault(record.path);
+        const updated={...record,branch:target.branch};store.put('workspaces',updated);return updated;
       }
       case 'workspace.delete':{
         const record=workspace(c.workspaceId);

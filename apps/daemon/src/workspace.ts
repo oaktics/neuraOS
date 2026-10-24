@@ -57,3 +57,41 @@ export async function diff(root:string,path:string){
   if(change.status==='??'){const value=await file(root,path);return {path,content:`新規ファイル: ${path}\n\n${value.content}`};}
   return {path,content:await git(root,['diff','--no-ext-diff','--no-textconv','HEAD','--',`:(literal)${path}`])};
 }
+
+
+// Resolve the server's symbolic HEAD each time; cached origin/HEAD can be stale.
+export async function fetchDefault(root:string){
+  const advertised=await git(root,['ls-remote','--symref','origin','HEAD']);
+  const ref=advertised.match(/^ref: (refs\/heads\/.+)	HEAD$/m)?.[1];
+  if(!ref)throw new Fault('remote_head_missing','originのデフォルトブランチを取得できません。リモート設定を確認してください。');
+  await git(root,['check-ref-format',ref]);
+  const branch=ref.slice('refs/heads/'.length);
+  await git(root,['fetch','--no-tags','origin',`+${ref}:refs/remotes/origin/${branch}`]);
+  const commit=(await git(root,['rev-parse','--verify',`refs/remotes/origin/${branch}^{commit}`])).trim();
+  return {branch,commit};
+}
+export async function syncDefault(root:string){
+  const clean=async()=>{
+    if((await git(root,['status','--porcelain=v1','--untracked-files=all'])).trim())
+      throw new Fault('workspace_dirty','未コミットの変更・未追跡ファイルがあります。保存・コミットまたは退避してから更新してください。',409);
+  };
+  await clean();
+  const target=await fetchDefault(root);
+  const current=(await git(root,['branch','--show-current'])).trim();
+  if(!current)throw new Fault('detached_head','ブランチに切り替えてから更新してください。',409);
+  // Never move an existing default branch backwards, or discard divergent commits.
+  const exists=(await git(root,['for-each-ref','--format=%(refname)',`refs/heads/${target.branch}`])).trim().split('\n').includes(`refs/heads/${target.branch}`);
+  if(exists){
+    try{await git(root,['merge-base','--is-ancestor',`refs/heads/${target.branch}`,target.commit]);}
+    catch{throw new Fault('local_commits','デフォルトブランチにリモート未反映のコミットがあります。先にマージなどで解消してください。',409);}
+  }
+  // merge can overwrite ignored files; reject collisions before switching branches.
+  const ignored=(await git(root,['ls-files','--others','--ignored','--exclude-standard','-z'])).split('\0').filter(Boolean);
+  const tracked=(await git(root,['ls-tree','-r','--name-only','-z',target.commit])).split('\0').filter(Boolean);
+  if(ignored.some(a=>tracked.some(b=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/'))))
+    throw new Fault('ignored_collision','更新先と重なる無視対象ファイルがあります。退避してから更新してください。',409);
+  await clean();
+  await git(root,['switch','--no-overwrite-ignore',...(exists?[target.branch]:['-c',target.branch,target.commit])]);
+  await git(root,['-c','merge.autostash=false','merge','--ff-only',target.commit]);
+  return target;
+}
