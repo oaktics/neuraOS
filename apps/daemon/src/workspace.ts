@@ -70,13 +70,13 @@ export async function fetchDefault(root:string){
   const commit=(await git(root,['rev-parse','--verify',`refs/remotes/origin/${branch}^{commit}`])).trim();
   return {branch,commit};
 }
-export async function syncDefault(root:string){
+export async function syncDefault(root:string,fetched?:Awaited<ReturnType<typeof fetchDefault>>){
   const clean=async()=>{
     if((await git(root,['status','--porcelain=v1','--untracked-files=all'])).trim())
       throw new Fault('workspace_dirty','未コミットの変更・未追跡ファイルがあります。保存・コミットまたは退避してから更新してください。',409);
   };
   await clean();
-  const target=await fetchDefault(root);
+  const target=fetched??await fetchDefault(root);
   const current=(await git(root,['branch','--show-current'])).trim();
   if(!current)throw new Fault('detached_head','ブランチに切り替えてから更新してください。',409);
   // Never move an existing default branch backwards, or discard divergent commits.

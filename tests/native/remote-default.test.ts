@@ -58,3 +58,49 @@ test('remote default: fresh worktrees, safe root updates, changed default and of
     const explicit=await cmd({type:'workspace.create',projectId:project.id,baseRef:'HEAD'});assert.equal(explicit.statusCode,200);
   } finally {await daemon.app.close();await rm(dir,{recursive:true,force:true});}
 });
+
+test('slow workspace fetches do not block interactive commands; sync rechecks edits',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-fetch-queue-')),repo=join(dir,'repo');
+  await mkdir(repo);await git(repo,['init','-b','main']);
+  await git(repo,['config','user.name','Test']);await git(repo,['config','user.email','test@example.invalid']);
+  await writeFile(join(repo,'file'),'initial');await git(repo,['add','.']);await git(repo,['commit','-m','initial']);
+  const commit=(await git(repo,['rev-parse','HEAD'])).trim();
+  let release!:()=>void,started!:()=>void;
+  let gate=Promise.resolve();
+  const daemon=await createDaemon(join(dir,'data'),undefined,undefined,async()=>{started();await gate;return {branch:'main',commit};});
+  const cmd=(command:unknown,operationId=randomUUID())=>daemon.app.inject({method:'POST',url:'/v1/commands',headers:{authorization:`Bearer ${daemon.token}`},payload:{operationId,command}});
+  try {
+    const project=(await cmd({type:'project.add',path:repo})).json();
+    const root=daemon.store.list<{id:string}>('workspaces')[0]!;
+    for(const type of ['workspace.create','workspace.sync-default']){
+      gate=new Promise<void>(resolve=>{release=resolve;});
+      const began=new Promise<void>(resolve=>{started=resolve;});
+      const command=type==='workspace.create'?{type,projectId:project.id}:{type,workspaceId:root.id};
+      const operationId=randomUUID();
+      const pending=cmd(command,operationId).then(response=>response);
+      await began;
+      try {
+        // Invalid terminal IDs still exercise the real input/resize/stop queue.
+        // They must return immediately instead of waiting for the network gate.
+        const terminalId=randomUUID(),clientId=randomUUID();
+        for(const command of [
+          {type:'terminal.input',terminalId,clientId,data:'x'},
+          {type:'terminal.resize',terminalId,clientId,cols:80,rows:24},
+          {type:'terminal.stop',terminalId},
+        ]){
+          const response=await Promise.race([cmd(command),new Promise<never>((_,reject)=>{const timer=setTimeout(()=>reject(new Error('interactive command blocked by fetch')),1500);timer.unref();})]);
+          assert.ok(response.statusCode<500,response.body);
+        }
+        const file=(await daemon.app.inject({url:`/v1/workspaces/${root.id}/file?path=file`,headers:{authorization:`Bearer ${daemon.token}`}})).json();
+        const saved=await Promise.race([cmd({type:'file.save',workspaceId:root.id,path:'file',content:'edited during fetch',expectedHash:file.hash}),new Promise<never>((_,reject)=>{const timer=setTimeout(()=>reject(new Error('save blocked by fetch')),1500);timer.unref();})]);
+        assert.equal(saved.statusCode,200,saved.body);
+      } finally {release();}
+      const response=await pending;
+      if(type==='workspace.create')assert.equal(response.statusCode,200,response.body);
+      else assert.equal(response.json().error,'workspace_dirty');
+      assert.equal(await readFile(join(repo,'file'),'utf8'),'edited during fetch');
+      const replay=await cmd(command,operationId);assert.equal(replay.body,response.body);
+      await git(repo,['restore','file']);
+    }
+  } finally {release?.();await daemon.app.close();await rm(dir,{recursive:true,force:true});}
+});
