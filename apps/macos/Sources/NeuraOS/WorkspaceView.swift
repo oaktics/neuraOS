@@ -59,6 +59,9 @@ struct WorkspaceView: View {
         }
         .onAppear {restore(); openRequestedTerminal()}
         .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
+        .onReceive(model.workspaceUpdated) {id in
+            if id == workspace.id {treeVersion += 1; selectedDiff = nil}
+        }
         .onReceive(model.workspaceCommands) {request in
             guard request.workspaceId == workspace.id, model.selectedId == workspace.id,
                   closingTab == nil else {return}
@@ -357,6 +360,16 @@ struct FilePane: View {
         .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first; if let requestedFile {open(requestedFile)}}
         .onChange(of: requestedFile) {_, path in if let path {open(path)}}
         .onChange(of: documents) {_, value in DraftCache.shared.update(workspace.id, value)}
+        .onReceive(model.workspaceUpdated) {id in
+            guard id == workspace.id else {return}
+            // Refresh clean buffers; preserve edits made while the network request was running.
+            let reopen = selected
+            documents = documents.filter {$0.value.dirty}
+            order = order.filter {documents[$0] != nil}
+            selected = order.first
+            DraftCache.shared.update(workspace.id, documents)
+            if let reopen {open(reopen)}
+        }
     }
     private func open(_ path: String) {
         if documents[path] != nil {selected = path; return}
