@@ -2,7 +2,7 @@ import {z} from 'zod';
 
 export const protocolVersion = 1;
 // Additive features are negotiated separately so existing v1 clients keep working.
-export const daemonFeatures = ['github','workspace.delete','workspace.delete.discard','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks'] as const;
+export const daemonFeatures = ['github','workspace.delete','workspace.delete.discard','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default'] as const;
 const id = z.uuid();
 const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);
@@ -14,7 +14,8 @@ export interface TerminalRecord {id:string; workspaceId:string; provider:Provide
 export interface AgentNotification {id:string;terminalId:string;workspaceId:string;provider:Provider;kind:'waiting'|'completed';createdAt:string}
 export const Command = z.discriminatedUnion('type', [
   z.object({type:z.literal('project.add'), path:z.string().min(1).max(4096)}),
-  z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80).optional(), baseRef:z.string().min(1).max(200).default('HEAD')}),
+  z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80).optional(), baseRef:z.string().min(1).max(200).optional()}),
+  z.object({type:z.literal('workspace.sync-default'), workspaceId:id}),
   z.object({type:z.literal('workspace.delete'), workspaceId:id, discardChanges:z.boolean().default(false)}),
   z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider, resume:z.boolean().default(false)}),
   z.object({type:z.literal('terminal.input'), terminalId:id, clientId:id, data:z.string().max(65536)}),

@@ -279,6 +279,18 @@ struct Sidebar: View {
                                             }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                         }
                                     }
+                                    if workspace.kind == "root" {
+                                        Button {
+                                            if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
+                                                model.error = "未保存の編集があります。保存または破棄してから更新してください。"
+                                            } else {Task {await model.syncDefault(workspace)}}
+                                        } label: {
+                                            Label("リモートの最新に更新", systemImage: "arrow.down.circle")
+                                        }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
+                                            .padding(.leading, 18)
+                                            .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
+                                            .disabled(model.busy || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
+                                    }
                                 }
                             }
                         }
@@ -340,16 +352,19 @@ struct NewWorkspaceSheet: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) var dismiss
     @State private var projectId = ""
-    @State private var base = "HEAD"
+    @State private var base = ""
+    @State private var customBase = false
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("新しい作業").font(.system(size: 20, weight: .semibold))
             Text("専用のブランチとworktreeを作成します。サイドバーの作業名には、CodexやClaude Codeの会話名が自動で反映されます。").foregroundStyle(.secondary)
             Form {
                 Picker("プロジェクト", selection: $projectId) {ForEach(model.gitProjects) {Text($0.name).tag($0.id)}}
-                TextField("作成元", text: $base)
+                Text("originのデフォルトブランチを取得し、最新コードから作成します。").font(.caption).foregroundStyle(.secondary)
+                Toggle("作成元を指定", isOn: $customBase)
+                if customBase {TextField("ブランチ・コミット", text: $base)}
             }
-            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: base)}}.keyboardShortcut(.defaultAction).disabled(model.busy || !model.connected || projectId.isEmpty || base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)}
+            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: customBase ? base.trimmingCharacters(in: .whitespacesAndNewlines) : nil)}}.keyboardShortcut(.defaultAction).disabled(model.busy || !model.connected || projectId.isEmpty || (customBase && base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || model.state.features?.contains("workspace.remote-default") != true)}
         }.padding(28).frame(width: 440)
         .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
     }

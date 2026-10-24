@@ -20,7 +20,7 @@ test('daemon: worktrees, authenticated commands, durable PTY, reconnect and conf
     assert.equal((await daemon.app.inject({url:'/v1/state',headers:{authorization:`Bearer ${daemon.token}`,origin:'https://evil.invalid'}})).statusCode,401);
     assert.equal((await stat(join(data,'daemon-token'))).mode&0o777,0o600);
     const project=(await cmd({type:'project.add',path:repo})).json();assert.ok(project.id);
-    const op=randomUUID(),command={type:'workspace.create',projectId:project.id};
+    const op=randomUUID(),command={type:'workspace.create',baseRef:'HEAD',projectId:project.id};
     const [a,b]=await Promise.all([cmd(command,op),cmd(command,op)]);assert.equal(a.statusCode,200);assert.equal(b.statusCode,200);assert.equal(a.json().id,b.json().id);
     const ws=a.json();assert.notEqual(ws.path,repo);assert.match(await git(repo,['worktree','list']),new RegExp(ws.branch));
     assert.equal(ws.name,`worktree-${op.slice(0,8)}`);assert.equal(ws.branch,`neura/${ws.name}`);assert.equal(b.json().name,ws.name);
@@ -87,7 +87,7 @@ test('ordinary folders support files, PTY and persistence without initializing G
     const ws=(await get('/v1/state')).json().workspaces[0];assert.equal(ws.kind,'folder');assert.equal(ws.path,project.path);assert.equal(ws.branch,'');
     const again=(await cmd({type:'project.add',path:folder})).json();assert.equal(again.id,project.id);
     assert.equal((await get('/v1/state')).json().workspaces.length,1);
-    assert.equal((await cmd({type:'workspace.create',projectId:project.id,name:'not a worktree'})).json().error,'git_required');
+    assert.equal((await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id,name:'not a worktree'})).json().error,'git_required');
     assert.equal((await get(`/v1/workspaces/${ws.id}/git`)).json().error,'git_required');
     assert.equal((await get(`/v1/workspaces/${ws.id}/diff?path=notes.txt`)).json().error,'git_required');
     assert.equal((await get(`/v1/workspaces/${ws.id}/files`)).json().entries[0].name,'notes.txt');
@@ -116,7 +116,7 @@ test('ordinary folders support files, PTY and persistence without initializing G
     assert.equal((await cmd({type:'terminal.input',terminalId:running.id,clientId:randomUUID(),data:'echo still-running\n'})).statusCode,200);
     await git(folder,['config','user.name','Test']);await git(folder,['config','user.email','test@example.invalid']);
     await git(folder,['add','.']);await git(folder,['commit','-m','initial']);
-    const created=await cmd({type:'workspace.create',projectId:project.id,name:'After git init'});assert.equal(created.statusCode,200);assert.equal(created.json().kind,'worktree');
+    const created=await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id,name:'After git init'});assert.equal(created.statusCode,200);assert.equal(created.json().kind,'worktree');
     const upgraded=(await cmd({type:'project.add',path:folder})).json();assert.equal(upgraded.id,project.id);assert.equal(upgraded.isGit,true);
     await daemon.app.close();daemon=await createDaemon(data);
     const persisted=(await get('/v1/state')).json();assert.equal(persisted.projects[0].isGit,true);assert.equal(persisted.workspaces[0].id,ws.id);assert.equal(persisted.workspaces[0].kind,'root');
@@ -153,11 +153,11 @@ test('worktree deletion protects active work and removes persisted records while
     const project=(await cmd({type:'project.add',path:repo})).json();
     const main=daemon.store.state().workspaces[0];
     assert.equal((await cmd({type:'workspace.delete',workspaceId:main.id})).json().error,'worktree_required');
-    const clean=(await cmd({type:'workspace.create',projectId:project.id})).json();
+    const clean=(await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id})).json();
     assert.equal((await cmd({type:'workspace.delete',workspaceId:clean.id})).statusCode,200);
     await assert.rejects(stat(clean.path),{code:'ENOENT'});
     assert.equal((await cmd({type:'workspace.delete',workspaceId:main.id,discardChanges:true})).json().error,'worktree_required');
-    const ws=(await cmd({type:'workspace.create',projectId:project.id})).json();
+    const ws=(await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id})).json();
     const remove={type:'workspace.delete',workspaceId:ws.id};
     await writeFile(join(ws.path,'hello.txt'),'unsaved changes');
     assert.equal((await cmd(remove)).json().error,'workspace_dirty');

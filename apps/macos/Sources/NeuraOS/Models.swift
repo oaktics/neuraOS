@@ -49,7 +49,7 @@ final class DaemonClient {
     func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
-        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || command["type"] as? String == "workspace.delete") ? 240 : 15)
+        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)
     }
     private func request<T: Decodable>(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> T {
         var components = URLComponents(url: endpoint.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
@@ -69,6 +69,7 @@ final class DaemonClient {
 
 @MainActor final class AppModel: ObservableObject {
     let api = DaemonClient()
+    let workspaceUpdated = PassthroughSubject<String, Never>()
     @Published var state = Snapshot()
     @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
     @Published var connected = false
@@ -170,9 +171,22 @@ final class DaemonClient {
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
-    func createWorkspace(projectId: String, base: String) async {
+    func createWorkspace(projectId: String, base: String?) async {
         busy = true; defer {busy = false}
-        do {let workspace: Workspace = try await api.command(["type": "workspace.create", "projectId": projectId, "baseRef": base]); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
+        do {
+            guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
+            var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
+            if let base {command["baseRef"] = base}
+            let workspace: Workspace = try await api.command(command); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
+    }
+    func syncDefault(_ workspace: Workspace) async {
+        guard !busy else {return}
+        busy = true; defer {busy = false}
+        do {
+            let _: Workspace = try await api.command(["type": "workspace.sync-default", "workspaceId": workspace.id])
+            workspaceUpdated.send(workspace.id)
+            await refresh()
+        } catch {report(error)}
     }
     func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
         guard workspace.kind == "worktree", !busy else {return}

@@ -11,7 +11,7 @@ import {ProviderUsageService} from './provider-usage.ts';
 import * as work from './workspace.ts';
 import {GitHub} from './github.ts';
 
-export async function createDaemon(dataDir:string,github=new GitHub(),usage=new ProviderUsageService()){
+export async function createDaemon(dataDir:string,github=new GitHub(),usage=new ProviderUsageService(),fetchDefault=work.fetchDefault){
   await mkdir(dataDir,{recursive:true,mode:0o700});await chmod(dataDir,0o700);
   const tokenPath=join(dataDir,'daemon-token');
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
@@ -20,6 +20,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
   let queue:Promise<unknown>=Promise.resolve();
+  let workspaceNetworkQueue:Promise<unknown>=Promise.resolve();
   let githubQueue:Promise<unknown>=Promise.resolve();
   app.addHook('onRequest',async(req,reply)=>{
     const supplied=Buffer.from((req.headers.authorization??'').replace(/^Bearer /,'')),expected=Buffer.from(token);
@@ -28,7 +29,25 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   });
   app.setErrorHandler((error,req,reply)=>{const e=error instanceof Fault?error:error instanceof z.ZodError?new Fault('invalid_request','要求の形式が正しくありません。'):new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);reply.code(e.status).send({error:e.code,message:e.message});});
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
-  async function execute(c:Command,operationId:string):Promise<unknown>{
+  async function execute(c:Command,operationId:string,fetchedTarget?:Awaited<ReturnType<typeof work.fetchDefault>>):Promise<unknown>{
+    if(!fetchedTarget && ((c.type==='workspace.create'&&!c.baseRef)||c.type==='workspace.sync-default')){
+      let root:string;
+      if(c.type==='workspace.create'){
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。');
+        root=project.path;
+      }else{
+        const record=workspace(c.workspaceId);
+        if(record.kind!=='root')throw new Fault('root_required','メインの作業フォルダで実行してください。');
+        root=record.path;
+      }
+      const fetched=await fetchDefault(root);
+      // Only local mutation enters the interactive queue. Revalidate all state there:
+      // a terminal may have opened or files may have changed during the fetch.
+      const mutation=queue.catch(()=>{}).then(()=>execute(c,operationId,fetched));
+      queue=mutation;
+      return mutation;
+    }
     switch(c.type){
       case 'project.add':{
         const {path,isGit}=await work.projectFolder(c.path),existing=store.list<Project>('projects').find(p=>p.path===path);
@@ -40,12 +59,19 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'workspace.create':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。通常のフォルダでは、そのまま作業を開始できます。');
-        const commit=(await work.git(project.path,['rev-parse','--verify','--end-of-options',`${c.baseRef}^{commit}`])).trim();
+        const commit=c.baseRef ? (await work.git(project.path,['rev-parse','--verify','--end-of-options',`${c.baseRef}^{commit}`])).trim() : fetchedTarget!.commit;
         const name=c.name??`worktree-${operationId.slice(0,8)}`;
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
         const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
+      }
+      case 'workspace.sync-default':{
+        const record=workspace(c.workspaceId);
+        if(record.kind!=='root')throw new Fault('root_required','メインの作業フォルダで実行してください。');
+        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','メインで実行中のターミナルとエージェントを停止してください。',409);
+        const target=await work.syncDefault(record.path,fetchedTarget);
+        const updated={...record,branch:target.branch};store.put('workspaces',updated);return updated;
       }
       case 'workspace.delete':{
         const record=workspace(c.workspaceId);
@@ -108,9 +134,10 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));
     // Network operations must not block PTY input/resize or local file saves.
     const isGitHub=command.type.startsWith('github.');
+    const isRemoteWorkspace=command.type==='workspace.sync-default'||(command.type==='workspace.create'&&!command.baseRef);
     // Deletion is a barrier: finish GitHub mutations before removing their cwd.
     const isDelete=command.type==='workspace.delete';
-    const preceding=isDelete?Promise.allSettled([queue,githubQueue]):isGitHub?githubQueue:queue;
+    const preceding=isDelete?Promise.allSettled([queue,githubQueue]):isGitHub?githubQueue:isRemoteWorkspace?workspaceNetworkQueue:queue;
     const result=preceding.catch(()=>{}).then(async()=>{
       const existing=store.db.prepare('SELECT * FROM operations WHERE id=?').get(operationId);
       if(existing){
@@ -122,7 +149,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       store.db.prepare('INSERT INTO operations(id,hash,status) VALUES(?,?,?)').run(operationId,digest,'pending');
       try{const value=await execute(command,operationId);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('done',JSON.stringify(value),operationId);return value;}
       catch(e){const fault=e instanceof Fault?e:new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('failed',JSON.stringify({code:fault.code,message:fault.message,status:fault.status}),operationId);throw fault;}
-    });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else queue=result;return result;
+    });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else if(isRemoteWorkspace)workspaceNetworkQueue=result;else queue=result;return result;
   });
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
@@ -134,6 +161,6 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();});
+  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();});
   return {app,store,token};
 }

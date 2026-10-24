@@ -63,6 +63,9 @@ struct WorkspaceView: View {
         }
         .onAppear {restore(); openRequestedTerminal()}
         .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
+        .onReceive(model.workspaceUpdated) {id in
+            if id == workspace.id {treeVersion += 1; selectedDiff = nil}
+        }
         .onReceive(model.workspaceCommands) {request in
             guard request.workspaceId == workspace.id, model.selectedId == workspace.id,
                   closingTab == nil else {return}
@@ -361,6 +364,16 @@ struct FilePane: View {
         .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first; if let requestedFile {open(requestedFile)}}
         .onChange(of: requestedFile) {_, path in if let path {open(path)}}
         .onChange(of: documents) {_, value in DraftCache.shared.update(workspace.id, value)}
+        .onReceive(model.workspaceUpdated) {id in
+            guard id == workspace.id else {return}
+            // Refresh clean buffers; preserve edits made while the network request was running.
+            let reopen = selected
+            documents = documents.filter {$0.value.dirty}
+            order = order.filter {documents[$0] != nil}
+            selected = order.first
+            DraftCache.shared.update(workspace.id, documents)
+            if let reopen {open(reopen)}
+        }
     }
     private func open(_ path: String) {
         if documents[path] != nil {selected = path; return}
@@ -381,7 +394,10 @@ struct FileTree: View {
             if let error {Text(error).font(.system(size: 10)).foregroundStyle(.secondary)}
             ForEach(entries) {entry in
                 if entry.isDirectory {FolderRow(workspaceId: workspaceId, entry: entry, selected: selected, onSelect: onSelect)}
-                else {Button {onSelect(entry.path)} label: {HStack(spacing: 7) {Image(systemName: "doc").foregroundStyle(.tertiary); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).padding(.vertical, 6).padding(.horizontal, 6).background(selected == entry.path ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 4)).contentShape(Rectangle())}.buttonStyle(.plain)}
+                else {Button {onSelect(entry.path)} label: {HStack(spacing: 7) {Image(systemName: "doc").foregroundStyle(.tertiary); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).padding(.vertical, 6).padding(.horizontal, 6).background(selected == entry.path ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 4)).contentShape(Rectangle())}.buttonStyle(.plain).onDrag {
+                    guard let workspace = model.state.workspaces.first(where: { $0.id == workspaceId }) else { return NSItemProvider() }
+                    return NSItemProvider(object: URL(fileURLWithPath: workspace.path).appendingPathComponent(entry.path) as NSURL)
+                }}
             }
         }.task {do {let listing: DirectoryListing = try await model.api.get("v1/workspaces/\(workspaceId)/files", query: ["path": path]); entries = listing.entries} catch {self.error = error.localizedDescription}}
     }
