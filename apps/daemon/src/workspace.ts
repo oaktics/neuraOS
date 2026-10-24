@@ -86,9 +86,19 @@ export async function syncDefault(root:string,fetched?:Awaited<ReturnType<typeof
     catch{throw new Fault('local_commits','デフォルトブランチにリモート未反映のコミットがあります。先にマージなどで解消してください。',409);}
   }
   // merge can overwrite ignored files; reject collisions before switching branches.
-  const ignored=(await git(root,['ls-files','--others','--ignored','--exclude-standard','-z'])).split('\0').filter(Boolean);
+  const ignored=(await git(root,['ls-files','--others','--ignored','--exclude-standard','--directory','-z'])).split('\0').filter(Boolean);
   const tracked=(await git(root,['ls-tree','-r','--name-only','-z',target.commit])).split('\0').filter(Boolean);
-  if(ignored.some(a=>tracked.some(b=>a===b||a.startsWith(b+'/')||b.startsWith(a+'/'))))
+  const trackedFiles=new Set(tracked),trackedPrefixes=new Set<string>();
+  for(const path of tracked){
+    const parts=path.split('/');
+    for(let i=1;i<=parts.length;i++)trackedPrefixes.add(parts.slice(0,i).join('/'));
+  }
+  const collision=ignored.some(entry=>{
+    const path=entry.replace(/\/$/,''),parts=path.split('/');
+    if(trackedPrefixes.has(path))return true;
+    return parts.some((_,i)=>trackedFiles.has(parts.slice(0,i+1).join('/')));
+  });
+  if(collision)
     throw new Fault('ignored_collision','更新先と重なる無視対象ファイルがあります。退避してから更新してください。',409);
   await clean();
   await git(root,['switch','--no-overwrite-ignore',...(exists?[target.branch]:['-c',target.branch,target.commit])]);

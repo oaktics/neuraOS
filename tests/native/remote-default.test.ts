@@ -104,3 +104,28 @@ test('slow workspace fetches do not block interactive commands; sync rechecks ed
     }
   } finally {release?.();await daemon.app.close();await rm(dir,{recursive:true,force:true});}
 });
+
+test('root update collapses large ignored trees and still detects directory collisions',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-ignored-')),remote=join(dir,'remote'),repo=join(dir,'repo');
+  try {
+    await mkdir(remote);await git(remote,['init','-b','main']);
+    await git(remote,['config','user.name','Test']);await git(remote,['config','user.email','test@example.invalid']);
+    await writeFile(join(remote,'file'),'initial');await git(remote,['add','.']);await git(remote,['commit','-m','initial']);
+    await git(dir,['clone',remote,repo]);
+    await writeFile(join(repo,'.git','info','exclude'),'dependencies/\n');
+    const dependencies=join(repo,'dependencies');await mkdir(dependencies);
+    // Listing every ignored file would exceed the Git wrapper's 4 MiB buffer.
+    for(let batch=0;batch<180;batch++)await Promise.all(Array.from({length:100},(_,i)=>writeFile(join(dependencies,`${batch*100+i}-${'x'.repeat(230)}`),'')));
+    await writeFile(join(remote,'file'),'updated');await git(remote,['commit','-am','update']);
+    await syncDefault(repo);
+    assert.equal(await readFile(join(repo,'file'),'utf8'),'updated');
+    // A collapsed ignored directory still conflicts with tracked descendants.
+    await mkdir(join(remote,'dependencies'));await writeFile(join(remote,'dependencies','tracked'),'remote');
+    await git(remote,['add','.']);await git(remote,['commit','-m','track descendant']);
+    await assert.rejects(syncDefault(repo),{code:'ignored_collision'});
+    // It also conflicts if the directory is replaced by a tracked regular file.
+    await git(remote,['rm','-r','dependencies']);await writeFile(join(remote,'dependencies'),'remote file');
+    await git(remote,['add','.']);await git(remote,['commit','-m','replace directory']);
+    await assert.rejects(syncDefault(repo),{code:'ignored_collision'});
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
