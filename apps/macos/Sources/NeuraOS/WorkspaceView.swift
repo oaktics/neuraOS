@@ -377,7 +377,10 @@ struct FileTree: View {
             if let error {Text(error).font(.system(size: 10)).foregroundStyle(.secondary)}
             ForEach(entries) {entry in
                 if entry.isDirectory {FolderRow(workspaceId: workspaceId, entry: entry, selected: selected, onSelect: onSelect)}
-                else {Button {onSelect(entry.path)} label: {HStack(spacing: 7) {Image(systemName: "doc").foregroundStyle(.tertiary); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).padding(.vertical, 6).padding(.horizontal, 6).background(selected == entry.path ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 4)).contentShape(Rectangle())}.buttonStyle(.plain)}
+                else {Button {onSelect(entry.path)} label: {HStack(spacing: 7) {Image(systemName: "doc").foregroundStyle(.tertiary); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).padding(.vertical, 6).padding(.horizontal, 6).background(selected == entry.path ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 4)).contentShape(Rectangle())}.buttonStyle(.plain).onDrag {
+                    guard let workspace = model.state.workspaces.first(where: { $0.id == workspaceId }) else { return NSItemProvider() }
+                    return NSItemProvider(object: URL(fileURLWithPath: workspace.path).appendingPathComponent(entry.path) as NSURL)
+                }}
             }
         }.task {do {let listing: DirectoryListing = try await model.api.get("v1/workspaces/\(workspaceId)/files", query: ["path": path]); entries = listing.entries} catch {self.error = error.localizedDescription}}
     }
