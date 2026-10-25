@@ -106,7 +106,7 @@ struct WorkspaceView: View {
                                         if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityLabel(item.title)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
                             .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
@@ -142,7 +142,7 @@ struct WorkspaceView: View {
                 let active = layout.selectedId == item.id
                 let visible = active && model.selectedId == workspace.id
                 Group {
-                    if item.isTerminal {TerminalPane(workspace: workspace, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
                     else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
@@ -223,6 +223,7 @@ struct WorkspaceView: View {
         if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
     }
     private func close(_ item: WorkspaceTab) {
+        guard !model.isTerminalStarting(item.id) else {return}
         Diagnostics.shared.record("action.close-tab")
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
     }
@@ -271,13 +272,13 @@ struct WorkspaceView: View {
 struct TerminalPane: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
+    let tabId: String
     let provider: String
     @Binding var terminalId: String?
     let visible: Bool
     @State private var showStop = false
     @State private var hasBeenVisible = false
     @State private var attemptedAutoStart = false
-    @State private var starting = false
     private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal"}
     var body: some View {
         let terminal = model.terminal(id: terminalId)
@@ -319,11 +320,12 @@ struct TerminalPane: View {
         launch()
     }
     private func launch(resume: Bool = false) {
-        guard !starting else {return}
-        starting = true
+        // Mark synchronously, before scheduling the task: both button and shortcut closes
+        // must keep this tab mounted until its terminal binding has been updated.
+        guard model.beginTerminalLaunch(tabId) else {return}
         Task {
+            defer {model.endTerminalLaunch(tabId)}
             if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {terminalId = terminal.id}
-            starting = false
         }
     }
 }

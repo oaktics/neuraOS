@@ -42,12 +42,23 @@ import SwiftUI
                 guard let reopen = findButton(host, label: "左サイドバーを開く"), press(reopen) else {throw SmokeFailure.pressFailed}
                 try await Task.sleep(for: .milliseconds(100))
                 guard model.showSidebar else {throw SmokeFailure.noEffect}
+                model.beginTerminalLaunch(first.id)
+                try await Task.sleep(for: .milliseconds(100))
+                guard let protectedClose = findButton(host, label: "\(first.title)を閉じる") else {throw SmokeFailure.missingButton}
+                _ = press(protectedClose)
+                try await Task.sleep(for: .milliseconds(100))
+                guard let protected = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: protected).tabs.count == 2 else {throw SmokeFailure.noEffect}
                 guard let tab = findButton(host, label: second.title), press(tab) else {throw SmokeFailure.missingButton}
                 try await Task.sleep(for: .milliseconds(150))
                 guard let saved = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: saved).selectedId == second.id else {throw SmokeFailure.noEffect}
                 guard let close = findButton(host, label: "\(second.title)を閉じる"), press(close) else {throw SmokeFailure.missingButton}
                 try await Task.sleep(for: .milliseconds(150))
                 guard let closed = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: closed).tabs.count == 1 else {throw SmokeFailure.noEffect}
+                model.endTerminalLaunch(first.id)
+                try await Task.sleep(for: .milliseconds(100))
+                guard let finishedClose = findButton(host, label: "\(first.title)を閉じる"), press(finishedClose) else {throw SmokeFailure.missingButton}
+                try await Task.sleep(for: .milliseconds(100))
+                guard let finished = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: finished).tabs.isEmpty else {throw SmokeFailure.noEffect}
                 model.endAction("smoke-background")
                 try await Diagnostics.shared.export(to: report)
                 Diagnostics.shared.stop()

@@ -95,6 +95,10 @@ final class DaemonClient {
     @Published var providerUsage: [ProviderUsage] = []
     @Published var usageFailed = false
     @Published var error: String?
+    @Published private(set) var startingTerminalTabs: Set<String> = []
+    func isTerminalStarting(_ tabId: String) -> Bool {startingTerminalTabs.contains(tabId)}
+    @discardableResult func beginTerminalLaunch(_ tabId: String) -> Bool {startingTerminalTabs.insert(tabId).inserted}
+    func endTerminalLaunch(_ tabId: String) {startingTerminalTabs.remove(tabId)}
     private(set) var actionStarted: [String: Date] = [:]
     @Published private(set) var pendingActions: [String: String] = [:]
     func isBusy(_ key: String) -> Bool {pendingActions[key] != nil}

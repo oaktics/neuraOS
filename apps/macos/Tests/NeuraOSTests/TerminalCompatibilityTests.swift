@@ -2,6 +2,23 @@ import XCTest
 @testable import NeuraOS
 
 final class TerminalCompatibilityTests: XCTestCase {
+    @MainActor func testPendingLaunchOnlyProtectsItsOwningTabUntilCompletion() async {
+        let model = AppModel(startPolling: false)
+        XCTAssertTrue(model.beginTerminalLaunch("starting-tab"))
+        XCTAssertFalse(model.beginTerminalLaunch("starting-tab"))
+        XCTAssertTrue(model.isTerminalStarting("starting-tab"))
+        XCTAssertFalse(model.isTerminalStarting("unrelated-tab"))
+        let workspace = Workspace(id: "legacy", projectId: "test", name: "test", path: "/nonexistent", branch: "", kind: "folder")
+        let terminal = await model.openTerminal(workspace, provider: "shell")
+        XCTAssertNil(terminal)
+        // The caller owns the guard through terminal binding assignment, even after open returns.
+        XCTAssertTrue(model.isTerminalStarting("starting-tab"))
+        model.endTerminalLaunch("starting-tab")
+        XCTAssertFalse(model.isTerminalStarting("starting-tab"))
+        XCTAssertTrue(model.beginTerminalLaunch("starting-tab"))
+        model.endTerminalLaunch("starting-tab")
+    }
+
     @MainActor func testConcurrentLegacyOpensAreRejectedBeforeSendingCommands() async {
         let model = AppModel(startPolling: false)
         model.connected = true
