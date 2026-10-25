@@ -13,7 +13,7 @@ final class TerminalCompatibilityTests: XCTestCase {
         XCTAssertNil(results.0)
         XCTAssertNil(results.1)
         XCTAssertEqual(model.error, "Daemonの更新が必要です。実行中の作業を終えてから pnpm service restart を実行してください。")
-        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.isBusy(workspace.id))
         XCTAssertTrue(model.state.terminals.isEmpty)
     }
 }

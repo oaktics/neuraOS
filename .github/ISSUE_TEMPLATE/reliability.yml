@@ -1,0 +1,43 @@
+name: 操作不良・クラッシュ
+description: 再現、修正、配布後の改善確認を追跡する
+title: "不具合: "
+body:
+  - type: input
+    id: build
+    attributes:
+      label: 発生したビルド番号・macOS
+    validations:
+      required: true
+  - type: dropdown
+    id: impact
+    attributes:
+      label: 影響
+      options:
+        - データ消失
+        - クラッシュ
+        - 操作不能
+        - 遅い・待ち状態が分からない
+        - その他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 再現手順・期待する挙動・実際の挙動
+      description: 直前の操作、頻度、再起動で回復するかも記載してください。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 診断情報・操作ID
+      description: ヘルプから診断JSONを保存できます。公開添付する前に内容を確認してください。会話本文や認証情報は貼らないでください。
+  - type: textarea
+    id: verification
+    attributes:
+      label: 修正と配布後の確認（担当者が追記）
+      value: |
+        - [ ] 再現テストを追加し、修正前の失敗を確認
+        - [ ] 修正後のテスト・配布アプリの操作確認
+        - [ ] 修正PRと配布ビルド番号を記録
+        - [ ] 配布後の再現確認・翌週の指標比較

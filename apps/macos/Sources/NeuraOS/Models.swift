@@ -52,18 +52,37 @@ final class DaemonClient {
         try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)
     }
     private func request<T: Decodable>(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> T {
-        var components = URLComponents(url: endpoint.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
-        components.queryItems = query.isEmpty ? nil : query.sorted(by: {$0.key < $1.key}).map {URLQueryItem(name: $0.key, value: $0.value)}
-        var request = URLRequest(url: components.url!)
-        request.timeoutInterval = timeout
-        let token = try String(contentsOf: dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        if let body {request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONSerialization.data(withJSONObject: body)}
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw (try? JSONDecoder().decode(APIError.self, from: data)) ?? APIError(error: "connection", message: "Daemonへの接続に失敗しました。")
+        let operationId = body?["operationId"] as? String
+        let operation = (body?["command"] as? [String: Any])?["type"] as? String ?? "read.\(path.split(separator: "/").last.map(String.init) ?? "unknown")"
+        let started = ProcessInfo.processInfo.systemUptime
+        let traced = body != nil && !["terminal.input", "terminal.resize"].contains(operation)
+        if traced {Diagnostics.shared.record("operation.start", operation: operation, id: operationId)}
+        let slowTask: Task<Void, Never>? = traced ? Task {
+            do {try await Task.sleep(for: .seconds(10))} catch {return}
+            if traced {Diagnostics.shared.record("operation.slow", operation: operation, id: operationId, duration: ProcessInfo.processInfo.systemUptime - started)}
+        } : nil
+        defer {slowTask?.cancel()}
+        var statusCode: Int?
+        do {
+            var components = URLComponents(url: endpoint.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+            components.queryItems = query.isEmpty ? nil : query.sorted(by: {$0.key < $1.key}).map {URLQueryItem(name: $0.key, value: $0.value)}
+            var request = URLRequest(url: components.url!)
+            request.timeoutInterval = timeout
+            let token = try String(contentsOf: dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let body {request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONSerialization.data(withJSONObject: body)}
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                statusCode = (response as? HTTPURLResponse)?.statusCode
+                throw (try? JSONDecoder().decode(APIError.self, from: data)) ?? APIError(error: "connection", message: "Daemonへの接続に失敗しました。")
+            }
+            let value = try JSONDecoder().decode(T.self, from: data)
+            if traced {Diagnostics.shared.record("operation.success", operation: operation, id: operationId, duration: ProcessInfo.processInfo.systemUptime - started)}
+            return value
+        } catch {
+            Diagnostics.shared.record("operation.failure", operation: operation, id: operationId, duration: ProcessInfo.processInfo.systemUptime - started, code: statusCode ?? (error as NSError).code)
+            throw error
         }
-        return try JSONDecoder().decode(T.self, from: data)
     }
 }
 
@@ -76,7 +95,16 @@ final class DaemonClient {
     @Published var providerUsage: [ProviderUsage] = []
     @Published var usageFailed = false
     @Published var error: String?
-    @Published var busy = false
+    private(set) var actionStarted: [String: Date] = [:]
+    @Published private(set) var pendingActions: [String: String] = [:]
+    func isBusy(_ key: String) -> Bool {pendingActions[key] != nil}
+    @discardableResult func beginAction(_ key: String, label: String) -> Bool {
+        guard !isBusy(key) else {Diagnostics.shared.record("action.blocked", operation: "resource.busy"); return false}
+        actionStarted[key] = Date()
+        pendingActions[key] = label
+        return true
+    }
+    func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
     @Published var showNewWorkspace = false
     @Published var showNewSpace = false
     @Published var sidebarSpaces: SidebarSpaces = {
@@ -137,6 +165,7 @@ final class DaemonClient {
             // A daemon upgrade can change features without changing stored data/revision.
             if next.revision != state.revision || next.features != state.features || !connected {state = next}
             openedIds.formIntersection(Set(state.workspaces.map(\.id)))
+            if !connected {Diagnostics.shared.record("daemon.connected")}
             connected = true
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
                 let saved = sidebarSpaces.active.selectedWorkspaceId
@@ -145,9 +174,10 @@ final class DaemonClient {
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
             await agentNotifications?.receive(state, api: api)
-        } catch {connected = false}
+        } catch {if connected {Diagnostics.shared.record("daemon.disconnected")}; connected = false}
     }
     func select(_ id: String?) {
+        Diagnostics.shared.record("action.select-workspace")
         if let workspace = state.workspaces.first(where: {$0.id == id}) {sidebarSpaces.activeId = sidebarSpaces.owner(of: workspace.projectId)}
         sidebarSpaces.remember(id)
         selectedId = id; if let id {openedIds.insert(id)}; UserDefaults.standard.set(id, forKey: "selectedWorkspace")}
@@ -164,15 +194,17 @@ final class DaemonClient {
         panel.message = "作業するフォルダを選択（Gitは不要です）"; panel.prompt = "追加"
         guard panel.runModal() == .OK, let path = panel.url?.path else {return}
         let targetSpaceId = sidebarSpaces.active.id
-        busy = true
-        Task {defer {busy = false}; do {
+        guard beginAction("project.add", label: "フォルダを追加中") else {return}
+        Task {defer {endAction("project.add")}; do {
             let project: Project = try await api.command(["type": "project.add", "path": path])
             sidebarSpaces.projectSpaces[project.id] = targetSpaceId
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
     func createWorkspace(projectId: String, base: String?) async {
-        busy = true; defer {busy = false}
+        let key = "project.create.\(projectId)"
+        guard beginAction(key, label: "作業を作成中") else {return}
+        defer {endAction(key)}
         do {
             guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
             var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
@@ -180,8 +212,8 @@ final class DaemonClient {
             let workspace: Workspace = try await api.command(command); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
     }
     func syncDefault(_ workspace: Workspace) async {
-        guard !busy else {return}
-        busy = true; defer {busy = false}
+        guard beginAction(workspace.id, label: "リモートから更新中") else {return}
+        defer {endAction(workspace.id)}
         do {
             let _: Workspace = try await api.command(["type": "workspace.sync-default", "workspaceId": workspace.id])
             workspaceUpdated.send(workspace.id)
@@ -189,15 +221,16 @@ final class DaemonClient {
         } catch {report(error)}
     }
     func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
-        guard workspace.kind == "worktree", !busy else {return}
-        busy = true; defer {busy = false}
+        guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
+        defer {endAction(workspace.id)}
         do {
             let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges])
             await refresh()
         } catch {report(error)}
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
-        busy = true; defer {busy = false}
+        guard beginAction(workspace.id, label: "ターミナルを起動中") else {return nil}
+        defer {endAction(workspace.id)}
         do {
             // Check before sending: concurrent opens against legacy daemons can return the same PTY.
             guard state.supportsMultipleTerminals else {

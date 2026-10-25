@@ -53,7 +53,7 @@ struct WorkspaceView: View {
                 }
                 Text(workspace.path).lineLimit(1).truncationMode(.middle).help(workspace.path)
                 Spacer(minLength: 0)
-                if model.busy {ProgressView().controlSize(.mini)}
+                if model.isBusy(workspace.id) {ProgressView().controlSize(.mini)}
                 if workspace.supportsGit {Text("\(git.changes.count) files changed").fixedSize()}
             }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
         }
@@ -68,7 +68,7 @@ struct WorkspaceView: View {
             switch request.action {
             case .add(let kind): add(kind)
             case .close:
-                if !model.busy, let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
+                if let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
             case .move(let offset): layout.moveSelection(by: offset)
             case .select(let number): layout.select(number: number)
             case .inspector(let pane): inspector = pane; model.showInspector = true
@@ -76,7 +76,7 @@ struct WorkspaceView: View {
         }
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
         .onChange(of: layout.tabs) {_, _ in persist()}
-        .onChange(of: layout.selectedId) {_, _ in persist()}
+        .onChange(of: layout.selectedId) {_, _ in Diagnostics.shared.record("action.select-tab"); persist()}
         .confirmationDialog("タブを閉じてプロセスを停止しますか？", isPresented: Binding(get: {closingTab != nil}, set: {if !$0 {closingTab = nil}})) {
             if let item = closingTab {
                 Button("停止して閉じる", role: .destructive) {
@@ -105,8 +105,8 @@ struct WorkspaceView: View {
                                         Text(item.title).lineLimit(1)
                                         if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.busy).help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
+                                }.buttonStyle(.plain).accessibilityLabel(item.title)
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
                             .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
@@ -215,6 +215,7 @@ struct WorkspaceView: View {
         return true
     }
     private func add(_ kind: String) {
+        Diagnostics.shared.record("action.add-tab")
         let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
         layout.tabs.append(item); layout.selectedId = item.id
     }
@@ -222,6 +223,7 @@ struct WorkspaceView: View {
         if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
     }
     private func close(_ item: WorkspaceTab) {
+        Diagnostics.shared.record("action.close-tab")
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
     }
     private func remove(_ item: WorkspaceTab) {
@@ -287,8 +289,8 @@ struct TerminalPane: View {
                     Spacer()
                     if terminal.status == "running" {Button("停止") {showStop = true}.font(.system(size: 11)).buttonStyle(.plain)}
                     else {
-                        if provider != "shell" {Button("履歴から再開") {launch(resume: true)}.font(.system(size: 11)).disabled(model.busy || !model.connected)}
-                        Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.busy || !model.connected)
+                        if provider != "shell" {Button("履歴から再開") {launch(resume: true)}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)}
+                        Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)
                     }
                 }.padding(.horizontal, 8).frame(height: 24)
                 if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
@@ -298,8 +300,8 @@ struct TerminalPane: View {
                     Image(systemName: provider == "shell" ? "terminal" : "sparkle").font(.system(size: 30, weight: .ultraLight)).foregroundStyle(.secondary)
                     Text("\(title)で作業する").font(.system(size: 19, weight: .medium))
                     Text(provider == "shell" ? "この作業フォルダでシェルを開きます。" : "ログイン済みのCLIを、そのまま使えます。").font(.system(size: 12)).foregroundStyle(.secondary)
-                    Button("\(title)を起動") {launch()}.controlSize(.large).disabled(model.busy || !model.connected)
-                    if provider != "shell" {Button("以前の会話から再開") {launch(resume: true)}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.busy || !model.connected)}
+                    Button("\(title)を起動") {launch()}.controlSize(.large).disabled(model.isBusy(workspace.id) || !model.connected)
+                    if provider != "shell" {Button("以前の会話から再開") {launch(resume: true)}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.isBusy(workspace.id) || !model.connected)}
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)

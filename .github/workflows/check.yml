@@ -4,6 +4,8 @@ on:
     branches: [staging]
   pull_request:
     branches: [staging, main]
+  schedule:
+    - cron: "0 0 * * 1"
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,3 +30,12 @@ jobs:
       - run: node --test tests/release/*.test.mjs
       - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
       - run: pnpm test:macos
+      - run: pnpm build
+      - run: node scripts/native/release/package.mjs
+      - run: node scripts/native/release/smoke.mjs
+      - name: Retain crash symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuraOS-symbols-arm64
+          path: apps/macos/dist/neuraOS.app.dSYM
+          retention-days: 90
