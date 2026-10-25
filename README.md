@@ -163,3 +163,7 @@ macOS通知はCodex／Claude Codeの「回答・承認待ち」と「応答完�
 CIはエージェント表示の左隣に、実行中・成功・失敗・キャンセルのアイコンで表示します。対象はworktreeの現在のHEADで、表示中の行だけ60秒ごとに確認します。同じリポジトリ・コミットへの取得は共有し、GitHubへの同時問い合わせを4件に制限します。CI未設定・未pushのコミットではアイコンを省略し、認証・通信エラーは成功と区別します。チェック名はホバーで確認できます。既存の `gh auth login` を使用します。
 
 仕様参照: [Codex hooks](https://learn.chatgpt.com/docs/hooks)、[Claude Code hooks](https://code.claude.com/docs/en/hooks)、[GitHub CLI API](https://cli.github.com/manual/gh_api)。
+
+## 不具合の報告と継続改善
+
+タイトルバーの虫アイコン、またはヘルプの「今おかしかった：診断情報を保存」からローカルの診断JSONを保存できます。操作履歴、無反応の検知、クラッシュ情報、週次集計と改善手順は [docs/reliability.md](docs/reliability.md) を参照してください。

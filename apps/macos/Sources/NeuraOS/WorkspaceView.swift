@@ -48,14 +48,18 @@ struct WorkspaceView: View {
             HStack(spacing: 10) {
                 if workspace.supportsGit {
                     Label(git.branch.isEmpty ? workspace.branch : git.branch, systemImage: "arrow.triangle.branch")
-                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: 180, alignment: .leading)
+                        .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
                         .help(git.branch.isEmpty ? workspace.branch : git.branch)
                 }
-                Text(workspace.path).lineLimit(1).truncationMode(.middle).help(workspace.path)
+                Text((workspace.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(workspace.path)
                 Spacer(minLength: 0)
-                if model.busy {ProgressView().controlSize(.mini)}
-                if workspace.supportsGit {Text("\(git.changes.count) files changed").fixedSize()}
-            }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 8).frame(height: 22)
+                if model.isBusy(workspace.id) {ProgressView().controlSize(.mini)}
+                if workspace.supportsGit && !git.changes.isEmpty {
+                    Text("\(git.changes.count)件の変更").fixedSize()
+                }
+                Rectangle().fill(Palette.line).frame(width: 1, height: 12)
+                ProviderUsageFooter()
+            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .onAppear {restore(); openRequestedTerminal()}
         .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
@@ -68,7 +72,7 @@ struct WorkspaceView: View {
             switch request.action {
             case .add(let kind): add(kind)
             case .close:
-                if !model.busy, let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
+                if let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
             case .move(let offset): layout.moveSelection(by: offset)
             case .select(let number): layout.select(number: number)
             case .inspector(let pane): inspector = pane; model.showInspector = true
@@ -76,7 +80,7 @@ struct WorkspaceView: View {
         }
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
         .onChange(of: layout.tabs) {_, _ in persist()}
-        .onChange(of: layout.selectedId) {_, _ in persist()}
+        .onChange(of: layout.selectedId) {_, _ in Diagnostics.shared.record("action.select-tab"); persist()}
         .confirmationDialog("タブを閉じてプロセスを停止しますか？", isPresented: Binding(get: {closingTab != nil}, set: {if !$0 {closingTab = nil}})) {
             if let item = closingTab {
                 Button("停止して閉じる", role: .destructive) {
@@ -105,8 +109,8 @@ struct WorkspaceView: View {
                                         Text(item.title).lineLimit(1)
                                         if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
-                                }.buttonStyle(.plain)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.busy).help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
+                                }.buttonStyle(.plain).accessibilityLabel(item.title)
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
                             .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
@@ -142,7 +146,7 @@ struct WorkspaceView: View {
                 let active = layout.selectedId == item.id
                 let visible = active && model.selectedId == workspace.id
                 Group {
-                    if item.isTerminal {TerminalPane(workspace: workspace, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
                     else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
@@ -215,6 +219,7 @@ struct WorkspaceView: View {
         return true
     }
     private func add(_ kind: String) {
+        Diagnostics.shared.record("action.add-tab")
         let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
         layout.tabs.append(item); layout.selectedId = item.id
     }
@@ -222,6 +227,8 @@ struct WorkspaceView: View {
         if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
     }
     private func close(_ item: WorkspaceTab) {
+        guard !model.isTerminalStarting(item.id) else {return}
+        Diagnostics.shared.record("action.close-tab")
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
     }
     private func remove(_ item: WorkspaceTab) {
@@ -269,13 +276,13 @@ struct WorkspaceView: View {
 struct TerminalPane: View {
     @EnvironmentObject var model: AppModel
     let workspace: Workspace
+    let tabId: String
     let provider: String
     @Binding var terminalId: String?
     let visible: Bool
     @State private var showStop = false
     @State private var hasBeenVisible = false
     @State private var attemptedAutoStart = false
-    @State private var starting = false
     private var title: String {provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal"}
     var body: some View {
         let terminal = model.terminal(id: terminalId)
@@ -287,8 +294,8 @@ struct TerminalPane: View {
                     Spacer()
                     if terminal.status == "running" {Button("停止") {showStop = true}.font(.system(size: 11)).buttonStyle(.plain)}
                     else {
-                        if provider != "shell" {Button("履歴から再開") {launch(resume: true)}.font(.system(size: 11)).disabled(model.busy || !model.connected)}
-                        Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.busy || !model.connected)
+                        if provider != "shell" {Button("履歴から再開") {launch(resume: true)}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)}
+                        Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)
                     }
                 }.padding(.horizontal, 8).frame(height: 24)
                 if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
@@ -298,30 +305,39 @@ struct TerminalPane: View {
                     Image(systemName: provider == "shell" ? "terminal" : "sparkle").font(.system(size: 30, weight: .ultraLight)).foregroundStyle(.secondary)
                     Text("\(title)で作業する").font(.system(size: 19, weight: .medium))
                     Text(provider == "shell" ? "この作業フォルダでシェルを開きます。" : "ログイン済みのCLIを、そのまま使えます。").font(.system(size: 12)).foregroundStyle(.secondary)
-                    Button("\(title)を起動") {launch()}.controlSize(.large).disabled(model.busy || !model.connected)
-                    if provider != "shell" {Button("以前の会話から再開") {launch(resume: true)}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.busy || !model.connected)}
+                    Button("\(title)を起動") {launch()}.controlSize(.large).disabled(model.isBusy(workspace.id) || !model.connected)
+                    if provider != "shell" {Button("以前の会話から再開") {launch(resume: true)}.font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.isBusy(workspace.id) || !model.connected)}
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {activateIfNeeded()}
         .onChange(of: visible) {_, _ in activateIfNeeded()}
         .onChange(of: model.connected) {_, _ in activateIfNeeded()}
+        .onReceive(model.$pendingActions) {_ in
+            // Published sends before mutation. Recheck on the next actor turn, and
+            // observe every change rather than relying on render-coalesced onChange.
+            Task { @MainActor in activateIfNeeded() }
+        }
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
     }
     private func activateIfNeeded() {
         guard visible else {return}
         hasBeenVisible = true
-        guard model.connected, !attemptedAutoStart else {return}
-        attemptedAutoStart = true
-        guard terminalId == nil else {return}
+        guard model.connected, !attemptedAutoStart, !model.isBusy(workspace.id) else {return}
+        guard terminalId == nil else {attemptedAutoStart = true; return}
         launch()
     }
     private func launch(resume: Bool = false) {
-        guard !starting else {return}
-        starting = true
+        // Mark synchronously, before scheduling the task: both button and shortcut closes
+        // must keep this tab mounted until its terminal binding has been updated.
+        guard !model.isBusy(workspace.id), model.beginTerminalLaunch(tabId) else {return}
         Task {
+            defer {model.endTerminalLaunch(tabId)}
+            // Another tab may acquire the workspace after this task was queued.
+            // Contention is not a real attempt; keep automatic retry eligible.
+            guard !model.isBusy(workspace.id) else {return}
+            attemptedAutoStart = true
             if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {terminalId = terminal.id}
-            starting = false
         }
     }
 }

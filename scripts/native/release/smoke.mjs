@@ -1,4 +1,4 @@
-import {mkdtemp, rm, mkdir, cp} from 'node:fs/promises';
+import {mkdtemp, rm, mkdir, cp, readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawn, execFileSync} from 'node:child_process';
@@ -36,6 +36,15 @@ try {
   await cp(join(original, 'Resources/NeuraOS_NeuraOS.bundle'), join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
   const executable = join(app, 'Contents/MacOS/NeuraOS');
   execFileSync(executable, ['--check-bundled-resources'], {stdio: 'inherit', timeout: 15000});
+  // A unique bundle ID isolates UserDefaults; explicit endpoints isolate app data and services.
+  const plist = join(app, 'Contents/Info.plist');
+  for (const [key, value] of [['CFBundleIdentifier', 'com.neuraos.reliability-smoke.' + process.pid], ['NeuraDataDirectory', data], ['NeuraEndpoint', 'http://127.0.0.1:1']]) {
+    execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist]);
+  }
+  const report = join(data, 'diagnostic-report.json');
+  execFileSync(executable, ['--reliability-smoke', report], {stdio: 'inherit', timeout: 20000});
+  const diagnostic = JSON.parse(await readFile(report, 'utf8'));
+  if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
   await rm(join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
   let missingStatus, missingMessage;
   try {execFileSync(executable, ['--check-bundled-resources'], {timeout: 15000, stdio: 'pipe'});}

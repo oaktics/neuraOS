@@ -1,3 +1,4 @@
+import {Diagnostics} from './diagnostics.ts';
 import Fastify from 'fastify';
 import {z} from 'zod';
 import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
@@ -17,6 +18,8 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
   await chmod(tokenPath,0o600);
   const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite')),terminals=new Terminals(store);
+  const diagnostics=new Diagnostics(join(dataDir,'diagnostics'));
+  diagnostics.record('daemon.start');
   const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
   let queue:Promise<unknown>=Promise.resolve();
@@ -132,6 +135,8 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/events',async req=>{const after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);return {events:store.db.prepare('SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after)};});
   app.post('/v1/commands',async req=>{
     const {operationId,command}=Envelope.parse(req.body),digest=hash(JSON.stringify(command));
+    const started=performance.now(),traced=!['terminal.input','terminal.resize'].includes(command.type);
+    if(traced)diagnostics.record('operation.received',command.type,operationId);
     // Network operations must not block PTY input/resize or local file saves.
     const isGitHub=command.type.startsWith('github.');
     const isRemoteWorkspace=command.type==='workspace.sync-default'||(command.type==='workspace.create'&&!command.baseRef);
@@ -139,6 +144,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     const isDelete=command.type==='workspace.delete';
     const preceding=isDelete?Promise.allSettled([queue,githubQueue]):isGitHub?githubQueue:isRemoteWorkspace?workspaceNetworkQueue:queue;
     const result=preceding.catch(()=>{}).then(async()=>{
+      if(traced)diagnostics.record('operation.executing',command.type,operationId,performance.now()-started);
       const existing=store.db.prepare('SELECT * FROM operations WHERE id=?').get(operationId);
       if(existing){
         if(existing.hash!==digest)throw new Fault('operation_conflict','同じ操作IDに別の内容が指定されています。',409);
@@ -149,7 +155,9 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       store.db.prepare('INSERT INTO operations(id,hash,status) VALUES(?,?,?)').run(operationId,digest,'pending');
       try{const value=await execute(command,operationId);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('done',JSON.stringify(value),operationId);return value;}
       catch(e){const fault=e instanceof Fault?e:new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);store.db.prepare('UPDATE operations SET status=?,result=? WHERE id=?').run('failed',JSON.stringify({code:fault.code,message:fault.message,status:fault.status}),operationId);throw fault;}
-    });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else if(isRemoteWorkspace)workspaceNetworkQueue=result;else queue=result;return result;
+    });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else if(isRemoteWorkspace)workspaceNetworkQueue=result;else queue=result;
+    try {const value=await result;if(traced)diagnostics.record('operation.success',command.type,operationId,performance.now()-started);return value;}
+    catch(error){diagnostics.record('operation.failure',command.type,operationId,performance.now()-started);throw error;}
   });
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
@@ -161,6 +169,6 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();});
+  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
   return {app,store,token};
 }

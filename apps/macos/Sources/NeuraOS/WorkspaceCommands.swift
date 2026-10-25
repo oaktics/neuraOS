@@ -30,7 +30,7 @@ struct WorkspaceCommands: Commands {
                 Button("新しいBrowser") {send(.add("browser"))}.keyboardShortcut("b", modifiers: [.command, .shift])
                 Divider()
                 Button("現在のタブを閉じる…") {send(.close)}
-                    .keyboardShortcut("w", modifiers: [.command, .shift]).disabled(model.busy)
+                    .keyboardShortcut("w", modifiers: [.command, .shift])
                 Divider()
                 Button("前のタブ") {send(.move(-1))}.keyboardShortcut("[", modifiers: [.command, .shift])
                 Button("次のタブ") {send(.move(1))}.keyboardShortcut("]", modifiers: [.command, .shift])
