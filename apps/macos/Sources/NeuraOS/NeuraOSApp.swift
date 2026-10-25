@@ -9,7 +9,12 @@ import ChromiumBridge
         if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
             exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--reliability-smoke"), CommandLine.arguments.count > index + 1 {
+            ReliabilitySmoke.run(report: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+            return
+        }
         if !CommandLine.arguments.contains("--check-bundled-resources") {
+            Diagnostics.shared.start()
             if let error = NCInitializeChromium() {NSLog("%@", error)}
         }
         NeuraOSApp.main()
@@ -40,6 +45,9 @@ struct NeuraOSApp: App {
         .defaultSize(width: 1380, height: 880)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .help) {
+                Button("今おかしかった：診断情報を保存…") {DiagnosticReport.save()}
+            }
             CommandGroup(after: .appInfo) {
                 Button("アップデートを確認…") {updater.check()}.disabled(updater.busy)
             }
@@ -62,7 +70,7 @@ struct NeuraOSApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)}
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {false}
-    func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush()}
+    func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush(); Diagnostics.shared.stop()}
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {sender.windows.first?.makeKeyAndOrderFront(nil)}; return true
     }
@@ -91,6 +99,13 @@ struct RootView: View {
                 Text("neuraOS").font(.system(size: 13, weight: .semibold))
                 if let selected = model.selected {Text("/").foregroundStyle(.quaternary); Text(selected.name).foregroundStyle(.secondary).lineLimit(1)}
                 Spacer()
+                if !model.pendingActions.isEmpty {
+                    TimelineView(.periodic(from: .now, by: 1)) {context in
+                        Text(model.pendingActions.keys.sorted().map {key in "\(model.pendingActions[key] ?? "")（\(Int(max(0, context.date.timeIntervalSince(model.actionStarted[key] ?? context.date))))秒）"}.joined(separator: "・")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    ProgressView().controlSize(.small)
+                }
+                Button {DiagnosticReport.save()} label: {Image(systemName: "ladybug")}.help("今おかしかった：診断情報を保存").accessibilityLabel("診断情報を保存")
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
                 if model.selected != nil {
@@ -276,7 +291,7 @@ struct Sidebar: View {
                                                 if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
                                                     model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
                                                 } else {deleting = workspace}
-                                            }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
+                                            }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                         }
                                     }
                                     if workspace.kind == "root" {
@@ -289,7 +304,7 @@ struct Sidebar: View {
                                         }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
                                             .padding(.leading, 18)
                                             .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
-                                            .disabled(model.busy || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
+                                            .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
                                     }
                                 }
                             }
@@ -364,7 +379,7 @@ struct NewWorkspaceSheet: View {
                 Toggle("作成元を指定", isOn: $customBase)
                 if customBase {TextField("ブランチ・コミット", text: $base)}
             }
-            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: customBase ? base.trimmingCharacters(in: .whitespacesAndNewlines) : nil)}}.keyboardShortcut(.defaultAction).disabled(model.busy || !model.connected || projectId.isEmpty || (customBase && base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || model.state.features?.contains("workspace.remote-default") != true)}
+            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.isBusy("project.create.\(projectId)") {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: customBase ? base.trimmingCharacters(in: .whitespacesAndNewlines) : nil)}}.keyboardShortcut(.defaultAction).disabled(model.isBusy("project.create.\(projectId)") || !model.connected || projectId.isEmpty || (customBase && base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || model.state.features?.contains("workspace.remote-default") != true)}
         }.padding(28).frame(width: 440)
         .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
     }
