@@ -55,6 +55,21 @@ import SwiftUI
                 try await Task.sleep(for: .milliseconds(150))
                 guard let closed = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: closed).tabs.count == 1 else {throw SmokeFailure.noEffect}
                 model.endTerminalLaunch(first.id)
+                // Simulate a workspace mutation blocking the selected tab's auto-start.
+                // No daemon/token exists here: an admitted attempt must surface an error.
+                model.beginAction(workspace.id, label: "先行処理")
+                model.state.features = ["terminal.multiple"]
+                model.connected = true
+                try await Task.sleep(for: .milliseconds(100))
+                guard model.error == nil else {throw SmokeFailure.noEffect}
+                model.endAction(workspace.id)
+                for _ in 0..<100 {
+                    if model.error != nil {break}
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard model.error != nil else {throw SmokeFailure.noEffect}
+                model.error = nil
+                model.connected = false
                 try await Task.sleep(for: .milliseconds(100))
                 guard let finishedClose = findButton(host, label: "\(first.title)を閉じる"), press(finishedClose) else {throw SmokeFailure.missingButton}
                 try await Task.sleep(for: .milliseconds(100))

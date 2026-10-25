@@ -309,22 +309,30 @@ struct TerminalPane: View {
         .onAppear {activateIfNeeded()}
         .onChange(of: visible) {_, _ in activateIfNeeded()}
         .onChange(of: model.connected) {_, _ in activateIfNeeded()}
+        .onReceive(model.$pendingActions) {_ in
+            // Published sends before mutation. Recheck on the next actor turn, and
+            // observe every change rather than relying on render-coalesced onChange.
+            Task { @MainActor in activateIfNeeded() }
+        }
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
     }
     private func activateIfNeeded() {
         guard visible else {return}
         hasBeenVisible = true
-        guard model.connected, !attemptedAutoStart else {return}
-        attemptedAutoStart = true
-        guard terminalId == nil else {return}
+        guard model.connected, !attemptedAutoStart, !model.isBusy(workspace.id) else {return}
+        guard terminalId == nil else {attemptedAutoStart = true; return}
         launch()
     }
     private func launch(resume: Bool = false) {
         // Mark synchronously, before scheduling the task: both button and shortcut closes
         // must keep this tab mounted until its terminal binding has been updated.
-        guard model.beginTerminalLaunch(tabId) else {return}
+        guard !model.isBusy(workspace.id), model.beginTerminalLaunch(tabId) else {return}
         Task {
             defer {model.endTerminalLaunch(tabId)}
+            // Another tab may acquire the workspace after this task was queued.
+            // Contention is not a real attempt; keep automatic retry eligible.
+            guard !model.isBusy(workspace.id) else {return}
+            attemptedAutoStart = true
             if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {terminalId = terminal.id}
         }
     }
