@@ -13,6 +13,24 @@ import {ActivityTracker,activityArguments,activityBridge,supportsActivity,type A
 
 const execFileAsync=promisify(execFile);
 
+export function parseProcessTable(stdout:string){
+  return stdout.trim().split('\n').filter(line=>line.trim()).map(line=>{
+    const fields=line.trim().split(/\s+/);
+    const [pid,parent,group]=fields.map(Number);
+    if(fields.length!==3||!fields.every(field=>/^\d+$/.test(field))||
+      ![pid,parent,group].every(Number.isSafeInteger)||pid<=0)
+      throw new Fault('terminal_process_table_invalid','ターミナルの子プロセス一覧を確認できませんでした。もう一度削除してください。',409);
+    // A system/exiting process may have PGID 0. It is a valid row, but must
+    // never become a signal target (kill(0) targets the daemon's own group).
+    return {pid,parent,group};
+  });
+}
+
+async function readProcessTable(){
+  try{return (await execFileAsync('/bin/ps',['-axo','pid=,ppid=,pgid='],{maxBuffer:8*1024*1024,timeout:5000})).stdout;}
+  catch{throw new Fault('terminal_process_table_unavailable','ターミナルの子プロセス一覧を取得できませんでした。もう一度削除してください。',409);}
+}
+
 export async function executable(provider:Provider){
   if(provider==='shell')return process.platform==='win32'?'powershell.exe':'/bin/zsh';
   const override=process.env[provider==='codex'?'NEURA_CODEX_PATH':'NEURA_CLAUDE_PATH'];
@@ -35,7 +53,7 @@ export class Terminals {
   private closing=false;
   private stoppingGroups=new Map<string,Set<number>>();
   private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge}>();
-  constructor(readonly store:Store){}
+  constructor(readonly store:Store,private processTable=readProcessTable){}
   async open(workspace:Workspace,provider:Provider,resume:boolean){
     const program=await executable(provider),id=randomUUID();
     const env=terminalEnvironment();
@@ -105,18 +123,13 @@ export class Terminals {
         // Interactive shells put foreground/background jobs in separate groups.
         // Capture descendants before signaling the shell; after reparenting, retain
         // their groups and discover any further descendants of surviving members.
-        const {stdout}=await execFileAsync('/bin/ps',['-axo','pid=,ppid=,pgid='],{maxBuffer:8*1024*1024,timeout:1000});
-        const rows=stdout.trim().split('\n').filter(Boolean).map(line=>{
-          const [pid,parent,group]=line.trim().split(/\s+/).map(Number);
-          if(!pid||parent===undefined||!Number.isInteger(parent)||!group)throw new Error('Invalid process table');
-          return {pid,parent,group};
-        });
+        const rows=parseProcessTable(await this.processTable());
         const owned=new Set(rows.filter(row=>groups.has(row.group)).map(row=>row.pid));
         let changed=true;
         while(changed){
           changed=false;
           for(const row of rows)if(owned.has(row.parent)&&!owned.has(row.pid)){
-            owned.add(row.pid);groups.add(row.group);changed=true;
+            owned.add(row.pid);if(row.group>0)groups.add(row.group);changed=true;
           }
         }
       };
@@ -149,7 +162,10 @@ export class Terminals {
         await new Promise(resolve=>setTimeout(resolve,25));
       }
       this.stoppingGroups.delete(id);
-    }));
+    })).catch(error=>{
+      if(error instanceof Fault)throw error;
+      throw new Fault('terminal_stop_failed','ターミナルと子プロセスを停止できませんでした。作業フォルダは削除していません。ターミナルを停止してから、もう一度削除してください。',409);
+    });
   }
 
   async shutdown(){this.closing=true;const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
