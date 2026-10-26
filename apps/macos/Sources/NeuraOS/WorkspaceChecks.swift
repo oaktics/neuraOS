@@ -30,7 +30,7 @@ struct WorkspaceChecksSnapshot: Decodable {
 }
 
 struct WorkspaceChecksIndicator: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     var visible = true
     @State private var snapshot: WorkspaceChecksSnapshot?

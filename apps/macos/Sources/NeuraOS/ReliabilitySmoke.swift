@@ -29,7 +29,7 @@ import ChromiumBridge
         let storageKey = "workspaceTabs.\(workspace.id)"
         UserDefaults.standard.set(try? JSONEncoder().encode(WorkspaceTabState(tabs: [first, second], selectedId: first.id)), forKey: storageKey)
         model.select(workspace.id)
-        let host = NSHostingView(rootView: RootView().environmentObject(model))
+        let host = NSHostingView(rootView: RootView().environment(model))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = host
         window.makeKeyAndOrderFront(nil)

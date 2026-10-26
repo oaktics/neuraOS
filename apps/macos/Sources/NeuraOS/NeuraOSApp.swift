@@ -23,7 +23,7 @@ import ChromiumBridge
 
 struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
     @StateObject private var updater = AppUpdater()
     @Environment(\.openWindow) private var openWindow
     init() {
@@ -40,7 +40,7 @@ struct NeuraOSApp: App {
     var body: some Scene {
         // The first scene is opened on launch. Keep Settings after the main window.
         Window("neuraOS", id: "main") {
-            RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
+            RootView().environment(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
                 .task {await updater.bootstrap()}
         }
@@ -85,8 +85,9 @@ enum Palette {
     static let line = Color.primary.opacity(0.08)
 }
 struct RootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     var body: some View {
+        @Bindable var model = model
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Button {model.showSidebar.toggle()} label: {
@@ -168,7 +169,7 @@ struct RootView: View {
     }
 }
 struct Sidebar: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var collapsed: Set<String> = []
     private var deleting: Workspace? {
@@ -306,7 +307,7 @@ struct Sidebar: View {
                                             Text(workspace.name).lineLimit(1)
                                             Spacer(minLength: 0)
                                             WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
-                                            WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspace.id}, connected: model.connected)
+                                            WorkspaceActivityStatus(workspaceId: workspace.id)
                                         }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
@@ -373,7 +374,7 @@ struct Sidebar: View {
     }
 }
 struct WelcomeView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "square.stack.3d.up").font(.system(size: 36, weight: .ultraLight)).foregroundStyle(.secondary)
@@ -386,7 +387,7 @@ struct WelcomeView: View {
     }
 }
 struct NewWorkspaceSheet: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) var dismiss
     @State private var projectId = ""
     @State private var base = ""
