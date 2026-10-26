@@ -1,6 +1,8 @@
 import SwiftUI
 import Combine
 import Darwin
+import ServiceManagement
+import SleepControl
 
 /// Uses every terminal, including those in inactive workspaces. Waiting for a
 /// person is not autonomous work. Unknown/disconnected state never means done.
@@ -18,6 +20,11 @@ enum AgentSleepPolicy {
     @Published private(set) var starting = false
     @Published private(set) var stopping = false
     private var runnerActive = false
+    @Published private(set) var approvalRequired = false
+    private let service = SMAppService.daemon(plistName: SleepService.plist)
+    private var connection: NSXPCConnection?
+    private var activationObserver: NSObjectProtocol?
+    private var sessionID: UUID?
     @Published private(set) var status = "無効"
     private var lease: URL?
     private var token = ""
@@ -29,6 +36,10 @@ enum AgentSleepPolicy {
     private var observer: NSObjectProtocol?
 
     init() {
+        refreshApproval()
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {self?.refreshApproval()}
+        }
         observer = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {self?.disable()}
         }
@@ -49,33 +60,78 @@ enum AgentSleepPolicy {
         lease = nil
         status = stopping ? "解除中…" : "無効"
     }
+    func refreshApproval() {
+        let wasRequired = approvalRequired
+        approvalRequired = service.status == .requiresApproval
+        if !enabled && !runnerActive && approvalRequired {
+            status = "システム設定でneuraOSのバックグラウンド実行を許可してください。"
+        } else if wasRequired && service.status == .enabled && !enabled && !runnerActive {
+            status = "許可済みです。この起動中のスリープ制御を有効にできます。"
+        }
+    }
+    func openApprovalSettings() {SMAppService.openSystemSettingsLoginItems()}
+
     func enable() {
         guard !enabled, !runnerActive else {return}
-        // A session is intentionally not persisted across app launches.
-        let helper = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("NeuraSleepHelper")
-        guard FileManager.default.isExecutableFile(atPath: helper.path) else {status = "スリープ制御ヘルパーが見つかりません。アプリを再ビルドしてください。"; return}
         do {
+            // Register only once. Turning sleep control off does not revoke the
+            // installation approval, and launching the app never enables sleep control.
+            if service.status == .notRegistered {try service.register()}
+            refreshApproval()
+            guard service.status == .enabled else {
+                status = approvalRequired
+                    ? "初回の許可が必要です。「システム設定で許可」を開いてください。"
+                    : "スリープ制御サービスを登録できません。インストール済みのアプリから再度お試しください。"
+                return
+            }
+            let helper = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("NeuraSleepService")
+            let requirement = try SleepService.requirement(for: helper)
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("neura-sleep-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             lease = directory.appendingPathComponent("lease")
             token = UUID().uuidString
-            enabled = true; starting = true; runnerActive = true; status = "macOSの認証を待っています…"
+            enabled = true; starting = true; runnerActive = true; status = "スリープ制御を開始しています…"
+            let id = UUID(); sessionID = id
             monitoringActivity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep, reason: "Monitor agent work for closed-display sleep")
             heartbeat()
-            guard enabled, let lease else {starting = false; runnerActive = false; stopping = false; return}
+            guard enabled, let lease else {finish(id: id, message: status); return}
             timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {self?.heartbeat()}
             }
             RunLoop.main.add(timer!, forMode: .common)
-            let command = Self.supervisedCommand(helper: helper.path, lease: lease.path, uid: getuid(), token: token)
-            Task {
-                let result = await Task.detached {Self.authorize(command)}.value
-                self.starting = false
-                self.runnerActive = false
-                self.disable()
-                if !result.isEmpty {self.status = result}
+            let connection = NSXPCConnection(machServiceName: SleepService.name, options: .privileged)
+            connection.setCodeSigningRequirement(requirement)
+            connection.remoteObjectInterface = NSXPCInterface(with: SleepServiceProtocol.self)
+            let disconnected: () -> Void = { [weak self] in
+                Task { @MainActor in
+                    self?.finish(id: id, message: "スリープ制御サービスとの接続が切れました。再度有効にしてください。")
+                }
             }
-        } catch {disable(); status = error.localizedDescription}
+            connection.interruptionHandler = disconnected
+            connection.invalidationHandler = disconnected
+            self.connection = connection
+            connection.resume()
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in disconnected() } as? SleepServiceProtocol
+            proxy?.run(lease: lease.path, token: token) { [weak self] result in
+                Task { @MainActor in self?.finish(id: id, message: result) }
+            }
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(15))
+                guard let self, self.sessionID == id, self.starting else {return}
+                self.finish(id: id, message: "サービスを開始できませんでした。バックグラウンド実行の許可を確認して再度お試しください。")
+            }
+        } catch {
+            disable(); refreshApproval()
+            if !approvalRequired {status = "スリープ制御の開始に失敗しました: " + error.localizedDescription}
+        }
+    }
+    private func finish(id: UUID, message: String) {
+        guard sessionID == id else {return}
+        sessionID = nil
+        starting = false; runnerActive = false
+        disable()
+        connection?.invalidate(); connection = nil
+        if !message.isEmpty {status = message}
     }
     private func heartbeat() {
         guard enabled, let lease else {return}
@@ -83,7 +139,7 @@ enum AgentSleepPolicy {
         let value = Self.leaseValue(token: token, state: fresh && working ? "work" : fresh && complete ? "done" : "unknown")
         do {try value.write(to: lease, atomically: true, encoding: .utf8)}
         catch {disable(); status = "作業状態を書き込めないため解除しました。"; return}
-        let file = URL(fileURLWithPath: "/var/run/neuraos-agent-sleep/status")
+        let file = URL(fileURLWithPath: SleepService.stateDirectory).appendingPathComponent("status")
         if let text = try? String(contentsOf: file, encoding: .utf8), text.hasPrefix(token + "\n") {
             starting = false
             status = String(text.dropFirst(token.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -93,34 +149,6 @@ enum AgentSleepPolicy {
                                       awakeNanoseconds: UInt64 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) -> String {
         "\(token)\n\(state)\n\(awakeNanoseconds)\n"
     }
-    nonisolated static func quote(_ value: String) -> String {"'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"}
-    nonisolated static func supervisedCommand(helper: String, lease: String, uid: uid_t, token: String) -> String {
-        // The root-owned lock prevents two app copies from fighting over a
-        // global power setting. The shell restores it even if the helper crashes.
-        let script = """
-        /bin/mkdir -m 755 /var/run/neuraos-agent-sleep || { echo "別のneuraOSがスリープ制御を使用中か、前回の復元が未完了です。" >&2; exit 73; }
-        cleanup() {
-          if [ -f /var/run/neuraos-agent-sleep/owned ]; then
-            /usr/bin/pmset -a disablesleep 0 || return
-          fi
-          /bin/rm -f /var/run/neuraos-agent-sleep/owned /var/run/neuraos-agent-sleep/status
-          /bin/rmdir /var/run/neuraos-agent-sleep
-        }
-        trap 'cleanup || exit 74' EXIT
-        \(quote(helper)) \(quote(lease)) \(uid) \(quote(token))
-        """
-        return "/bin/sh -c " + quote(script)
-    }
-    nonisolated private static func authorize(_ command: String) -> String {
-        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", "with timeout of 31536000 seconds\n do shell script \"\(escaped)\" with administrator privileges\nend timeout"]
-        let error = Pipe(); process.standardError = error; process.standardOutput = FileHandle.nullDevice
-        do {try process.run(); let data = error.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-            if process.terminationStatus == 0 {return ""}
-            return "スリープ制御を終了しました: " + (String(data: data, encoding: .utf8) ?? "認証またはヘルパーの起動に失敗しました。")
-        } catch {return error.localizedDescription}
-    }
 }
 
 struct AgentSleepFooter: View {
@@ -128,7 +156,7 @@ struct AgentSleepFooter: View {
 
     private var label: String {
         if controller.stopping {return "解除中…"}
-        if controller.starting {return "認証待ち…"}
+        if controller.starting {return "開始中…"}
         return controller.enabled ? "有効" : "無効"
     }
 
@@ -151,14 +179,18 @@ struct AgentSleepSettings: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("閉じたまま作業を続ける").font(.headline)
             Text("外部モニターなしでも、neuraOS内のCodex・Claude Codeが作業中はMacをスリープさせません。全作業が終了、または回答・承認待ちになると、蓋が閉じていればスリープします。")
-            Text("この起動中だけ有効です。有効化にはmacOSの管理者認証が必要です。バッテリー残量が10%以下、または高温の場合は解除します。通気のよい場所で使用してください。")
+            Text("この起動中だけ有効です。初回のみmacOSでヘルパーの許可が必要です。許可後のオン／オフでは通常、認証は不要です。バッテリー残量が10%以下、または高温の場合は解除します。通気のよい場所で使用してください。")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 Button(controller.enabled ? "無効にする" : "この起動中は有効にする") {
                     if controller.enabled {controller.disable()} else {controller.enable()}
                 }.disabled(controller.stopping)
-                Text(controller.status).font(.callout).textSelection(.enabled)
+                if controller.approvalRequired {
+                    Button("システム設定で許可") {controller.openApprovalSettings()}
+                }
             }
+            Text(controller.status).font(.callout).textSelection(.enabled)
         }.padding(24).frame(width: 520)
+            .onAppear {controller.refreshApproval()}
     }
 }

@@ -31,6 +31,20 @@ try {
   const app = join(data, 'neuraOS.app');
   await mkdir(join(app, 'Contents/MacOS'), {recursive: true});
   const original = resolve(runtime, '../..');
+  const sleepPlist = join(original, 'Library/LaunchDaemons/app.neuraos.native.sleep.plist');
+  const sleepConfig = JSON.parse(execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', sleepPlist], {encoding: 'utf8'}));
+  if (sleepConfig.BundleProgram !== 'Contents/MacOS/NeuraSleepService' ||
+      sleepConfig.MachServices?.['app.neuraos.native.sleep'] !== true ||
+      sleepConfig.KeepAlive?.SuccessfulExit !== false) throw new Error('Invalid packaged sleep service');
+  const sleepExecutable = resolve(original, '..', sleepConfig.BundleProgram);
+  execFileSync('/usr/bin/codesign', ['--verify', '--strict', sleepExecutable]);
+  // Verify the packaged service fails closed without root. Never register it or
+  // change system power settings in CI/smoke tests.
+  let sleepStatus;
+  try {execFileSync(sleepExecutable, [], {timeout: 5000, stdio: 'pipe'});}
+  catch (error) {sleepStatus = error.status;}
+  if (sleepStatus !== 77) throw new Error(`Sleep service must reject unprivileged launch: ${sleepStatus}`);
+
   await cp(join(original, 'MacOS/NeuraOS'), join(app, 'Contents/MacOS/NeuraOS'));
   await cp(join(original, 'Info.plist'), join(app, 'Contents/Info.plist'));
   await cp(join(original, 'Resources/NeuraOS_NeuraOS.bundle'), join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});

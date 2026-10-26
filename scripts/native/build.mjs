@@ -16,7 +16,10 @@ await mkdir(join(output,'Contents/Resources'),{recursive:true});
 await copyFile(join(native,'Assets/AppIcon.icns'),join(output,'Contents/Resources/AppIcon.icns'));
 await rm(join(output,'Contents/Resources/Terminal'),{recursive:true,force:true});
 await copyFile(join(native,'.build/release/NeuraOS'),join(output,'Contents/MacOS/NeuraOS'));
-await copyFile(join(native,'.build/release/NeuraSleepHelper'),join(output,'Contents/MacOS/NeuraSleepHelper'));
+await rm(join(output,'Contents/MacOS/NeuraSleepHelper'),{force:true});
+await copyFile(join(native,'.build/release/NeuraSleepService'),join(output,'Contents/MacOS/NeuraSleepService'));
+await mkdir(join(output,'Contents/Library/LaunchDaemons'),{recursive:true});
+await copyFile(join(native,'Support/app.neuraos.native.sleep.plist'),join(output,'Contents/Library/LaunchDaemons/app.neuraos.native.sleep.plist'));
 // Preserve symbols outside the app so crash UUID/offsets can be decoded per build.
 await rm(`${output}.dSYM`,{recursive:true,force:true});
 execFileSync('dsymutil',[join(output,'Contents/MacOS/NeuraOS'),'-o',`${output}.dSYM`],{stdio:'inherit'});
