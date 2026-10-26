@@ -3,7 +3,7 @@ on:
   push:
     branches: [staging]
   pull_request:
-    branches: [staging, main]
+    branches: [staging]
   schedule:
     - cron: "0 0 * * 1"
   workflow_dispatch:
@@ -13,8 +13,20 @@ concurrency:
   group: native-development-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
-  macos:
-    runs-on: macos-15
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.changes.outputs.required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        run: node scripts/ci/changes.mjs
+  verify:
+    needs: changes
+    if: needs.changes.outputs.required == 'true'
+    runs-on: ${{ github.event_name == 'push' && 'ubuntu-latest' || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,14 +40,38 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
-      - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
-      - run: pnpm test:macos
-      - run: pnpm build
-      - run: node scripts/native/release/package.mjs
-      - run: node scripts/native/release/smoke.mjs
+      - if: github.event_name != 'push'
+        run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
+      - if: github.event_name != 'push'
+        run: pnpm test:macos
+      - if: github.event_name != 'push'
+        run: pnpm build
+      - if: github.event_name != 'push'
+        run: node scripts/native/release/package.mjs
+      - if: github.event_name != 'push'
+        run: node scripts/native/release/smoke.mjs
       - name: Retain crash symbols
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
           name: neuraOS-symbols-arm64
           path: apps/macos/dist/neuraOS.app.dSYM
           retention-days: 90
+  macos:
+    if: always()
+    needs: [changes, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful validation or documentation-only changes
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.required }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$REQUIRED" = true ]; then
+            test "$VERIFY_RESULT" = success
+          else
+            test "$REQUIRED" = false
+            test "$VERIFY_RESULT" = skipped
+          fi

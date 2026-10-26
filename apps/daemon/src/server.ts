@@ -92,15 +92,18 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'workspace.delete':{
         const record=workspace(c.workspaceId);
         if(record.kind!=='worktree')throw new Fault('worktree_required','削除できるのは追加したworktreeだけです。');
-        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
+        if(!c.stopTerminals&&store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
         const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
-        if(!c.discardChanges){
+        const checkChanges=async()=>{
+          if(c.discardChanges)return;
           // Git removes ignored files even without --force, including local secrets.
           const ignored=await work.git(record.path,['ls-files','--others','--ignored','--exclude-standard','--directory','-z']);
           if(ignored.length)throw new Fault('workspace_ignored_files','Gitの無視対象ファイル・フォルダがあります（.envなど）。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
           const changes=await work.git(record.path,['status','--porcelain=v1','-z','--untracked-files=normal']);
           if(changes.length)throw new Fault('workspace_dirty','未コミットの変更または未追跡ファイルがあります。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
-        }
+        };
+        await checkChanges();
+        if(c.stopTerminals){await terminals.stopWorkspace(record.id);await checkChanges();}
         // A single --force permits explicitly approved data loss, but still refuses
         // locked worktrees. Keep the branch so committed work remains recoverable.
         await work.git(project.path,['worktree','remove',...(c.discardChanges?['--force']:[]),'--',record.path]);
