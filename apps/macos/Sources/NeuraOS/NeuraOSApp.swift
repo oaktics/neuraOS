@@ -37,6 +37,7 @@ struct NeuraOSApp: App {
         }
     }
     var body: some Scene {
+        Settings {AgentSleepSettings(controller: model.agentSleep)}
         Window("neuraOS", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
@@ -289,6 +290,17 @@ struct Sidebar: View {
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
                                     .contextMenu {
+                                        if workspace.kind == "root" {
+                                            Button {
+                                                if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
+                                                    model.error = "未保存の編集があります。保存または破棄してから更新してください。"
+                                                } else {Task {await model.syncDefault(workspace)}}
+                                            } label: {
+                                                Label("リモートの最新に更新", systemImage: "arrow.down.circle")
+                                            }
+                                                .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
+                                                .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
+                                        }
                                         if workspace.kind == "worktree" {
                                             Button("worktreeを削除…", role: .destructive) {
                                                 if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
@@ -296,18 +308,6 @@ struct Sidebar: View {
                                                 } else {deleting = workspace}
                                             }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                         }
-                                    }
-                                    if workspace.kind == "root" {
-                                        Button {
-                                            if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
-                                                model.error = "未保存の編集があります。保存または破棄してから更新してください。"
-                                            } else {Task {await model.syncDefault(workspace)}}
-                                        } label: {
-                                            Label("リモートの最新に更新", systemImage: "arrow.down.circle")
-                                        }.buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(.secondary)
-                                            .padding(.leading, 18)
-                                            .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
-                                            .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
                                     }
                                 }
                             }
