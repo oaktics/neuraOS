@@ -6,19 +6,19 @@ let package = Package(
     name: "NeuraOS",
     platforms: [.macOS(.v14)],
     products: [.executable(name: "NeuraOS", targets: ["NeuraOS"]),
-               .executable(name: "NeuraSleepHelper", targets: ["NeuraSleepHelper"])],
+               .executable(name: "NeuraSleepService", targets: ["NeuraSleepService"])],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
         .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0")
     ],
     targets: [.target(name: "SleepControl"),
-              .executableTarget(name: "NeuraSleepHelper", dependencies: ["SleepControl"]),
+              .executableTarget(name: "NeuraSleepService", dependencies: ["SleepControl"]),
               .target(name: "ChromiumBridge", publicHeadersPath: "include",
                       cxxSettings: [.unsafeFlags(["-I", cefSDK, "-fobjc-arc"])],
                       linkerSettings: [.linkedFramework("AppKit")]),
               .executableTarget(name: "NeuraOS", dependencies: [
-        "ChromiumBridge",
+        "ChromiumBridge", "SleepControl",
         .product(name: "SwiftTerm", package: "SwiftTerm"),
         .product(name: "MarkdownUI", package: "swift-markdown-ui"),
         .product(name: "cmark-gfm", package: "swift-cmark"),

@@ -11,9 +11,14 @@ test('native client decodes legacy v1 and gates GitHub on advertised features',{
   const dir=await mkdtemp(join(tmpdir(),'neura-capabilities-'));
   try {
     const binary=join(dir,'capabilities');
+    await exec('xcrun',['swiftc','-swift-version','5','-emit-library','-emit-module','-module-name','SleepControl',
+      resolve('apps/macos/Sources/SleepControl/SleepLease.swift'),
+      resolve('apps/macos/Sources/SleepControl/SleepService.swift'),
+      resolve('apps/macos/Sources/SleepControl/SleepSession.swift'),
+      '-emit-module-path',join(dir,'SleepControl.swiftmodule'),'-o',join(dir,'libSleepControl.dylib')],{timeout:180000});
     // Fresh macOS runners may need over 90s to compile Swift SDK modules.
     // Keep the executable timeout separate so contract failures still fail quickly.
-    await exec('xcrun',['swiftc','-swift-version','5','-parse-as-library',
+    await exec('xcrun',['swiftc','-swift-version','5','-parse-as-library','-I',dir,'-L',dir,'-lSleepControl','-Xlinker','-rpath','-Xlinker',dir,
       resolve('apps/macos/Sources/NeuraOS/Models.swift'),
       resolve('apps/macos/Sources/NeuraOS/Diagnostics.swift'),
       resolve('apps/macos/Sources/NeuraOS/AgentNotifications.swift'),
