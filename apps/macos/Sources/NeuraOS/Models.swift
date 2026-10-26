@@ -198,8 +198,7 @@ final class DaemonClient {
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
             // A daemon upgrade can change features without changing stored data/revision.
             applySnapshot(next)
-            if !connected {Diagnostics.shared.record("daemon.connected")}
-            if !connected {connected = true}
+            updateConnection(true)
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
                 let saved = sidebarSpaces.active.selectedWorkspaceId
                 select(visibleWorkspaces.first(where: {$0.id == saved})?.id ?? visibleWorkspaces.first?.id)
@@ -207,7 +206,7 @@ final class DaemonClient {
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
             await agentNotifications?.receive(next, api: api)
-        } catch {if connected {Diagnostics.shared.record("daemon.disconnected")}; if connected {connected = false}}
+        } catch {updateConnection(false)}
         agentSleep.update(terminals: state.terminals, connected: connected)
     }
     // Transport polling must not invalidate views when the UI state is unchanged.
@@ -215,6 +214,12 @@ final class DaemonClient {
         state.apply(next)
         let retained = openedIds.intersection(Set(next.workspaces.map(\.id)))
         if retained != openedIds {openedIds = retained}
+    }
+    func updateConnection(_ value: Bool) {
+        // Older Observation runtimes notify even for an equal assignment.
+        guard connected != value else {return}
+        Diagnostics.shared.record(value ? "daemon.connected" : "daemon.disconnected")
+        connected = value
     }
     func select(_ id: String?) {
         Diagnostics.shared.record("action.select-workspace")

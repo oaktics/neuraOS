@@ -14,7 +14,7 @@ final class ModelObservationTests: XCTestCase {
         let model = AppModel(startPolling: false)
         let snapshot = fixture()
         model.applySnapshot(snapshot)
-        model.connected = true
+        model.updateConnection(true)
         let flag = ObservationFlag()
         withObservationTracking {
             _ = model.state.projects; _ = model.state.workspaces; _ = model.state.terminals
@@ -22,9 +22,24 @@ final class ModelObservationTests: XCTestCase {
         } onChange: {flag.mark()}
         for _ in 0..<10 {
             model.applySnapshot(snapshot)
-            model.connected = true
+            model.updateConnection(true)
         }
         XCTAssertFalse(flag.changed)
+    }
+
+    @MainActor func testDisconnectOnlyNotifiesOnceAndReconnectIsObserved() {
+        let model = AppModel(startPolling: false)
+        model.updateConnection(true)
+        let disconnected = ObservationFlag()
+        withObservationTracking {_ = model.connected} onChange: {disconnected.mark()}
+        model.updateConnection(false)
+        XCTAssertTrue(disconnected.changed)
+        let reconnected = ObservationFlag()
+        withObservationTracking {_ = model.connected} onChange: {reconnected.mark()}
+        model.updateConnection(false)
+        XCTAssertFalse(reconnected.changed)
+        model.updateConnection(true)
+        XCTAssertTrue(reconnected.changed)
     }
 
     @MainActor func testTerminalActivityOnlyInvalidatesTerminalReaders() {
