@@ -12,6 +12,7 @@ await mkdir(join(output,'Contents/MacOS'),{recursive:true});
 await mkdir(join(output,'Contents/Resources'),{recursive:true});
 await rm(join(output,'Contents/Resources/Terminal'),{recursive:true,force:true});
 await copyFile(join(native,'.build/release/NeuraOS'),join(output,'Contents/MacOS/NeuraOS'));
+await copyFile(join(native,'.build/release/NeuraSleepHelper'),join(output,'Contents/MacOS/NeuraSleepHelper'));
 const resourceRoot=join(native,'.build/release');
 for(const file of await readdir(resourceRoot))if(file.endsWith('.bundle'))await cp(join(resourceRoot,file),join(output,'Contents/Resources',file),{recursive:true});
 await mkdir(join(output,'Contents/Resources/Licenses'),{recursive:true});

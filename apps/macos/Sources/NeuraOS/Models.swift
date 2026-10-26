@@ -69,6 +69,7 @@ final class DaemonClient {
 
 @MainActor final class AppModel: ObservableObject {
     let api = DaemonClient()
+    let agentSleep = AgentSleepController()
     @Published var state = Snapshot()
     @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
     @Published var connected = false
@@ -137,6 +138,7 @@ final class DaemonClient {
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
         } catch {connected = false}
+        agentSleep.update(terminals: state.terminals, connected: connected)
     }
     func select(_ id: String?) {
         if let workspace = state.workspaces.first(where: {$0.id == id}) {sidebarSpaces.activeId = sidebarSpaces.owner(of: workspace.projectId)}
