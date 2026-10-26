@@ -240,15 +240,21 @@ struct Sidebar: View {
             var transaction = Transaction(); transaction.disablesAnimations = true
             withTransaction(transaction) {swipeTranslation = 0; settling = false}
         }
-        .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
+        .alert("変更を破棄してworktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
-            Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
             if model.state.features?.contains("workspace.delete.discard") == true {
-                Button("変更・未追跡ファイルも含めて削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace, discardChanges: true)}}
+                Button("変更・未追跡ファイルも含めて削除", role: .destructive) {deleting = nil; deleteWorkspace(workspace, discardChanges: true)}
             }
         } message: {workspace in
-            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。通常の削除は未コミットの変更や未追跡・無視対象ファイルがある場合に停止します。「変更・未追跡ファイルも含めて削除」は、それらと.env・node_modulesなども完全に削除し、元に戻せません。実行中のターミナルがある場合は先に停止してください。")
+            Text("「\(workspace.name)」には未コミットの変更、未追跡ファイル、または.envなどの無視対象ファイルがあります。削除すると元に戻せません。ターミナルとエージェントはまとめて終了します。ブランチは残ります。")
         }
+    }
+    private func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) {
+        guard !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) else {
+            model.error = "未保存の編集があります。保存または破棄してから削除してください。"
+            return
+        }
+        Task {await model.deleteWorkspace(workspace, discardChanges: discardChanges)}
     }
     private var pagerSpaces: [SidebarSpace] {
         let spaces = model.sidebarSpaces.spaces
@@ -275,6 +281,17 @@ struct Sidebar: View {
                                 if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
                             }.padding(.horizontal, 12).padding(.vertical, 5)
                             .contextMenu {
+                                if project.supportsGit {
+                                    Menu("worktree作成時に自動起動") {
+                                        ForEach(["codex", "claude", "shell"], id: \.self) {provider in
+                                            Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",
+                                                   isOn: Binding(get: {project.worktreeStartup?.contains(provider) == true},
+                                                                 set: {enabled in Task {await model.setWorktreeStartup(project, provider: provider, enabled: enabled)}}))
+                                        }
+                                    }
+                                    .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
+                                    Divider()
+                                }
                                 Menu("Workspaceへ移動") {
                                     ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
                                         Button(space.name) {model.moveProject(project.id, to: space.id)}
@@ -305,10 +322,8 @@ struct Sidebar: View {
                                                 .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
                                         }
                                         if workspace.kind == "worktree" {
-                                            Button("worktreeを削除…", role: .destructive) {
-                                                if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
-                                                    model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
-                                                } else {deleting = workspace}
+                                            Button("worktreeを削除", role: .destructive) {
+                                                deleteWorkspace(workspace)
                                             }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                         }
                                     }

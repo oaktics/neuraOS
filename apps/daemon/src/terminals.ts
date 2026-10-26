@@ -1,4 +1,7 @@
 import * as pty from 'node-pty';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+
 import {access,realpath} from 'node:fs/promises';
 import {constants} from 'node:fs';
 import {homedir} from 'node:os';
@@ -7,6 +10,8 @@ import {randomUUID} from 'node:crypto';
 import {Fault,requireValue,type Provider,type TerminalRecord,type Workspace} from './contracts.ts';
 import type {Store} from './store.ts';
 import {ActivityTracker,activityArguments,activityBridge,supportsActivity,type ActivityBridge} from './agent-activity.ts';
+
+const execFileAsync=promisify(execFile);
 
 export async function executable(provider:Provider){
   if(provider==='shell')return process.platform==='win32'?'powershell.exe':'/bin/zsh';
@@ -28,6 +33,7 @@ export class Terminals {
   private processes=new Map<string,pty.IPty>();
   private owners=new Map<string,{clientId:string;until:number}>();
   private closing=false;
+  private stoppingGroups=new Map<string,Set<number>>();
   private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge}>();
   constructor(readonly store:Store){}
   async open(workspace:Workspace,provider:Provider,resume:boolean){
@@ -85,5 +91,66 @@ export class Terminals {
     try{process.kill(-proc.pid,signal);}catch(e){if((e as NodeJS.ErrnoException).code!=='ESRCH')proc.kill(signal);}
   }
   stop(id:string){const proc=this.processes.get(id);if(proc){this.kill(proc,'SIGHUP');const timer=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);timer.unref();}return {ok:true};}
+  async stopWorkspace(workspaceId:string){
+    const ids=this.store.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===workspaceId&&(t.status==='running'||this.stoppingGroups.has(t.id))).map(t=>t.id);
+    await Promise.all(ids.map(async id=>{
+      const proc=this.processes.get(id);
+      // Preserve tracked groups across leader exit and a timed-out deletion retry.
+      const groups=this.stoppingGroups.get(id)??new Set<number>();
+      if(proc&&proc.pid>0)groups.add(proc.pid);
+      if(!groups.size)throw new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409);
+      this.stoppingGroups.set(id,groups);
+      const discoverGroups=async()=>{
+        if(process.platform==='win32')return;
+        // Interactive shells put foreground/background jobs in separate groups.
+        // Capture descendants before signaling the shell; after reparenting, retain
+        // their groups and discover any further descendants of surviving members.
+        const {stdout}=await execFileAsync('/bin/ps',['-axo','pid=,ppid=,pgid='],{maxBuffer:8*1024*1024,timeout:1000});
+        const rows=stdout.trim().split('\n').filter(Boolean).map(line=>{
+          const [pid,parent,group]=line.trim().split(/\s+/).map(Number);
+          if(!pid||parent===undefined||!Number.isInteger(parent)||!group)throw new Error('Invalid process table');
+          return {pid,parent,group};
+        });
+        const owned=new Set(rows.filter(row=>groups.has(row.group)).map(row=>row.pid));
+        let changed=true;
+        while(changed){
+          changed=false;
+          for(const row of rows)if(owned.has(row.parent)&&!owned.has(row.pid)){
+            owned.add(row.pid);groups.add(row.group);changed=true;
+          }
+        }
+      };
+      const signaled={SIGHUP:new Set<number>(),SIGKILL:new Set<number>()};
+      const signalGroup=(signal:'SIGHUP'|'SIGKILL')=>{
+        if(process.platform==='win32'){if(this.processes.has(id))proc?.kill();return;}
+        for(const group of groups){
+          if(signaled[signal].has(group))continue;
+          try{process.kill(-group,signal);}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;}
+          signaled[signal].add(group);
+        }
+      };
+      const groupAlive=()=>{
+        if(process.platform==='win32')return this.processes.has(id);
+        let alive=false;
+        for(const group of groups)try{process.kill(-group,0);alive=true;}catch(error){
+          if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;
+        }
+        return alive;
+      };
+      await discoverGroups();
+      signalGroup('SIGHUP');
+      const started=Date.now();
+      // PTY exit only proves the leader exited, not its independent jobs.
+      while(groupAlive()||this.processes.has(id)){
+        const elapsed=Date.now()-started;
+        await discoverGroups();
+        signalGroup(elapsed>=1500?'SIGKILL':'SIGHUP');
+        if(elapsed>=5000)throw new Fault('terminal_stop_timeout','ターミナルの終了を確認できません。もう一度削除してください。',409);
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+      this.stoppingGroups.delete(id);
+    }));
+  }
+
   async shutdown(){this.closing=true;const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
 }

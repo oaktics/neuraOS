@@ -59,6 +59,11 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const root=existing?store.list<Workspace>('workspaces').find(w=>w.projectId===existing.id&&w.kind!=='worktree'):undefined;
         store.put('projects',project);store.put('workspaces',{id:root?.id??randomUUID(),projectId:project.id,name:root?.name??'メイン',path,branch,kind:isGit?'root':'folder',createdAt:root?.createdAt??project.createdAt} as Workspace);return project;
       }
+      case 'project.set-worktree-startup':{
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        const updated={...project,worktreeStartup:c.providers};
+        store.put('projects',updated);return updated;
+      }
       case 'workspace.create':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。通常のフォルダでは、そのまま作業を開始できます。');
@@ -67,7 +72,15 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
-        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);return record;
+        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);
+        // Worktree creation is successful even if an optional CLI cannot start.
+        // The operation's cached response prevents retries from opening duplicates.
+        const startupErrors:string[]=[];
+        for(const provider of project.worktreeStartup??[]){
+          try{await terminals.open(record,provider,false);}
+          catch(error){startupErrors.push(error instanceof Fault?error.message:`${provider}の自動起動に失敗しました。タブから再度起動してください。`);}
+        }
+        return {...record,startupErrors};
       }
       case 'workspace.sync-default':{
         const record=workspace(c.workspaceId);
@@ -79,15 +92,18 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'workspace.delete':{
         const record=workspace(c.workspaceId);
         if(record.kind!=='worktree')throw new Fault('worktree_required','削除できるのは追加したworktreeだけです。');
-        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
+        if(!c.stopTerminals&&store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
         const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
-        if(!c.discardChanges){
+        const checkChanges=async()=>{
+          if(c.discardChanges)return;
           // Git removes ignored files even without --force, including local secrets.
           const ignored=await work.git(record.path,['ls-files','--others','--ignored','--exclude-standard','--directory','-z']);
           if(ignored.length)throw new Fault('workspace_ignored_files','Gitの無視対象ファイル・フォルダがあります（.envなど）。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
           const changes=await work.git(record.path,['status','--porcelain=v1','-z','--untracked-files=normal']);
           if(changes.length)throw new Fault('workspace_dirty','未コミットの変更または未追跡ファイルがあります。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
-        }
+        };
+        await checkChanges();
+        if(c.stopTerminals){await terminals.stopWorkspace(record.id);await checkChanges();}
         // A single --force permits explicitly approved data loss, but still refuses
         // locked worktrees. Keep the branch so committed work remains recoverable.
         await work.git(project.path,['worktree','remove',...(c.discardChanges?['--force']:[]),'--',record.path]);

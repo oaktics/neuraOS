@@ -11,7 +11,7 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
+struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var worktreeStartup: [String]? = nil; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
 struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
@@ -30,6 +30,7 @@ struct Diff: Codable {let path: String; let content: String}
 struct TerminalChunk: Codable {let data: String; let cols: Int?; let rows: Int?}
 struct TerminalOutput: Codable {let data: String; let chunks: [TerminalChunk]; let cursor: Int; let more: Bool; let status: String; let cols: Int; let rows: Int}
 struct APIError: Codable, Error, LocalizedError {let error: String; let message: String; var errorDescription: String? {message}}
+struct CreatedWorkspace: Decodable {let id: String; let startupErrors: [String]?}
 struct OK: Codable {let ok: Bool}
 
 final class DaemonClient {
@@ -208,6 +209,18 @@ final class DaemonClient {
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
+    func setWorktreeStartup(_ project: Project, provider: String, enabled: Bool) async {
+        let key = "project.settings.\(project.id)"
+        guard beginAction(key, label: "自動起動設定を保存中") else {return}
+        defer {endAction(key)}
+        do {
+            var providers = state.projects.first(where: {$0.id == project.id})?.worktreeStartup ?? []
+            providers.removeAll {$0 == provider}
+            if enabled {providers.append(provider)}
+            let _: Project = try await api.command(["type": "project.set-worktree-startup", "projectId": project.id, "providers": providers])
+            await refresh()
+        } catch {report(error)}
+    }
     func createWorkspace(projectId: String, base: String?) async {
         let key = "project.create.\(projectId)"
         guard beginAction(key, label: "作業を作成中") else {return}
@@ -216,7 +229,12 @@ final class DaemonClient {
             guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
             var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
             if let base {command["baseRef"] = base}
-            let workspace: Workspace = try await api.command(command); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
+            let workspace: CreatedWorkspace = try await api.command(command)
+            await refresh(); select(workspace.id); showNewWorkspace = false
+            if let failures = workspace.startupErrors, !failures.isEmpty {
+                error = "worktreeは作成されましたが、自動起動に失敗しました。\n" + failures.joined(separator: "\n")
+            }
+        } catch {report(error)}
     }
     func syncDefault(_ workspace: Workspace) async {
         guard beginAction(workspace.id, label: "リモートから更新中") else {return}
@@ -231,8 +249,13 @@ final class DaemonClient {
         guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
         defer {endAction(workspace.id)}
         do {
-            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges])
+            guard state.features?.contains("workspace.delete.stop-terminals") == true else {
+                throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+            }
+            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
             await refresh()
+        } catch let failure as APIError where !discardChanges && ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
+            pendingWorkspaceDeletion = workspace
         } catch {report(error)}
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
