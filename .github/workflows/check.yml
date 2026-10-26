@@ -26,7 +26,7 @@ jobs:
   verify:
     needs: changes
     if: needs.changes.outputs.required == 'true'
-    runs-on: ${{ github.event_name == 'push' && 'ubuntu-latest' || 'macos-15' }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
