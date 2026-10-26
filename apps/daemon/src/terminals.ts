@@ -85,5 +85,16 @@ export class Terminals {
     try{process.kill(-proc.pid,signal);}catch(e){if((e as NodeJS.ErrnoException).code!=='ESRCH')proc.kill(signal);}
   }
   stop(id:string){const proc=this.processes.get(id);if(proc){this.kill(proc,'SIGHUP');const timer=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);timer.unref();}return {ok:true};}
+  async stopWorkspace(workspaceId:string){
+    const ids=this.store.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===workspaceId&&t.status==='running').map(t=>t.id);
+    await Promise.all(ids.map(id=>new Promise<void>((resolve,reject)=>{
+      const proc=this.processes.get(id);
+      if(!proc){reject(new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409));return;}
+      const escalation=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);
+      const timeout=setTimeout(()=>{subscription.dispose();reject(new Fault('terminal_stop_timeout','ターミナルの終了を確認できません。もう一度削除してください。',409));},5000);
+      const subscription=proc.onExit(()=>{clearTimeout(escalation);clearTimeout(timeout);subscription.dispose();resolve();});
+      this.kill(proc,'SIGHUP');
+    })));
+  }
   async shutdown(){this.closing=true;const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
 }
