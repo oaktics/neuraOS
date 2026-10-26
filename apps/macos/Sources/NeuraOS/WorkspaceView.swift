@@ -19,13 +19,28 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
 struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
+
+    mutating func reconcileTerminals(_ terminals: [TerminalRecord], seen: inout Set<String>, startingTabs: Set<String>) {
+        // A manual launch publishes its record before assigning the owning tab's
+        // binding. Wait for that binding so we cannot create a duplicate tab.
+        guard !tabs.contains(where: {startingTabs.contains($0.id)}) else {return}
+        for terminal in terminals where !seen.contains(terminal.id) {
+            if !tabs.contains(where: {$0.terminalId == terminal.id}) {
+                let number = (tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1
+                tabs.append(WorkspaceTab(kind: terminal.provider, number: number, terminalId: terminal.id))
+            }
+        }
+        seen.formUnion(terminals.map(\.id))
+        if !tabs.contains(where: {$0.id == selectedId}) {selectedId = tabs.first?.id}
+    }
 }
 
 struct WorkspaceView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     @State private var layout = WorkspaceTabState()
     @State private var restored = false
+    @State private var seenTerminalIds: Set<String> = []
     @State private var git = GitStatus()
     @State private var selectedDiff: Diff?
     @State private var gitError: String?
@@ -62,6 +77,11 @@ struct WorkspaceView: View {
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .onAppear {restore(); openRequestedTerminal()}
+        .onChange(of: model.state.terminals) {_, _ in reconcileTerminals()}
+        .onReceive(model.terminalLaunchesChanged) {_ in
+            // Keep launch lifecycle events even when several changes share a render turn.
+            Task { @MainActor in reconcileTerminals() }
+        }
         .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
         .onReceive(model.workspaceUpdated) {id in
             if id == workspace.id {treeVersion += 1; selectedDiff = nil}
@@ -260,6 +280,7 @@ struct WorkspaceView: View {
         layout.tabs.removeAll {$0.kind == "github"}
         // Recover running sessions, including sessions opened while this UI was disconnected.
         let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
+        seenTerminalIds = Set(terminals.map(\.id))
         for terminal in terminals.filter({terminal in terminal.status == "running" || (saved == nil && terminals.last(where: {$0.provider == terminal.provider})?.id == terminal.id)}) {
             if !layout.tabs.contains(where: {$0.terminalId == terminal.id}) {
                 let number = (layout.tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1
@@ -269,12 +290,17 @@ struct WorkspaceView: View {
         if !layout.tabs.contains(where: {$0.id == layout.selectedId}) {layout.selectedId = layout.tabs.first?.id}
         persist()
     }
+    private func reconcileTerminals() {
+        guard restored else {return}
+        layout.reconcileTerminals(model.state.terminals.filter {$0.workspaceId == workspace.id},
+                                  seen: &seenTerminalIds, startingTabs: model.startingTerminalTabs)
+    }
     private func persist() {guard restored, let data = try? JSONEncoder().encode(layout) else {return}; UserDefaults.standard.set(data, forKey: storageKey)}
     private func refreshGit() async {guard workspace.supportsGit else {return}; do {git = try await model.api.get("v1/workspaces/\(workspace.id)/git"); gitError = nil} catch {gitError = error.localizedDescription}}
 }
 
 struct TerminalPane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let tabId: String
     let provider: String
@@ -313,9 +339,8 @@ struct TerminalPane: View {
         .onAppear {activateIfNeeded()}
         .onChange(of: visible) {_, _ in activateIfNeeded()}
         .onChange(of: model.connected) {_, _ in activateIfNeeded()}
-        .onReceive(model.$pendingActions) {_ in
-            // Published sends before mutation. Recheck on the next actor turn, and
-            // observe every change rather than relying on render-coalesced onChange.
+        .onReceive(model.pendingActionsChanged) {_ in
+            // Preserve every release event so auto-start remains eligible after contention.
             Task { @MainActor in activateIfNeeded() }
         }
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
@@ -344,7 +369,7 @@ struct TerminalPane: View {
 
 struct OpenDocument: Codable, Equatable {var original: FileContent; var text: String; var dirty: Bool {text != original.content}}
 struct FilePane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let visible: Bool
     @Binding var requestedFile: String?
@@ -397,7 +422,7 @@ struct FilePane: View {
     }
 }
 struct FileTree: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspaceId: String; let path: String; let selected: String?; let onSelect: (String) -> Void
     @State private var entries: [FileEntry] = []
     @State private var error: String?

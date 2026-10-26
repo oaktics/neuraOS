@@ -32,7 +32,7 @@ struct GitHubResult: Decodable {let ok: Bool; let message: String; let url: Stri
 func methodLabel(_ method: String) -> String {method == "squash" ? "Squash" : method == "rebase" ? "Rebase" : "Merge commit"}
 
 struct GitHubSidebar: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let visible: Bool
     let openTerminal: () -> Void
@@ -56,7 +56,7 @@ struct GitHubSidebar: View {
 }
 
 struct GitHubPane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     let workspace: Workspace
     let visible: Bool

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import Observation
 
 enum WorkspaceAction: Equatable {
     case add(String), close, move(Int), select(Int), inspector(String)
@@ -11,15 +12,39 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable {let id: String; let name: String; let path: String; let isGit: Bool?; var supportsGit: Bool {isGit != false}}
+struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var worktreeStartup: [String]? = nil; var supportsGit: Bool {isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
-struct TerminalRecord: Codable, Identifiable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
+struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
     var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
     var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
     var projects: [Project] = []; var workspaces: [Workspace] = []; var terminals: [TerminalRecord] = []
+}
+
+/// Separate the wire snapshot from observable UI state. A terminal update must
+/// not invalidate readers of projects, workspaces, capabilities or the title bar.
+@MainActor @Observable final class DaemonViewState {
+    var protocolVersion = 1
+    var hostName = "このMac"
+    var revision = 0
+    var features: [String]?
+    var projects: [Project] = []
+    var workspaces: [Workspace] = []
+    var terminals: [TerminalRecord] = []
+    var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
+    var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
+
+    func apply(_ snapshot: Snapshot) {
+        if protocolVersion != snapshot.protocolVersion {protocolVersion = snapshot.protocolVersion}
+        if hostName != snapshot.hostName {hostName = snapshot.hostName}
+        if revision != snapshot.revision {revision = snapshot.revision}
+        if features != snapshot.features {features = snapshot.features}
+        if projects != snapshot.projects {projects = snapshot.projects}
+        if workspaces != snapshot.workspaces {workspaces = snapshot.workspaces}
+        if terminals != snapshot.terminals {terminals = snapshot.terminals}
+    }
 }
 struct FileEntry: Codable, Identifiable {var id: String {path}; let name: String; let path: String; let isDirectory: Bool}
 struct DirectoryListing: Codable {let path: String; let entries: [FileEntry]}
@@ -30,6 +55,7 @@ struct Diff: Codable {let path: String; let content: String}
 struct TerminalChunk: Codable {let data: String; let cols: Int?; let rows: Int?}
 struct TerminalOutput: Codable {let data: String; let chunks: [TerminalChunk]; let cursor: Int; let more: Bool; let status: String; let cols: Int; let rows: Int}
 struct APIError: Codable, Error, LocalizedError {let error: String; let message: String; var errorDescription: String? {message}}
+struct CreatedWorkspace: Decodable {let id: String; let startupErrors: [String]?}
 struct OK: Codable {let ok: Bool}
 
 final class DaemonClient {
@@ -86,23 +112,25 @@ final class DaemonClient {
     }
 }
 
-@MainActor final class AppModel: ObservableObject {
+@MainActor @Observable final class AppModel {
     let api = DaemonClient()
     let agentSleep = AgentSleepController()
     let githubUpdated = PassthroughSubject<String, Never>()
     let workspaceUpdated = PassthroughSubject<String, Never>()
-    @Published var state = Snapshot()
-    @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
-    @Published var connected = false
-    @Published var providerUsage: [ProviderUsage] = []
-    @Published var usageFailed = false
-    @Published var error: String?
-    @Published private(set) var startingTerminalTabs: Set<String> = []
+    let state = DaemonViewState()
+    var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
+    var connected = false
+    var providerUsage: [ProviderUsage] = []
+    var usageFailed = false
+    var error: String?
+    let terminalLaunchesChanged = PassthroughSubject<Void, Never>()
+    let pendingActionsChanged = PassthroughSubject<Void, Never>()
+    private(set) var startingTerminalTabs: Set<String> = [] {didSet {terminalLaunchesChanged.send()}}
     func isTerminalStarting(_ tabId: String) -> Bool {startingTerminalTabs.contains(tabId)}
     @discardableResult func beginTerminalLaunch(_ tabId: String) -> Bool {startingTerminalTabs.insert(tabId).inserted}
     func endTerminalLaunch(_ tabId: String) {startingTerminalTabs.remove(tabId)}
     private(set) var actionStarted: [String: Date] = [:]
-    @Published private(set) var pendingActions: [String: String] = [:]
+    private(set) var pendingActions: [String: String] = [:] {didSet {pendingActionsChanged.send()}}
     func isBusy(_ key: String) -> Bool {pendingActions[key] != nil}
     @discardableResult func beginAction(_ key: String, label: String) -> Bool {
         guard !isBusy(key) else {Diagnostics.shared.record("action.blocked", operation: "resource.busy"); return false}
@@ -111,10 +139,10 @@ final class DaemonClient {
         return true
     }
     func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
-    @Published var pendingWorkspaceDeletion: Workspace?
-    @Published var showNewWorkspace = false
-    @Published var showNewSpace = false
-    @Published var sidebarSpaces: SidebarSpaces = {
+    var pendingWorkspaceDeletion: Workspace?
+    var showNewWorkspace = false
+    var showNewSpace = false
+    var sidebarSpaces: SidebarSpaces = {
         if let data = UserDefaults.standard.data(forKey: "sidebarSpaces"),
            let saved = try? JSONDecoder().decode(SidebarSpaces.self, from: data), !saved.spaces.isEmpty {return saved}
         return SidebarSpaces()
@@ -140,15 +168,15 @@ final class DaemonClient {
         sidebarSpaces.projectSpaces[projectId] = spaceId
         switchSpace(sidebarSpaces.active.id)
     }
-    @Published var showSidebar = UserDefaults.standard.object(forKey: "showLeftSidebar") as? Bool ?? true {
+    var showSidebar = UserDefaults.standard.object(forKey: "showLeftSidebar") as? Bool ?? true {
         didSet {UserDefaults.standard.set(showSidebar, forKey: "showLeftSidebar")}
     }
-    @Published var showInspector = UserDefaults.standard.object(forKey: "showRightSidebar") as? Bool ?? true {
+    var showInspector = UserDefaults.standard.object(forKey: "showRightSidebar") as? Bool ?? true {
         didSet {UserDefaults.standard.set(showInspector, forKey: "showRightSidebar")}
     }
     let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
-    @Published var openedIds: Set<String> = []
-    @Published var requestedTerminalId: String?
+    var openedIds: Set<String> = []
+    var requestedTerminalId: String?
     private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
@@ -170,19 +198,29 @@ final class DaemonClient {
             let next: Snapshot = try await api.get("v1/state")
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
             // A daemon upgrade can change features without changing stored data/revision.
-            if next.revision != state.revision || next.features != state.features || !connected {state = next}
-            openedIds.formIntersection(Set(state.workspaces.map(\.id)))
-            if !connected {Diagnostics.shared.record("daemon.connected")}
-            connected = true
+            applySnapshot(next)
+            updateConnection(true)
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
                 let saved = sidebarSpaces.active.selectedWorkspaceId
                 select(visibleWorkspaces.first(where: {$0.id == saved})?.id ?? visibleWorkspaces.first?.id)
             }
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
-            await agentNotifications?.receive(state, api: api)
-        } catch {if connected {Diagnostics.shared.record("daemon.disconnected")}; connected = false}
+            await agentNotifications?.receive(next, api: api)
+        } catch {updateConnection(false)}
         agentSleep.update(terminals: state.terminals, connected: connected)
+    }
+    // Transport polling must not invalidate views when the UI state is unchanged.
+    func applySnapshot(_ next: Snapshot) {
+        state.apply(next)
+        let retained = openedIds.intersection(Set(next.workspaces.map(\.id)))
+        if retained != openedIds {openedIds = retained}
+    }
+    func updateConnection(_ value: Bool) {
+        // Older Observation runtimes notify even for an equal assignment.
+        guard connected != value else {return}
+        Diagnostics.shared.record(value ? "daemon.connected" : "daemon.disconnected")
+        connected = value
     }
     func select(_ id: String?) {
         Diagnostics.shared.record("action.select-workspace")
@@ -193,9 +231,9 @@ final class DaemonClient {
     func refreshUsage() async {
         do {
             let response: ProviderUsageResponse = try await api.get("v1/usage")
-            providerUsage = response.providers
-            usageFailed = false
-        } catch {usageFailed = true; providerUsage = []}
+            if providerUsage != response.providers {providerUsage = response.providers}
+            if usageFailed {usageFailed = false}
+        } catch {if !usageFailed {usageFailed = true}; if !providerUsage.isEmpty {providerUsage = []}}
     }
     func addProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
@@ -209,6 +247,18 @@ final class DaemonClient {
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
+    func setWorktreeStartup(_ project: Project, provider: String, enabled: Bool) async {
+        let key = "project.settings.\(project.id)"
+        guard beginAction(key, label: "自動起動設定を保存中") else {return}
+        defer {endAction(key)}
+        do {
+            var providers = state.projects.first(where: {$0.id == project.id})?.worktreeStartup ?? []
+            providers.removeAll {$0 == provider}
+            if enabled {providers.append(provider)}
+            let _: Project = try await api.command(["type": "project.set-worktree-startup", "projectId": project.id, "providers": providers])
+            await refresh()
+        } catch {report(error)}
+    }
     func createWorkspace(projectId: String, base: String?) async {
         let key = "project.create.\(projectId)"
         guard beginAction(key, label: "作業を作成中") else {return}
@@ -217,7 +267,12 @@ final class DaemonClient {
             guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
             var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
             if let base {command["baseRef"] = base}
-            let workspace: Workspace = try await api.command(command); await refresh(); select(workspace.id); showNewWorkspace = false} catch {report(error)}
+            let workspace: CreatedWorkspace = try await api.command(command)
+            await refresh(); select(workspace.id); showNewWorkspace = false
+            if let failures = workspace.startupErrors, !failures.isEmpty {
+                error = "worktreeは作成されましたが、自動起動に失敗しました。\n" + failures.joined(separator: "\n")
+            }
+        } catch {report(error)}
     }
     func syncDefault(_ workspace: Workspace) async {
         guard beginAction(workspace.id, label: "リモートから更新中") else {return}
@@ -232,8 +287,13 @@ final class DaemonClient {
         guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
         defer {endAction(workspace.id)}
         do {
-            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges])
+            guard state.features?.contains("workspace.delete.stop-terminals") == true else {
+                throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+            }
+            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
             await refresh()
+        } catch let failure as APIError where !discardChanges && ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
+            pendingWorkspaceDeletion = workspace
         } catch {report(error)}
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
@@ -256,7 +316,7 @@ final class DaemonClient {
 
 
 struct ProviderUsageResponse: Decodable {let providers: [ProviderUsage]}
-struct UsageWindow: Decodable {
+struct UsageWindow: Decodable, Equatable {
     let label: String
     let usedPercent: Double
     let resetsAt: String?
@@ -271,7 +331,7 @@ struct UsageWindow: Decodable {
         return "\(minutes)m"
     }
 }
-struct ProviderUsage: Decodable, Identifiable {
+struct ProviderUsage: Decodable, Identifiable, Equatable {
     var id: String {provider}
     let provider: String
     let status: String

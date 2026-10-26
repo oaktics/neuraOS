@@ -123,6 +123,28 @@ enum AgentSleepPolicy {
     }
 }
 
+struct AgentSleepFooter: View {
+    @ObservedObject var controller: AgentSleepController
+
+    private var label: String {
+        if controller.stopping {return "解除中…"}
+        if controller.starting {return "認証待ち…"}
+        return controller.enabled ? "有効" : "無効"
+    }
+
+    var body: some View {
+        SettingsLink {
+            Label("スリープ制限：\(label)", systemImage: controller.enabled ? "moon.slash.fill" : "moon")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(controller.enabled ? Color.accentColor : Color.secondary)
+        .help("スリープ制限：\(label)\n\(controller.status)\nクリックして設定を開く")
+        .accessibilityLabel("スリープ制限：\(label)")
+        .accessibilityValue(controller.status)
+        .accessibilityHint("スリープ制限の設定を開きます")
+    }
+}
+
 struct AgentSleepSettings: View {
     @ObservedObject var controller: AgentSleepController
     var body: some View {

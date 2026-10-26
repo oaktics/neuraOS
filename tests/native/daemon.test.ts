@@ -154,7 +154,13 @@ test('worktree deletion protects active work and removes persisted records while
     const main=daemon.store.state().workspaces[0];
     assert.equal((await cmd({type:'workspace.delete',workspaceId:main.id})).json().error,'worktree_required');
     const clean=(await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id})).json();
-    assert.equal((await cmd({type:'workspace.delete',workspaceId:clean.id})).statusCode,200);
+    const other=(await cmd({type:'terminal.open',workspaceId:main.id,provider:'shell'})).json();
+    const active=(await cmd({type:'terminal.open',workspaceId:clean.id,provider:'shell'})).json();
+    assert.ok(active.id);
+    assert.equal((await cmd({type:'workspace.delete',workspaceId:clean.id,stopTerminals:true})).statusCode,200);
+    assert.ok(!daemon.store.state().terminals.some(t=>t.id===active.id));
+    assert.equal(daemon.store.state().terminals.find(t=>t.id===other.id)?.status,'running');
+    await cmd({type:'terminal.stop',terminalId:other.id});
     await assert.rejects(stat(clean.path),{code:'ENOENT'});
     assert.equal((await cmd({type:'workspace.delete',workspaceId:main.id,discardChanges:true})).json().error,'worktree_required');
     const ws=(await cmd({type:'workspace.create',baseRef:'HEAD',projectId:project.id})).json();
@@ -186,9 +192,9 @@ test('worktree deletion protects active work and removes persisted records while
     assert.ok(terminal.id);
     assert.equal((await cmd(remove)).json().error,'workspace_running');
     assert.equal((await cmd({...remove,discardChanges:true})).json().error,'workspace_running');
-    await cmd({type:'terminal.stop',terminalId:terminal.id});
-    for(let i=0;i<100&&daemon.store.state().terminals.some(t=>t.id===terminal.id&&t.status==='running');i++)await new Promise(r=>setTimeout(r,50));
-    assert.notEqual(daemon.store.state().terminals.find(t=>t.id===terminal.id)?.status,'running');
+    await writeFile(join(ws.path,'hello.txt'),'keep active work');
+    assert.equal((await cmd({...remove,stopTerminals:true})).json().error,'workspace_dirty');
+    assert.equal(daemon.store.state().terminals.find(t=>t.id===terminal.id)?.status,'running');
     // Explicit discard removes staged, unstaged, untracked and ignored contents.
     await writeFile(join(ws.path,'hello.txt'),'staged change');
     await git(ws.path,['add','hello.txt']);
@@ -197,7 +203,7 @@ test('worktree deletion protects active work and removes persisted records while
     await writeFile(join(ws.path,'.env'),'LOCAL_SECRET=discard');
     await mkdir(join(ws.path,'local-data'));
     await writeFile(join(ws.path,'local-data','database.sqlite'),'discard');
-    const discard={...remove,discardChanges:true};
+    const discard={...remove,discardChanges:true,stopTerminals:true};
     const revision=daemon.store.state().revision,operation=randomUUID();
     assert.equal((await cmd(discard,operation)).statusCode,200);
     assert.equal((await cmd(discard,operation)).statusCode,200);
@@ -207,7 +213,7 @@ test('worktree deletion protects active work and removes persisted records while
     assert.equal(await readFile(join(repo,'hello.txt'),'utf8'),'hello\n');
     assert.ok(daemon.store.state().revision>revision);
     assert.equal(daemon.store.state().workspaces.length,1);
-    assert.equal(daemon.store.state().terminals.length,0);
+    assert.ok(!daemon.store.state().terminals.some(t=>t.workspaceId===ws.id));
     assert.equal(daemon.store.output(terminal.id,0).chunks.length,0);
     await daemon.app.close();daemon=await createDaemon(data);
     assert.equal(daemon.store.state().workspaces.length,1);
