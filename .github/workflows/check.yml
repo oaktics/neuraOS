@@ -26,7 +26,7 @@ jobs:
   verify:
     needs: changes
     if: needs.changes.outputs.required == 'true'
-    runs-on: ${{ github.event_name == 'push' && 'ubuntu-latest' || 'macos-15' }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -38,12 +38,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - name: Install the shell used by PTY integration tests
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends zsh
-          test -x /bin/zsh
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
       - if: github.event_name != 'push'
