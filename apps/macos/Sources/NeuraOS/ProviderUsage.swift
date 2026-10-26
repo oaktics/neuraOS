@@ -7,6 +7,8 @@ struct ProviderUsageFooter: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 60)) {context in
             HStack(spacing: 12) {
+                AgentSleepFooter(controller: model.agentSleep)
+                Rectangle().fill(Palette.line).frame(width: 1, height: 12)
                 ForEach(["claude", "codex"], id: \.self) {provider in
                     let usage = model.providerUsage.first {$0.provider == provider}
                     HStack(spacing: 6) {
