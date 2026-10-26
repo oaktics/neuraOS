@@ -31,6 +31,17 @@ struct DaemonCapabilitiesContractTest {
         precondition(multi.supportsMultipleTerminals)
         let incompatibleMulti = try decode(#"["terminal.multiple"]"#, version: 2)
         precondition(!incompatibleMulti.supportsMultipleTerminals)
+        let legacyProject = #"{"id":"project","name":"test","path":"/tmp/test","isGit":true}"#
+        let project = try JSONDecoder().decode(Project.self, from: Data(legacyProject.utf8))
+        precondition(project.worktreeStartup == nil)
+        var configured = project
+        configured.worktreeStartup = ["codex", "shell"]
+        let roundTrip = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(configured))
+        precondition(roundTrip.worktreeStartup == ["codex", "shell"])
+        let created = try JSONDecoder().decode(CreatedWorkspace.self, from: Data(#"{"id":"workspace","startupErrors":["CLI missing"]}"#.utf8))
+        precondition(created.startupErrors == ["CLI missing"])
+        let oldCreated = try JSONDecoder().decode(CreatedWorkspace.self, from: Data(#"{"id":"workspace"}"#.utf8))
+        precondition(oldCreated.startupErrors == nil)
         print("Legacy and current daemon feature contracts passed")
     }
 }
