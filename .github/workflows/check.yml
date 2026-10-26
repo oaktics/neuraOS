@@ -7,11 +7,6 @@ on:
   schedule:
     - cron: "0 0 * * 1"
   workflow_dispatch:
-    inputs:
-      lightweight:
-        description: Run the staging Ubuntu checks instead of the full macOS suite
-        type: boolean
-        default: false
 permissions:
   contents: read
 concurrency:
@@ -31,7 +26,7 @@ jobs:
   verify:
     needs: changes
     if: needs.changes.outputs.required == 'true'
-    runs-on: ${{ (github.event_name == 'push' || inputs.lightweight) && 'ubuntu-latest' || 'macos-15' }}
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -43,36 +38,26 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
-      - name: Install the shell used by PTY integration tests
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends zsh
-          test -x /bin/zsh
-          # Avoid the first-login configuration wizard consuming PTY test input.
-          touch "$HOME/.zshrc"
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
-      - if: github.event_name != 'push' && !inputs.lightweight
+      - if: github.event_name != 'push'
         run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
-      - if: github.event_name != 'push' && !inputs.lightweight
+      - if: github.event_name != 'push'
         run: pnpm test:macos
-      - if: github.event_name != 'push' && !inputs.lightweight
+      - if: github.event_name != 'push'
         run: pnpm build
-      - if: github.event_name != 'push' && !inputs.lightweight
+      - if: github.event_name != 'push'
         run: node scripts/native/release/package.mjs
-      - if: github.event_name != 'push' && !inputs.lightweight
+      - if: github.event_name != 'push'
         run: node scripts/native/release/smoke.mjs
       - name: Retain crash symbols
-        if: github.event_name != 'push' && !inputs.lightweight
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
           name: neuraOS-symbols-arm64
           path: apps/macos/dist/neuraOS.app.dSYM
           retention-days: 90
   macos:
-    # A manual lightweight run must not satisfy the PR's full macOS gate.
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.lightweight && 'ubuntu-check' || 'macos' }}
     if: always()
     needs: [changes, verify]
     runs-on: ubuntu-latest
