@@ -89,7 +89,7 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.userContentController = controller
-        let view = WKWebView(frame: .zero, configuration: configuration)
+        let view = GitHubMarkdownScrollingWebView(frame: .zero, configuration: configuration)
         view.setValue(false, forKey: "drawsBackground")
         view.navigationDelegate = context.coordinator
         view.loadHTMLString(GitHubMarkdownHTML.page, baseURL: nil)
@@ -145,5 +145,37 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
                ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {NSWorkspace.shared.open(url)}
             decisionHandler(.cancel)
         }
+    }
+}
+
+/// Markdown expands to its full height, so vertical scrolling belongs to the
+/// native list. Intercept before WebKit's internal content view consumes it.
+final class GitHubMarkdownScrollingWebView: WKWebView {
+    private var scrollMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let scrollMonitor {NSEvent.removeMonitor(scrollMonitor)}
+        scrollMonitor = nil
+        guard window != nil else {return}
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.forwardVerticalScroll(event) == true ? nil : event
+        }
+    }
+
+    deinit {
+        if let scrollMonitor {NSEvent.removeMonitor(scrollMonitor)}
+    }
+
+    @discardableResult
+    func forwardVerticalScroll(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window,
+              abs(event.scrollingDeltaY) >= abs(event.scrollingDeltaX),
+              let content = window.contentView,
+              let hit = content.hitTest(content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow),
+              hit === self || hit.isDescendant(of: self),
+              let scrollView = enclosingScrollView else {return false}
+        scrollView.scrollWheel(with: event)
+        return true
     }
 }

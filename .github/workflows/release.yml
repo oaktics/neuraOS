@@ -34,8 +34,15 @@ jobs:
       - run: pnpm build
         env:
           NEURA_BUILD_NUMBER: ${{ github.run_number }}
+      - run: node scripts/native/chromium/smoke.mjs
       - run: node scripts/native/release/package.mjs
       - run: node scripts/native/release/smoke.mjs
+      - name: Retain crash symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuraOS-symbols-arm64
+          path: apps/macos/dist/neuraOS.app.dSYM
+          retention-days: 90
       - name: Archive
         run: |
           test "$(node -p process.arch)" = 'arm64'

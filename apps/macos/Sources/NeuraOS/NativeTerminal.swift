@@ -6,6 +6,45 @@ import SwiftTerm
 class NativeTerminalView: TerminalView {
     var provider = "shell"
     private var darkAppearance: Bool?
+    var acceptsFileInput: () -> Bool = { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptsFileInput() && Self.filePasteText(from: sender.draggingPasteboard) != nil ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        draggingEntered(sender)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        !draggingEntered(sender).isEmpty
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard pasteFiles(from: sender.draggingPasteboard) else { return false }
+        window?.makeFirstResponder(self)
+        return true
+    }
+
+    static func filePasteText(from clipboard: NSPasteboard) -> String? {
+        guard let urls = clipboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty else { return nil }
+        // Never let a filename inject terminal control characters or a submit key.
+        guard urls.allSatisfy({ $0.isFileURL && !$0.path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) else { return nil }
+        return urls.map { "'" + $0.path.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }.joined(separator: " ") + " "
+    }
+
+    @discardableResult
+    func pasteFiles(from clipboard: NSPasteboard) -> Bool {
+        guard acceptsFileInput(), let text = Self.filePasteText(from: clipboard) else { return false }
+        let input = getTerminal().bracketedPasteMode ? "\u{1b}[200~" + text + "\u{1b}[201~" : text
+        send(source: getTerminal(), data: Array(input.utf8)[...])
+        return true
+    }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -29,6 +68,10 @@ class NativeTerminalView: TerminalView {
     }
 
     override func paste(_ sender: Any) {
+        if NSPasteboard.general.availableType(from: [.fileURL]) != nil {
+            pasteFiles(from: .general)
+            return
+        }
         if !pasteImage(from: .general) { super.paste(sender) }
     }
 
@@ -56,6 +99,10 @@ struct NativeTerminal: NSViewRepresentable {
         view.updateAppearanceColors()
         view.terminalDelegate = context.coordinator
         context.coordinator.view = view
+        view.acceptsFileInput = { [weak coordinator = context.coordinator] in
+            guard let coordinator else { return false }
+            return coordinator.running && coordinator.visible && coordinator.caughtUp
+        }
         context.coordinator.desiredSize = (view.getTerminal().cols, view.getTerminal().rows)
         context.coordinator.setVisible(visible)
         context.coordinator.start()
