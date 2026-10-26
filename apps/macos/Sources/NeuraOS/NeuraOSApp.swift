@@ -55,6 +55,7 @@ struct NeuraOSApp: App {
             }
             CommandGroup(replacing: .newItem) {
                 Button("新しいWorkspace…") {model.showNewSpace = true}.keyboardShortcut("n", modifiers: [.command, .shift])
+                Button("新しいプロジェクト…") {model.showNewProject = true}.keyboardShortcut("n", modifiers: [.command, .option]).disabled(!model.connected || !model.supportsFolderless)
                 Button("フォルダを開く…") {model.addProject()}.keyboardShortcut("o")
                 Button("新しい作業…") {model.showNewWorkspace = true}.keyboardShortcut("n").disabled(model.gitProjects.isEmpty)
             }
@@ -114,7 +115,7 @@ struct RootView: View {
                 Button {DiagnosticReport.save()} label: {Image(systemName: "ladybug")}.help("今おかしかった：診断情報を保存").accessibilityLabel("診断情報を保存")
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
-                if model.selected != nil {
+                if model.selected?.hasFolder == true {
                     Button {model.showInspector.toggle()} label: {
                         Image(systemName: "sidebar.right")
                             .foregroundStyle(model.showInspector ? Color.accentColor : Color.secondary)
@@ -163,6 +164,7 @@ struct RootView: View {
             }
         }
         .ignoresSafeArea(.container, edges: .top)
+        .sheet(isPresented: $model.showNewProject) {NewProjectSheet()}
         .sheet(isPresented: $model.showNewSpace) {NewSidebarSpaceSheet()}
         .sheet(isPresented: $model.showNewWorkspace) {NewWorkspaceSheet()}
         .alert("操作を完了できませんでした", isPresented: Binding(get: {model.error != nil}, set: {if !$0 {model.error = nil}})) {Button("閉じる") {model.error = nil}} message: {Text(model.error ?? "")}
@@ -196,7 +198,10 @@ struct Sidebar: View {
             }.padding(12)
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
                 .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
-            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Button {model.addProject()} label: {Image(systemName: "plus").frame(width: 24, height: 24)}.buttonStyle(.plain).help("フォルダを開く")}.padding(.horizontal, 10).padding(.bottom, 4)
+            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Menu {
+                Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
+                Button("フォルダを開く…") {model.addProject()}
+            } label: {Image(systemName: "plus").frame(width: 24, height: 24)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("プロジェクトを追加")}.padding(.horizontal, 10).padding(.bottom, 4)
             GeometryReader {geometry in
                 ZStack {
                     ForEach(pagerSpaces) {space in
@@ -283,6 +288,10 @@ struct Sidebar: View {
                                 if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
                             }.padding(.horizontal, 12).padding(.vertical, 5)
                             .contextMenu {
+                                if project.folderless == true {
+                                    Button("フォルダを紐づける…") {model.attachFolder(to: project)}
+                                        .disabled(!model.connected || model.isBusy("project.attach.\(project.id)") || !model.supportsFolderless)
+                                }
                                 if project.supportsGit {
                                     Menu("worktree作成時に自動起動") {
                                         ForEach(["codex", "claude", "shell"], id: \.self) {provider in
@@ -335,7 +344,8 @@ struct Sidebar: View {
                     }
                     if projects.isEmpty {
                         VStack(spacing: 10) {
-                            Text("このWorkspaceにフォルダを追加").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Text("プロジェクトを作成して始める").font(.system(size: 12)).foregroundStyle(.secondary)
+                            Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
                             Button("フォルダを開く…") {model.addProject()}
                         }.padding(.vertical, 24)
                     }
@@ -379,10 +389,32 @@ struct WelcomeView: View {
         VStack(spacing: 18) {
             Image(systemName: "square.stack.3d.up").font(.system(size: 36, weight: .ultraLight)).foregroundStyle(.secondary)
             Text("次の作業を、ここから。").font(.system(size: 24, weight: .medium))
-            Text("フォルダを開いて、CodexやClaude Codeと作業を始めましょう。")
+            Text("Codexへの相談も、ブラウザでの調べものも。フォルダなしで始められます。")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
-            Button("フォルダを開く…") {model.addProject()}.controlSize(.large).padding(.top, 6)
+            Button("新しいプロジェクト…") {model.showNewProject = true}.controlSize(.large).padding(.top, 6)
+                .disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
+            Button("フォルダを開く…") {model.addProject()}
             Text("⌘ O").font(.system(size: 11)).foregroundStyle(.tertiary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+struct NewProjectSheet: View {
+    @Environment(AppModel.self) var model
+    @Environment(\.dismiss) var dismiss
+    @State private var name = ""
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("新しいプロジェクト").font(.system(size: 20, weight: .semibold))
+            Text("会話やブラウザをまとめる場所です。フォルダは後から紐づけられます。").foregroundStyle(.secondary)
+            TextField("プロジェクト名", text: $name)
+            HStack {
+                Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction).disabled(model.isBusy("project.create"))
+                Spacer()
+                if model.isBusy("project.create") {ProgressView().controlSize(.small)}
+                Button("作成") {Task {await model.createProject(name: name.trimmingCharacters(in: .whitespacesAndNewlines))}}
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(model.isBusy("project.create") || !model.connected || !model.supportsFolderless || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.count > 80)
+            }
+        }.padding(28).frame(width: 420).interactiveDismissDisabled(model.isBusy("project.create"))
     }
 }

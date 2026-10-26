@@ -41,6 +41,10 @@ test('closed/merged PRs with deleted source branches create independent worktree
   const cmd=(command:unknown,operationId=randomUUID())=>daemon.app.inject({method:'POST',url:'/v1/commands',headers:{authorization:`Bearer ${daemon.token}`},payload:{operationId,command}});
   try {
     const project=(await cmd({type:'project.add',path:repo})).json();
+    const scratch=(await cmd({type:'project.create',name:'Folderless'})).json();
+    assert.equal((await cmd({type:'workspace.create',projectId:scratch.id,pullRequest:'17'})).json().error,'git_required');
+    const scratchList=await daemon.app.inject({url:`/v1/projects/${scratch.id}/pull-requests`,headers:{authorization:`Bearer ${daemon.token}`}});
+    assert.equal(scratchList.json().error,'git_required');
     const root=daemon.store.list<{id:string;kind:string}>('workspaces').find(w=>w.kind==='root')!;
     const rootHead=(await git(repo,['rev-parse','HEAD'])).trim();
     const listed=await daemon.app.inject({url:`/v1/projects/${project.id}/pull-requests?query=%2317`,headers:{authorization:`Bearer ${daemon.token}`}});
