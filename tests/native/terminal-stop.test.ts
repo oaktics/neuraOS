@@ -3,8 +3,38 @@ import assert from 'node:assert/strict';
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {Terminals} from '../../apps/daemon/src/terminals.ts';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {Terminals,parseProcessTable} from '../../apps/daemon/src/terminals.ts';
 import {Store} from '../../apps/daemon/src/store.ts';
+
+test('process table accepts zero PGIDs but rejects malformed rows with an actionable error',()=>{
+  assert.deepEqual(parseProcessTable('  1 0 1\n  42 1 0\n'),[{pid:1,parent:0,group:1},{pid:42,parent:1,group:0}]);
+  for(const row of ['42 1','42 1 nope','42 1 -1','42 1 2 extra'])
+    assert.throws(()=>parseProcessTable(row),{code:'terminal_process_table_invalid'});
+});
+
+test('workspace stop preserves terminals on discovery failure and can be retried',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-stop-retry-'));
+  const store=new Store(':memory:');
+  let mode:'invalid'|'unavailable'|'ready'='invalid';
+  const terminals=new Terminals(store,async()=>{
+    if(mode==='invalid')return '1 0 invalid';
+    if(mode==='unavailable')throw new Error('process table unavailable');
+    return (await promisify(execFile)('/bin/ps',['-axo','pid=,ppid=,pgid='])).stdout;
+  });
+  try{
+    const terminal=await terminals.open({id:'w',projectId:'p',name:'w',path:dir,branch:'main',kind:'worktree',createdAt:''},'shell',false);
+    await assert.rejects(terminals.stopWorkspace('w'),{code:'terminal_process_table_invalid'});
+    assert.equal(store.state().terminals.find(t=>t.id===terminal.id)?.status,'running');
+    mode='unavailable';
+    await assert.rejects(terminals.stopWorkspace('w'),{code:'terminal_stop_failed'});
+    assert.equal(store.state().terminals.find(t=>t.id===terminal.id)?.status,'running');
+    mode='ready';
+    await terminals.stopWorkspace('w');
+    assert.equal(store.state().terminals.find(t=>t.id===terminal.id)?.status,'exited');
+  }finally{await terminals.shutdown();store.close();await rm(dir,{recursive:true,force:true});}
+});
 
 for(const mode of ['same-group','detached','interactive-shell'] as const)test(`workspace stop waits for SIGHUP-ignoring jobs: ${mode}`,async()=>{
   const dir=await mkdtemp(join(tmpdir(),'neura-stop-group-'));
@@ -18,8 +48,13 @@ setInterval(()=>{},1000);
 `,{mode:0o700});
   const previous=process.env.NEURA_CODEX_PATH;
   process.env.NEURA_CODEX_PATH=program;
-  const store=new Store(':memory:'),terminals=new Terminals(store);
+  // Include a zero-PGID descendant in real process snapshots. It must neither
+  // abort stopping other jobs nor signal group 0 (the test runner's own group).
   let childPid:number|undefined;
+  const store=new Store(':memory:'),terminals=new Terminals(store,async()=>{
+    const {stdout}=await promisify(execFile)('/bin/ps',['-axo','pid=,ppid=,pgid=']);
+    return stdout+`\n2147483646 ${childPid??0} 0\n`;
+  });
   try{
     const terminal=await terminals.open({id:'w',projectId:'p',name:'w',path:dir,branch:'main',kind:'worktree',createdAt:''},mode==='interactive-shell'?'shell':'codex',false);
     if(mode==='interactive-shell')terminals.input(terminal.id,'test',`${JSON.stringify(program)}\n`);
