@@ -166,7 +166,10 @@ struct Sidebar: View {
     @EnvironmentObject var model: AppModel
     @State private var query = ""
     @State private var collapsed: Set<String> = []
-    @State private var deleting: Workspace?
+    private var deleting: Workspace? {
+        get {model.pendingWorkspaceDeletion}
+        nonmutating set {model.pendingWorkspaceDeletion = newValue}
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var swipeTranslation: CGFloat = 0
     @State private var sidebarWidth: CGFloat = 260
