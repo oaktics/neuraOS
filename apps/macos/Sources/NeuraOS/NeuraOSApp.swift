@@ -386,24 +386,3 @@ struct WelcomeView: View {
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-struct NewWorkspaceSheet: View {
-    @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) var dismiss
-    @State private var projectId = ""
-    @State private var base = ""
-    @State private var customBase = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("新しい作業").font(.system(size: 20, weight: .semibold))
-            Text("専用のブランチとworktreeを作成します。サイドバーの作業名には、CodexやClaude Codeの会話名が自動で反映されます。").foregroundStyle(.secondary)
-            Form {
-                Picker("プロジェクト", selection: $projectId) {ForEach(model.gitProjects) {Text($0.name).tag($0.id)}}
-                Text("originのデフォルトブランチを取得し、最新コードから作成します。").font(.caption).foregroundStyle(.secondary)
-                Toggle("作成元を指定", isOn: $customBase)
-                if customBase {TextField("ブランチ・コミット", text: $base)}
-            }
-            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.isBusy("project.create.\(projectId)") {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: customBase ? base.trimmingCharacters(in: .whitespacesAndNewlines) : nil)}}.keyboardShortcut(.defaultAction).disabled(model.isBusy("project.create.\(projectId)") || !model.connected || projectId.isEmpty || (customBase && base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || model.state.features?.contains("workspace.remote-default") != true)}
-        }.padding(28).frame(width: 440)
-        .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
-    }
-}

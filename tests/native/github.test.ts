@@ -112,7 +112,7 @@ test('GitHub HTTP commands retain authentication, validation and durable operati
     for(const url of ['/v1/state','/v1/capabilities']){
       const response=await daemon.app.inject({url,headers});
       assert.equal(response.statusCode,200);assert.equal(response.json().protocolVersion,1);
-      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup']);
+      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','workspace.from-pr']);
     }
     assert.equal((await daemon.app.inject(`/v1/workspaces/${workspaceId}/github`)).statusCode,401);
     assert.equal((await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers})).statusCode,200);

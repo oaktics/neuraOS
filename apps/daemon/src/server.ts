@@ -33,6 +33,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.setErrorHandler((error,req,reply)=>{const e=error instanceof Fault?error:error instanceof z.ZodError?new Fault('invalid_request','要求の形式が正しくありません。'):new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);reply.code(e.status).send({error:e.code,message:e.message});});
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
   async function execute(c:Command,operationId:string,fetchedTarget?:Awaited<ReturnType<typeof work.fetchDefault>>):Promise<unknown>{
+    if(c.type==='workspace.create'&&c.baseRef&&c.pullRequest)throw new Fault('invalid_source','作成元は一つだけ指定してください。');
     if(!fetchedTarget && ((c.type==='workspace.create'&&!c.baseRef)||c.type==='workspace.sync-default')){
       let root:string;
       if(c.type==='workspace.create'){
@@ -44,7 +45,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         if(record.kind!=='root')throw new Fault('root_required','メインの作業フォルダで実行してください。');
         root=record.path;
       }
-      const fetched=await fetchDefault(root);
+      const fetched=c.type==='workspace.create'&&c.pullRequest ? await github.fetchPullRequest(root,c.pullRequest) : await fetchDefault(root);
       // Only local mutation enters the interactive queue. Revalidate all state there:
       // a terminal may have opened or files may have changed during the fetch.
       const mutation=queue.catch(()=>{}).then(()=>execute(c,operationId,fetched));
@@ -144,6 +145,12 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   }
   app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
   app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return w.kind==='folder'?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
+  app.get('/v1/projects/:id/pull-requests',async req=>{
+    const project=requireValue(store.get<Project>('projects',z.uuid().parse((req.params as {id:string}).id)),'project_missing','プロジェクトがありません。');
+    if(project.isGit===false)throw new Fault('git_required','Gitリポジトリを選択してください。');
+    const query=z.string().trim().max(500).default('').parse((req.query as Record<string,string>).query);
+    return github.pullRequests(project.path,query);
+  });
   app.get('/v1/usage',async()=>({providers:await usage.read()}));
   app.addHook('onClose',async()=>{await usage.close();});
   app.get('/v1/capabilities',async()=>({protocolVersion:1,features:daemonFeatures,providers:await Promise.all(['codex','claude'].map(async provider=>({provider,available:await executable(provider as 'codex'|'claude').then(()=>true,()=>false)}))),remoteAccess:false}));
