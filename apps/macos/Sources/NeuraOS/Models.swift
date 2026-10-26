@@ -231,8 +231,13 @@ final class DaemonClient {
         guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
         defer {endAction(workspace.id)}
         do {
-            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges])
+            guard state.features?.contains("workspace.delete.stop-terminals") == true else {
+                throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+            }
+            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
             await refresh()
+        } catch let failure as APIError where !discardChanges && ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
+            pendingWorkspaceDeletion = workspace
         } catch {report(error)}
     }
     func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
