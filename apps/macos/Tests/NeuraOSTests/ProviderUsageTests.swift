@@ -16,7 +16,7 @@ final class ProviderUsageTests: XCTestCase {
             ProviderUsage(provider: "claude", status: "available", windows: [UsageWindow(label: "5h", usedPercent: 0, resetsAt: shortReset), UsageWindow(label: "週", usedPercent: 2, resetsAt: weeklyReset)], checkedAt: timestamp),
         ]
         for scheme: ColorScheme in [.light, .dark] {
-            let host = NSHostingView(rootView: ProviderUsageFooter().environmentObject(model)
+            let host = NSHostingView(rootView: ProviderUsageFooter().environment(model)
                 .frame(width: 900).background(Color(nsColor: .windowBackgroundColor)).environment(\.colorScheme, scheme))
             let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 900, height: 28), styleMask: [.borderless], backing: .buffered, defer: false)
             window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)

@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ProviderUsageFooter: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var refreshing = false
 
     var body: some View {

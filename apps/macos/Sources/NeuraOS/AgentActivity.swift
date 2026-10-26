@@ -84,3 +84,14 @@ struct WorkspaceActivityIndicator: View {
         }
     }
 }
+
+/// Read activity in the leaf view so terminal updates do not rebuild sidebar menus.
+struct WorkspaceActivityStatus: View {
+    @Environment(AppModel.self) private var model
+    let workspaceId: String
+
+    var body: some View {
+        WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspaceId},
+                                   connected: model.connected)
+    }
+}

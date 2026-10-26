@@ -147,7 +147,7 @@ struct SidebarSwipeGesture {
 }
 
 struct NewSidebarSpaceSheet: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) var dismiss
     @State private var name = ""
     var body: some View {

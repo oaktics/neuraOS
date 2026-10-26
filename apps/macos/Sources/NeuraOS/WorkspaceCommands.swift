@@ -19,7 +19,7 @@ enum WorkspaceCommandContext {
 }
 
 struct WorkspaceCommands: Commands {
-    @ObservedObject var model: AppModel
+    let model: AppModel
 
     var body: some Commands {
         CommandMenu("タブ") {

@@ -36,7 +36,7 @@ struct WorkspaceTabState: Codable {
 }
 
 struct WorkspaceView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     @State private var layout = WorkspaceTabState()
     @State private var restored = false
@@ -77,11 +77,9 @@ struct WorkspaceView: View {
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .onAppear {restore(); openRequestedTerminal()}
-        .onReceive(model.$state) {_ in
-            Task { @MainActor in reconcileTerminals() }
-        }
-        .onReceive(model.$startingTerminalTabs) {_ in
-            // Published emits before assignment; read the completed state next turn.
+        .onChange(of: model.state.terminals) {_, _ in reconcileTerminals()}
+        .onReceive(model.terminalLaunchesChanged) {_ in
+            // Keep launch lifecycle events even when several changes share a render turn.
             Task { @MainActor in reconcileTerminals() }
         }
         .onChange(of: model.requestedTerminalId) {_, _ in openRequestedTerminal()}
@@ -302,7 +300,7 @@ struct WorkspaceView: View {
 }
 
 struct TerminalPane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let tabId: String
     let provider: String
@@ -341,9 +339,8 @@ struct TerminalPane: View {
         .onAppear {activateIfNeeded()}
         .onChange(of: visible) {_, _ in activateIfNeeded()}
         .onChange(of: model.connected) {_, _ in activateIfNeeded()}
-        .onReceive(model.$pendingActions) {_ in
-            // Published sends before mutation. Recheck on the next actor turn, and
-            // observe every change rather than relying on render-coalesced onChange.
+        .onReceive(model.pendingActionsChanged) {_ in
+            // Preserve every release event so auto-start remains eligible after contention.
             Task { @MainActor in activateIfNeeded() }
         }
         .confirmationDialog("\(title)のプロセスを停止しますか？", isPresented: $showStop) {Button("停止", role: .destructive) {if let terminal {Task {await model.stopTerminal(terminal)}}}}
@@ -372,7 +369,7 @@ struct TerminalPane: View {
 
 struct OpenDocument: Codable, Equatable {var original: FileContent; var text: String; var dirty: Bool {text != original.content}}
 struct FilePane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let visible: Bool
     @Binding var requestedFile: String?
@@ -425,7 +422,7 @@ struct FilePane: View {
     }
 }
 struct FileTree: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspaceId: String; let path: String; let selected: String?; let onSelect: (String) -> Void
     @State private var entries: [FileEntry] = []
     @State private var error: String?
