@@ -25,6 +25,7 @@ struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = AppModel()
     @StateObject private var updater = AppUpdater()
+    @Environment(\.openWindow) private var openWindow
     init() {
         // Exercise the actual packaged executable without opening a window or
         // starting the daemon. Release smoke checks run this after relocation.
@@ -37,7 +38,7 @@ struct NeuraOSApp: App {
         }
     }
     var body: some Scene {
-        Settings {AgentSleepSettings(controller: model.agentSleep)}
+        // The first scene is opened on launch. Keep Settings after the main window.
         Window("neuraOS", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
@@ -60,12 +61,14 @@ struct NeuraOSApp: App {
             WorkspaceCommands(model: model)
             AgentNotificationCommands()
             CommandMenu("表示") {
+                Button("メイン画面を開く") {openWindow(id: "main")}
                 Button("前のWorkspace") {if let id = model.sidebarSpaces.adjacent(-1) {model.switchSpace(id)}}.keyboardShortcut(.leftArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(-1) == nil)
                 Button("次のWorkspace") {if let id = model.sidebarSpaces.adjacent(1) {model.switchSpace(id)}}.keyboardShortcut(.rightArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(1) == nil)
                 Button(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く") {model.showSidebar.toggle()}.keyboardShortcut("s", modifiers: [.command, .control])
                 Button(model.showInspector ? "右サイドバーを閉じる" : "右サイドバーを開く") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected == nil)
             }
         }
+        Settings {AgentSleepSettings(controller: model.agentSleep)}
     }
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
