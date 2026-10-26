@@ -62,7 +62,7 @@ test('status selects the exact head repository and combines all pages of convers
 });
 test('no PR is distinct from GitHub request failure and detached worktrees',async()=>{
   const {service,state}=fixture();state.hasPR=false;assert.equal((await service.status('/repo')).pullRequest,null);
-  state.fail=true;await assert.rejects(service.status('/repo'),{code:'github_failed'});
+  state.fail=true;await assert.rejects(service.status('/repo',true),{code:'github_failed'});
   state.fail=false;state.branch='';await assert.rejects(service.status('/repo'),{code:'github_detached'});
 });
 test('push targets the displayed commit and branch without force or arbitrary push destinations',async()=>{
@@ -112,7 +112,7 @@ test('GitHub HTTP commands retain authentication, validation and durable operati
     for(const url of ['/v1/state','/v1/capabilities']){
       const response=await daemon.app.inject({url,headers});
       assert.equal(response.statusCode,200);assert.equal(response.json().protocolVersion,1);
-      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup']);
+      assert.deepEqual(response.json().features,['github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.folderless','workspace.from-pr']);
     }
     assert.equal((await daemon.app.inject(`/v1/workspaces/${workspaceId}/github`)).statusCode,401);
     assert.equal((await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers})).statusCode,200);
@@ -145,4 +145,16 @@ test('a slow GitHub command does not block local commands; folders reject GitHub
     finish();await slow;
     assert.equal((await cmd({...mergeCommand(),workspaceId:folder.id})).json().error,'git_required');
   } finally {clearTimeout(timeout);finish();await slow;await daemon.app.close();await rm(dir,{recursive:true,force:true});}
+});
+
+
+test('status shares identical checkout reads and refreshes after mutations or HEAD changes',async()=>{
+  const {service,state,calls}=fixture();
+  await Promise.all([service.status('/repo'),service.status('/same-checkout')]);
+  const details=()=>calls.filter(c=>c.kind==='gh'&&c.args[0]==='pr').length;
+  assert.equal(details(),1);
+  await service.status('/repo');assert.equal(details(),1);
+  await service.mutate('/repo',Command.parse({type:'github.push',...target}) as Extract<Command,{type:'github.push'}>);
+  await service.status('/repo');assert.equal(details(),2);
+  state.head=otherHead;await service.status('/repo');assert.equal(details(),3);
 });

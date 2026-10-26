@@ -57,7 +57,7 @@ struct WorkspaceView: View {
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
                 contents.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
-                if model.showInspector {inspectorPane.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)}
+                if model.showInspector && workspace.hasFolder {inspectorPane.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)}
             }
             Rectangle().fill(Palette.line).frame(height: 1)
             HStack(spacing: 10) {
@@ -66,7 +66,15 @@ struct WorkspaceView: View {
                         .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
                         .help(git.branch.isEmpty ? workspace.branch : git.branch)
                 }
-                Text((workspace.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(workspace.path)
+                if workspace.hasFolder {
+                    Text((workspace.path as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(workspace.path)
+                } else {
+                    Text("フリー")
+                    if let project = model.state.projects.first(where: {$0.id == workspace.projectId}), project.folderless == true {
+                        Button("フォルダを紐づける…") {model.attachFolder(to: project)}
+                            .buttonStyle(.link).disabled(model.isBusy("project.attach.\(project.id)") || !model.connected || !model.supportsFolderless)
+                    }
+                }
                 Spacer(minLength: 0)
                 if model.isBusy(workspace.id) {ProgressView().controlSize(.mini)}
                 if workspace.supportsGit && !git.changes.isEmpty {
@@ -172,8 +180,8 @@ struct WorkspaceView: View {
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }
             // Keep drafts mounted even when the editor tab is closed.
-            FilePane(workspace: workspace, visible: activeKind == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile)
-                .opacity(activeKind == "files" ? 1 : 0).allowsHitTesting(activeKind == "files").accessibilityHidden(activeKind != "files")
+            if workspace.hasFolder {FilePane(workspace: workspace, visible: activeKind == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile)
+                .opacity(activeKind == "files" ? 1 : 0).allowsHitTesting(activeKind == "files").accessibilityHidden(activeKind != "files")}
             if activeKind == "diff" {
                 if let diff = selectedDiff {
                     VStack(alignment: .leading, spacing: 0) {

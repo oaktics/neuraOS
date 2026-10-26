@@ -1,3 +1,4 @@
+import {signApplication} from '../signing/sign.mjs';
 import {cp, mkdir, readFile, realpath, readdir, symlink, rm, copyFile, writeFile, chmod} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {join, resolve, dirname, relative} from 'node:path';
@@ -58,6 +59,6 @@ async function signTree(path) {
   }
 }
 await signTree(runtime);
-execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
+signApplication(app);
 execFileSync('codesign', ['--verify', '--deep', '--strict', app], {stdio: 'inherit'});
 console.log(app);

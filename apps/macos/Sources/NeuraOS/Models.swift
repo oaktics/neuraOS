@@ -12,8 +12,8 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var worktreeStartup: [String]? = nil; var supportsGit: Bool {isGit != false}}
-struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind != "folder"}}
+struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
+struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
 struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
@@ -72,7 +72,7 @@ final class DaemonClient {
         config.timeoutIntervalForRequest = 15
         session = URLSession(configuration: config)
     }
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
+    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: (path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
         try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)
@@ -115,6 +115,7 @@ final class DaemonClient {
 @MainActor @Observable final class AppModel {
     let api = DaemonClient()
     let agentSleep = AgentSleepController()
+    let githubUpdated = PassthroughSubject<String, Never>()
     let workspaceUpdated = PassthroughSubject<String, Never>()
     let state = DaemonViewState()
     var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
@@ -139,6 +140,7 @@ final class DaemonClient {
     }
     func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
     var pendingWorkspaceDeletion: Workspace?
+    var showNewProject = false
     var showNewWorkspace = false
     var showNewSpace = false
     var sidebarSpaces: SidebarSpaces = {
@@ -234,6 +236,32 @@ final class DaemonClient {
             if usageFailed {usageFailed = false}
         } catch {if !usageFailed {usageFailed = true}; if !providerUsage.isEmpty {providerUsage = []}}
     }
+    var supportsFolderless: Bool {state.features?.contains("project.folderless") == true}
+    func createProject(name: String) async {
+        let targetSpaceId = sidebarSpaces.active.id
+        guard beginAction("project.create", label: "プロジェクトを作成中") else {return}
+        defer {endAction("project.create")}
+        do {
+            let project: Project = try await api.command(["type": "project.create", "name": name])
+            sidebarSpaces.projectSpaces[project.id] = targetSpaceId
+            await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
+            showNewProject = false
+        } catch {report(error)}
+    }
+    func attachFolder(to project: Project) {
+        guard supportsFolderless, project.folderless == true, !isBusy("project.attach.\(project.id)") else {return}
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        panel.message = "フォルダ用の作業領域を追加します。現在のタブと会話は「フリー」に残ります。"
+        panel.prompt = "紐づける"
+        guard panel.runModal() == .OK, let path = panel.url?.path else {return}
+        let key = "project.attach.\(project.id)"
+        guard beginAction(key, label: "フォルダを紐づけ中") else {return}
+        Task {defer {endAction(key)}; do {
+            let _: Project = try await api.command(["type": "project.attach", "projectId": project.id, "path": path])
+            await refresh()
+            select(state.workspaces.first {$0.projectId == project.id && $0.hasFolder}?.id)
+        } catch {report(error)}}
+    }
     func addProject() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
         panel.message = "作業するフォルダを選択（Gitは不要です）"; panel.prompt = "追加"
@@ -258,7 +286,7 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
-    func createWorkspace(projectId: String, base: String?) async {
+    func createWorkspace(projectId: String, base: String?, pullRequest: String? = nil) async {
         let key = "project.create.\(projectId)"
         guard beginAction(key, label: "作業を作成中") else {return}
         defer {endAction(key)}
@@ -266,6 +294,10 @@ final class DaemonClient {
             guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
             var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
             if let base {command["baseRef"] = base}
+            if let pullRequest {
+                guard state.features?.contains("workspace.from-pr") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してからPRを指定してください。")}
+                command["pullRequest"] = pullRequest
+            }
             let workspace: CreatedWorkspace = try await api.command(command)
             await refresh(); select(workspace.id); showNewWorkspace = false
             if let failures = workspace.startupErrors, !failures.isEmpty {
