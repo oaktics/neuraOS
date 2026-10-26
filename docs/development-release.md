@@ -17,7 +17,7 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 ## 通常CIと配布検証
 
-- `staging`向け機能PRでは型チェック、Daemon等のテスト、更新処理のテスト、Swiftテスト、アプリの配布ビルド・パッケージ作成・同梱Daemonのsmoke試験を行う。週次・手動の通常CIも同じフル検証を行う。
+- `staging`向け機能PRでは型チェック、Daemon等のテスト、更新処理のテスト、Swiftテスト、アプリの配布ビルド・パッケージ作成・同梱Daemonのsmoke試験を行う。週次・既定の手動CIも同じフル検証を行う。
 - `staging`へのpushではUbuntuで型チェック・Daemon等のテスト・更新処理のテストだけを行う。Swift・配布パッケージの再検証は省略する。
 - `main`向けPRでは`native-release`だけが動き、上記のフル検証にChromiumのsmoke試験とZIP作成を加える。マージ後の`main`では公開対象コミットを再検証して配布する。
 - 機能ブランチのpushではCIを起動せず、PR作成・更新で実行する。`staging`へのマージ後は統合されたソースを軽量検証する。`main`へのpushはリリース側で検証する。

@@ -71,6 +71,8 @@ jobs:
           path: apps/macos/dist/neuraOS.app.dSYM
           retention-days: 90
   macos:
+    # A manual lightweight run must not satisfy the PR's full macOS gate.
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.lightweight && 'ubuntu-check' || 'macos' }}
     if: always()
     needs: [changes, verify]
     runs-on: ubuntu-latest
