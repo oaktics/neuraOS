@@ -76,12 +76,15 @@ enum AgentSleepPolicy {
         do {
             // Register only once. Turning sleep control off does not revoke the
             // installation approval, and launching the app never enables sleep control.
-            if service.status == .notRegistered {try service.register()}
+            let registrationStatus = try SleepServiceRegistration.prepare(
+                status: {self.service.status},
+                validate: {try SleepServiceRegistration.validateBundle(at: Bundle.main.bundleURL)},
+                register: {try self.service.register()})
             refreshApproval()
-            guard service.status == .enabled else {
+            guard registrationStatus == .enabled else {
                 status = approvalRequired
                     ? "初回の許可が必要です。「システム設定で許可」を開いてください。"
-                    : "スリープ制御サービスを登録できません。インストール済みのアプリから再度お試しください。"
+                    : "スリープ制御サービスの登録を確認できません（状態: \(registrationStatus.rawValue)）。再度有効にしてください。"
                 return
             }
             let helper = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("NeuraSleepService")
@@ -122,7 +125,10 @@ enum AgentSleepPolicy {
             }
         } catch {
             disable(); refreshApproval()
-            if !approvalRequired {status = "スリープ制御の開始に失敗しました: " + error.localizedDescription}
+            if !approvalRequired {
+                let detail = error as NSError
+                status = "スリープ制御の開始に失敗しました: \(detail.localizedDescription)（\(detail.domain): \(detail.code)）"
+            }
         }
     }
     private func finish(id: UUID, message: String) {
@@ -157,19 +163,31 @@ struct AgentSleepFooter: View {
     private var label: String {
         if controller.stopping {return "解除中…"}
         if controller.starting {return "開始中…"}
+        if controller.approvalRequired {return "許可が必要"}
         return controller.enabled ? "有効" : "無効"
     }
 
+    private var actionHint: String {
+        if controller.enabled {return "クリックしてスリープ制限を無効にします"}
+        if controller.approvalRequired {return "クリックしてシステム設定で許可します"}
+        return "クリックしてこの起動中のスリープ制限を有効にします"
+    }
+
     var body: some View {
-        SettingsLink {
+        Button {
+            if controller.enabled {controller.disable()}
+            else if controller.approvalRequired {controller.openApprovalSettings()}
+            else {controller.enable()}
+        } label: {
             Label("スリープ制限：\(label)", systemImage: controller.enabled ? "moon.slash.fill" : "moon")
         }
         .buttonStyle(.plain)
+        .disabled(controller.starting || controller.stopping)
         .foregroundStyle(controller.enabled ? Color.accentColor : Color.secondary)
-        .help("スリープ制限：\(label)\n\(controller.status)\nクリックして設定を開く")
+        .help("スリープ制限：\(label)\n\(controller.status)\n\(actionHint)")
         .accessibilityLabel("スリープ制限：\(label)")
         .accessibilityValue(controller.status)
-        .accessibilityHint("スリープ制限の設定を開きます")
+        .accessibilityHint(actionHint)
     }
 }
 
