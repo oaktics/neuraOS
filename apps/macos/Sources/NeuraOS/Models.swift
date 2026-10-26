@@ -89,6 +89,7 @@ final class DaemonClient {
 @MainActor final class AppModel: ObservableObject {
     let api = DaemonClient()
     let agentSleep = AgentSleepController()
+    let githubUpdated = PassthroughSubject<String, Never>()
     let workspaceUpdated = PassthroughSubject<String, Never>()
     @Published var state = Snapshot()
     @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")

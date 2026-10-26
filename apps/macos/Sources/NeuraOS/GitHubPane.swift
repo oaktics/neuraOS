@@ -57,11 +57,14 @@ struct GitHubSidebar: View {
 
 struct GitHubPane: View {
     @EnvironmentObject var model: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     let workspace: Workspace
     let visible: Bool
     let openTerminal: () -> Void
     @State private var snapshot: GitHubSnapshot?
     @State private var refreshing = false
+    @State private var nextRefresh = Date.distantPast
+    @State private var failures = 0
     @State private var busy = false
     @State private var error: String?
     @State private var notice: String?
@@ -71,6 +74,7 @@ struct GitHubPane: View {
     @State private var confirmation = ""
     @State private var pending: [String: Any]?
     @State private var method = "squash"
+    private var refreshEnabled: Bool {visible && scenePhase == .active && model.connected && model.supportsGitHub}
     private var disabled: Bool {busy || refreshing || !model.connected || error != nil}
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -81,7 +85,7 @@ struct GitHubPane: View {
                 }
                 Spacer()
                 if refreshing || busy {ProgressView().controlSize(.small)}
-                Button {Task {await refresh()}} label: {Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)}.buttonStyle(.plain).help("GitHubを更新").accessibilityLabel("GitHubを更新").disabled(refreshing || busy)
+                Button {Task {await refresh(force: true)}} label: {Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)}.buttonStyle(.plain).help("GitHubを更新").accessibilityLabel("GitHubを更新").disabled(refreshing || busy)
             }.padding(10)
             Divider()
             ScrollView {
@@ -112,16 +116,19 @@ struct GitHubPane: View {
                                 Text("変更をコミットしたら、PR を作成してレビューへ進めます。").foregroundStyle(.secondary)
                             }.padding(.vertical, 12)
                         }
-                        Text("更新 \(GitHubPresentation.relativeDate(snapshot.fetchedAt)) · 30秒ごとに自動更新").font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Text("更新 \(GitHubPresentation.relativeDate(snapshot.fetchedAt)) · 表示中は状態に応じて自動更新").font(.system(size: 10)).foregroundStyle(.tertiary)
                     } else if error == nil {Text("GitHub に接続しています…").foregroundStyle(.secondary).padding(.vertical, 12)}
                 }.font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(10).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .task(id: visible) {
-            guard visible else {return}
+        .onReceive(model.githubUpdated) {id in if id == workspace.id {nextRefresh = .distantPast}}
+        .task(id: "\(workspace.id):\(refreshEnabled)") {
+            guard refreshEnabled else {return}
+            // Reopening a completed PR still checks for externally-created PRs.
+            if failures == 0 {nextRefresh = .distantPast}
             while !Task.isCancelled {
-                if !busy && !showCreate && !showConfirmation {await refresh()}
-                do {try await Task.sleep(for: .seconds(30))} catch {return}
+                if !busy && !showCreate && !showConfirmation && Date() >= nextRefresh {await refresh()}
+                do {try await Task.sleep(for: .seconds(1))} catch {return}
             }
         }
         .sheet(isPresented: $showCreate) {
@@ -143,13 +150,19 @@ struct GitHubPane: View {
             confirmMerge(snapshot, pr: pr)
         }.id("\(snapshot.repository)#\(pr.number)")
     }
-    @MainActor private func refresh() async {
+    @MainActor private func refresh(force: Bool = false) async {
         guard model.supportsGitHub, !refreshing else {return}; refreshing = true; defer {refreshing = false}
         do {
-            let value: GitHubSnapshot = try await model.api.get("v1/workspaces/\(workspace.id)/github")
-            snapshot = value; error = nil
+            let value: GitHubSnapshot = try await model.api.get("v1/workspaces/\(workspace.id)/github", query: force ? ["refresh": "true"] : [:])
+            guard !Task.isCancelled else {return}
+            snapshot = value; error = nil; failures = 0
+            nextRefresh = GitHubRefreshPolicy.interval(state: value.pullRequest?.state, checks: value.pullRequest?.checks.map(\.state) ?? []).map {Date().addingTimeInterval($0)} ?? .distantFuture
             if !value.mergeMethods.contains(method) {method = value.mergeMethods.first ?? "squash"}
-        } catch is CancellationError {} catch {self.error = error.localizedDescription}
+        } catch {
+            guard !Task.isCancelled else {return}
+            self.error = error.localizedDescription; failures += 1
+            nextRefresh = Date().addingTimeInterval(GitHubRefreshPolicy.retryDelay(failures: failures))
+        }
     }
     private func confirmPush(_ snapshot: GitHubSnapshot) {
         pending = snapshot.target(workspaceId: workspace.id, type: "github.push")
@@ -172,7 +185,10 @@ struct GitHubPane: View {
             }
             let result: GitHubResult = try await model.api.command(command)
             notice = result.message
-            await refresh()
+            // Let GitHub expose the pushed commit / new PR before the fresh read.
+            try? await Task.sleep(for: .milliseconds(2500))
+            model.githubUpdated.send(workspace.id)
+            await refresh(force: true)
             return true
         } catch {
             self.error = error.localizedDescription
