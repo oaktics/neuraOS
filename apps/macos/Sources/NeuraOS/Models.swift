@@ -72,7 +72,7 @@ final class DaemonClient {
         config.timeoutIntervalForRequest = 15
         session = URLSession(configuration: config)
     }
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: path.hasSuffix("/github") ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
+    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: (path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
         try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)
@@ -286,7 +286,7 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
-    func createWorkspace(projectId: String, base: String?) async {
+    func createWorkspace(projectId: String, base: String?, pullRequest: String? = nil) async {
         let key = "project.create.\(projectId)"
         guard beginAction(key, label: "作業を作成中") else {return}
         defer {endAction(key)}
@@ -294,6 +294,10 @@ final class DaemonClient {
             guard state.features?.contains("workspace.remote-default") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してから作成してください。")}
             var command: [String: Any] = ["type": "workspace.create", "projectId": projectId]
             if let base {command["baseRef"] = base}
+            if let pullRequest {
+                guard state.features?.contains("workspace.from-pr") == true else {throw APIError(error: "daemon_update_required", message: "Daemonを更新してからPRを指定してください。")}
+                command["pullRequest"] = pullRequest
+            }
             let workspace: CreatedWorkspace = try await api.command(command)
             await refresh(); select(workspace.id); showNewWorkspace = false
             if let failures = workspace.startupErrors, !failures.isEmpty {

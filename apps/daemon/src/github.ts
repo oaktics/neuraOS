@@ -1,3 +1,4 @@
+import {randomUUID} from 'node:crypto';
 import {GitHubRefreshCache} from './github-refresh.ts';
 import {execFile} from 'node:child_process';
 import {access,realpath} from 'node:fs/promises';
@@ -45,10 +46,48 @@ export const runGitHub:Runner=async(cwd,args)=>{
   });
 };
 
+const sourcePullSchema=z.object({number:z.number().int().positive(),title:z.string(),state:z.enum(['OPEN','CLOSED','MERGED']),headRefName:z.string()});
+const sourceFields='number,title,state,headRefName';
+export function pullRequestNumber(input:string,repository:string){
+  const text=input.trim();
+  if(/^#?[1-9]\d*$/.test(text)){
+    const value=Number(text.replace(/^#/,''));
+    if(Number.isSafeInteger(value))return value;
+  }
+  const match=text.match(/^https:\/\/github\.com\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)(?:[/?#].*)?$/);
+  if(match){
+    if(match[1].toLowerCase()!==repository.toLowerCase())throw new Fault('pr_repository_mismatch','選択したプロジェクトとPRのリポジトリが異なります。プロジェクトを選び直してください。');
+    const value=Number(match[2]);if(Number.isSafeInteger(value))return value;
+  }
+  throw new Fault('invalid_pr','PR番号（例: #123）またはGitHubのPR URLを入力してください。');
+}
+
 export class GitHub {
   private checksCache=new ChecksCache();
   private statusCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchStatus']>>>(()=>60000);
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
+  async pullRequests(root:string,query=''){
+    const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
+    if(/^#?\d+$/.test(query)||/^https?:\/\//i.test(query)){
+      const number=pullRequestNumber(query,repository);
+      return {pullRequests:[sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json',sourceFields])))]};
+    }
+    const args=['pr','list','--repo',`github.com/${repository}`,'--state','all','--limit','50','--json',sourceFields];
+    if(query)args.push('--search',query);
+    return {pullRequests:z.array(sourcePullSchema).parse(JSON.parse(await this.run(root,args)))};
+  }
+  async fetchPullRequest(root:string,input:string){
+    const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
+    const number=pullRequestNumber(input,repository);
+    // Validate access/existence for all PR states; never check out the user's main folder.
+    sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json',sourceFields])));
+    const ref=`refs/neura/pr-fetch/${randomUUID()}`;
+    try {
+      await this.gitRun(root,['fetch','--no-tags','origin',`+refs/pull/${number}/head:${ref}`]);
+      const commit=(await this.gitRun(root,['rev-parse','--verify',`${ref}^{commit}`])).trim();
+      return {branch:`PR #${number}`,commit};
+    } finally {await this.gitRun(root,['update-ref','-d',ref]).catch(()=>{});}
+  }
   private async api(root:string,endpoint:string,args:string[]=[]){return JSON.parse(await this.run(root,['api','--hostname','github.com',endpoint,...args])) as unknown;}
   private async pages(root:string,endpoint:string){return z.array(z.array(z.unknown())).parse(await this.api(root,endpoint,['--paginate','--slurp'])).flat();}
   private async commitContext(root:string){
