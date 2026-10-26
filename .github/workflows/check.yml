@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "0 0 * * 1"
   workflow_dispatch:
+    inputs:
+      lightweight:
+        description: Run the staging Ubuntu checks instead of the full macOS suite
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -26,7 +31,7 @@ jobs:
   verify:
     needs: changes
     if: needs.changes.outputs.required == 'true'
-    runs-on: ${{ github.event_name == 'push' && 'ubuntu-latest' || 'macos-15' }}
+    runs-on: ${{ (github.event_name == 'push' || inputs.lightweight) && 'ubuntu-latest' || 'macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -44,20 +49,22 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends zsh
           test -x /bin/zsh
+          # Avoid the first-login configuration wizard consuming PTY test input.
+          touch "$HOME/.zshrc"
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
-      - if: github.event_name != 'push'
+      - if: github.event_name != 'push' && !inputs.lightweight
         run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
-      - if: github.event_name != 'push'
+      - if: github.event_name != 'push' && !inputs.lightweight
         run: pnpm test:macos
-      - if: github.event_name != 'push'
+      - if: github.event_name != 'push' && !inputs.lightweight
         run: pnpm build
-      - if: github.event_name != 'push'
+      - if: github.event_name != 'push' && !inputs.lightweight
         run: node scripts/native/release/package.mjs
-      - if: github.event_name != 'push'
+      - if: github.event_name != 'push' && !inputs.lightweight
         run: node scripts/native/release/smoke.mjs
       - name: Retain crash symbols
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && !inputs.lightweight
         uses: actions/upload-artifact@v4
         with:
           name: neuraOS-symbols-arm64
