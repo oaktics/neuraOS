@@ -73,6 +73,6 @@ test('attaching an existing Git repository enables worktrees without changing sc
     assert.equal((await cmd({type:'project.attach',projectId:project.id,path:join(root,'missing')})).statusCode,500);
     const attached=(await cmd({type:'project.attach',projectId:project.id,path:repo})).json();
     assert.equal(attached.isGit,true);
-    assert.equal((await cmd({type:'workspace.create',projectId:project.id})).statusCode,200);
+    assert.equal((await cmd({type:'workspace.create',projectId:project.id,baseRef:'HEAD'})).statusCode,200);
   }finally{await daemon.app.close();await rm(root,{recursive:true,force:true});}
 });

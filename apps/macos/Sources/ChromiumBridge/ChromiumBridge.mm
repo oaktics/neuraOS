@@ -13,6 +13,7 @@ API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
 API(cef_browser_host_create_browser_sync); API(cef_api_hash);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
+static bool pumping = false;
 static std::map<int, cef_browser_t *> browsers;
 static void (^shutdownCompletion)(void);
 
@@ -85,7 +86,9 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 static void CompleteShutdown() {
     if (!shuttingDown || !browsers.empty()) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!browsers.empty() || !initialized) return;
+        // Dispatch blocks may themselves be drained from inside CEF's external pump.
+        // Do not free that loop while cef_do_message_loop_work is still on the stack.
+        if (!browsers.empty() || !initialized || pumping) return;
         [pump invalidate]; pump = nil;
         p_cef_shutdown(); initialized = false;
         if (shutdownCompletion) {auto completion = shutdownCompletion; shutdownCompletion = nil; completion();}
@@ -129,7 +132,20 @@ static NSString *StartChromiumImpl() {
     char name[] = "NeuraOS"; char *argv[] = {name, nullptr}; cef_main_args_t args = {1, argv};
     if (!p_cef_initialize(&args, &settings, nullptr, nullptr)) return @"Chromiumを開始できませんでした。別のneuraOSで同じプロファイルを使用していないか確認してください。";
     initialized = true;
-    pump = [NSTimer timerWithTimeInterval:0.01 repeats:YES block:^(NSTimer *) {p_cef_do_message_loop_work();}];
+    pump = [NSTimer timerWithTimeInterval:0.01 repeats:YES block:^(NSTimer *) {
+        // CEF's external pump drains AppKit events in the default run-loop mode.
+        // Native modal windows/sheets must route their own mouse events; otherwise
+        // the confirmation appears but its buttons never receive the clicks.
+        if (!initialized || pumping) return;
+        // Retry a deferred shutdown on a turn that does not enter CEF again.
+        if (shuttingDown && browsers.empty()) {CompleteShutdown(); return;}
+        if (NSApp.modalWindow) return;
+        for (NSWindow *window in NSApp.windows) {
+            if (window.attachedSheet || window.sheetParent) return;
+        }
+        pumping = true;
+        @try {p_cef_do_message_loop_work();} @finally {pumping = false;}
+    }];
     [NSRunLoop.mainRunLoop addTimer:pump forMode:NSRunLoopCommonModes];
     return nil;
 }

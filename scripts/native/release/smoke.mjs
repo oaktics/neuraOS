@@ -1,4 +1,4 @@
-import {mkdtemp, rm, mkdir, cp} from 'node:fs/promises';
+import {mkdtemp, rm, mkdir, cp, readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawn, execFileSync} from 'node:child_process';
@@ -36,6 +36,22 @@ try {
   await cp(join(original, 'Resources/NeuraOS_NeuraOS.bundle'), join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
   const executable = join(app, 'Contents/MacOS/NeuraOS');
   execFileSync(executable, ['--check-bundled-resources'], {stdio: 'inherit', timeout: 15000});
+  // A unique bundle ID isolates UserDefaults; explicit endpoints isolate app data and services.
+  const plist = join(app, 'Contents/Info.plist');
+  for (const [key, value] of [['CFBundleIdentifier', 'com.neuraos.reliability-smoke.' + process.pid], ['NeuraDataDirectory', data], ['NeuraEndpoint', 'http://127.0.0.1:1']]) {
+    execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist]);
+  }
+  await cp(join(original, 'Frameworks'), join(app, 'Contents/Frameworks'), {recursive: true, verbatimSymlinks: true});
+  execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
+  const report = join(data, 'diagnostic-report.json');
+  // Run the actual event pump. AX performPress alone misses native modal click routing bugs.
+  const ui = spawn(executable, ['--reliability-smoke', report, '--with-chromium'], {stdio: 'inherit', detached: true});
+  const stopUI = () => {if (ui.pid) {try {process.kill(-ui.pid, 'SIGKILL');} catch {ui.kill('SIGKILL');}}};
+  const uiTimeout = setTimeout(stopUI, 30000);
+  try {const [code] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: ${code}`);}
+  finally {clearTimeout(uiTimeout); stopUI();}
+  const diagnostic = JSON.parse(await readFile(report, 'utf8'));
+  if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
   await rm(join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
   let missingStatus, missingMessage;
   try {execFileSync(executable, ['--check-bundled-resources'], {timeout: 15000, stdio: 'pipe'});}

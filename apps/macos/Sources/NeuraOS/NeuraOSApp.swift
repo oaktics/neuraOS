@@ -9,7 +9,12 @@ import ChromiumBridge
         if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
             exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--reliability-smoke"), CommandLine.arguments.count > index + 1 {
+            ReliabilitySmoke.run(report: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+            return
+        }
         if !CommandLine.arguments.contains("--check-bundled-resources") {
+            Diagnostics.shared.start()
             if let error = NCInitializeChromium() {NSLog("%@", error)}
         }
         NeuraOSApp.main()
@@ -18,8 +23,9 @@ import ChromiumBridge
 
 struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
     @StateObject private var updater = AppUpdater()
+    @Environment(\.openWindow) private var openWindow
     init() {
         // Exercise the actual packaged executable without opening a window or
         // starting the daemon. Release smoke checks run this after relocation.
@@ -32,14 +38,18 @@ struct NeuraOSApp: App {
         }
     }
     var body: some Scene {
+        // The first scene is opened on launch. Keep Settings after the main window.
         Window("neuraOS", id: "main") {
-            RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
+            RootView().environment(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
                 .task {await updater.bootstrap()}
         }
         .defaultSize(width: 1380, height: 880)
         .windowStyle(.hiddenTitleBar)
         .commands {
+            CommandGroup(replacing: .help) {
+                Button("今おかしかった：診断情報を保存…") {DiagnosticReport.save()}
+            }
             CommandGroup(after: .appInfo) {
                 Button("アップデートを確認…") {updater.check()}.disabled(updater.busy)
             }
@@ -52,18 +62,20 @@ struct NeuraOSApp: App {
             WorkspaceCommands(model: model)
             AgentNotificationCommands()
             CommandMenu("表示") {
+                Button("メイン画面を開く") {openWindow(id: "main")}
                 Button("前のWorkspace") {if let id = model.sidebarSpaces.adjacent(-1) {model.switchSpace(id)}}.keyboardShortcut(.leftArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(-1) == nil)
                 Button("次のWorkspace") {if let id = model.sidebarSpaces.adjacent(1) {model.switchSpace(id)}}.keyboardShortcut(.rightArrow, modifiers: [.command, .option]).disabled(model.sidebarSpaces.adjacent(1) == nil)
                 Button(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く") {model.showSidebar.toggle()}.keyboardShortcut("s", modifiers: [.command, .control])
                 Button(model.showInspector ? "右サイドバーを閉じる" : "右サイドバーを開く") {model.showInspector.toggle()}.keyboardShortcut("\\", modifiers: [.command, .option]).disabled(model.selected == nil)
             }
         }
+        Settings {AgentSleepSettings(controller: model.agentSleep)}
     }
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)}
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {false}
-    func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush()}
+    func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush(); Diagnostics.shared.stop()}
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {sender.windows.first?.makeKeyAndOrderFront(nil)}; return true
     }
@@ -74,8 +86,9 @@ enum Palette {
     static let line = Color.primary.opacity(0.08)
 }
 struct RootView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     var body: some View {
+        @Bindable var model = model
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Button {model.showSidebar.toggle()} label: {
@@ -89,9 +102,17 @@ struct RootView: View {
                 .help(model.showSidebar ? "左サイドバーを閉じる（⌃⌘S）" : "左サイドバーを開く（⌃⌘S）")
                 .accessibilityLabel(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く")
                 .padding(.leading, 72)
-                Text("neuraOS").font(.system(size: 13, weight: .semibold))
+                Text(model.state.projects.first(where: {$0.id == model.selected?.projectId})?.name ?? "neuraOS")
+                    .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 if let selected = model.selected {Text("/").foregroundStyle(.quaternary); Text(selected.name).foregroundStyle(.secondary).lineLimit(1)}
                 Spacer()
+                if !model.pendingActions.isEmpty {
+                    TimelineView(.periodic(from: .now, by: 1)) {context in
+                        Text(model.pendingActions.keys.sorted().map {key in "\(model.pendingActions[key] ?? "")（\(Int(max(0, context.date.timeIntervalSince(model.actionStarted[key] ?? context.date))))秒）"}.joined(separator: "・")).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    ProgressView().controlSize(.small)
+                }
+                Button {DiagnosticReport.save()} label: {Image(systemName: "ladybug")}.help("今おかしかった：診断情報を保存").accessibilityLabel("診断情報を保存")
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
                 if model.selected?.hasFolder == true {
@@ -122,8 +143,13 @@ struct RootView: View {
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Rectangle().fill(Palette.line).frame(height: 1)
-            ProviderUsageFooter()
+            if model.selected == nil {
+                Rectangle().fill(Palette.line).frame(height: 1)
+                HStack {
+                    Spacer(minLength: 0)
+                    ProviderUsageFooter()
+                }.padding(.horizontal, 12).frame(height: 28)
+            }
             if !model.connected {
                 HStack {Image(systemName: "network.slash"); Text("Daemonへ再接続しています。作業の状態は接続後に更新されます。"); Spacer(); Button("再接続") {Task {await model.refresh()}}}
                     .font(.system(size: 11)).padding(10).background(Color.orange.opacity(0.08))
@@ -145,10 +171,13 @@ struct RootView: View {
     }
 }
 struct Sidebar: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var collapsed: Set<String> = []
-    @State private var deleting: Workspace?
+    private var deleting: Workspace? {
+        get {model.pendingWorkspaceDeletion}
+        nonmutating set {model.pendingWorkspaceDeletion = newValue}
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var swipeTranslation: CGFloat = 0
     @State private var sidebarWidth: CGFloat = 260
@@ -170,7 +199,7 @@ struct Sidebar: View {
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
                 .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
             HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Menu {
-                Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.busy)
+                Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
                 Button("フォルダを開く…") {model.addProject()}
             } label: {Image(systemName: "plus").frame(width: 24, height: 24)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("プロジェクトを追加")}.padding(.horizontal, 10).padding(.bottom, 4)
             GeometryReader {geometry in
@@ -218,15 +247,21 @@ struct Sidebar: View {
             var transaction = Transaction(); transaction.disablesAnimations = true
             withTransaction(transaction) {swipeTranslation = 0; settling = false}
         }
-        .alert("worktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
+        .alert("変更を破棄してworktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
-            Button("削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace)}}
             if model.state.features?.contains("workspace.delete.discard") == true {
-                Button("変更・未追跡ファイルも含めて削除", role: .destructive) {deleting = nil; Task {await model.deleteWorkspace(workspace, discardChanges: true)}}
+                Button("変更・未追跡ファイルも含めて削除", role: .destructive) {deleting = nil; deleteWorkspace(workspace, discardChanges: true)}
             }
         } message: {workspace in
-            Text("「\(workspace.name)」のフォルダとターミナル履歴を削除し、サイドバーから取り除きます。ブランチは残ります。通常の削除は未コミットの変更や未追跡・無視対象ファイルがある場合に停止します。「変更・未追跡ファイルも含めて削除」は、それらと.env・node_modulesなども完全に削除し、元に戻せません。実行中のターミナルがある場合は先に停止してください。")
+            Text("「\(workspace.name)」には未コミットの変更、未追跡ファイル、または.envなどの無視対象ファイルがあります。削除すると元に戻せません。ターミナルとエージェントはまとめて終了します。ブランチは残ります。")
         }
+    }
+    private func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) {
+        guard !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) else {
+            model.error = "未保存の編集があります。保存または破棄してから削除してください。"
+            return
+        }
+        Task {await model.deleteWorkspace(workspace, discardChanges: discardChanges)}
     }
     private var pagerSpaces: [SidebarSpace] {
         let spaces = model.sidebarSpaces.spaces
@@ -255,7 +290,18 @@ struct Sidebar: View {
                             .contextMenu {
                                 if project.folderless == true {
                                     Button("フォルダを紐づける…") {model.attachFolder(to: project)}
-                                        .disabled(!model.connected || model.busy || !model.supportsFolderless)
+                                        .disabled(!model.connected || model.isBusy("project.attach.\(project.id)") || !model.supportsFolderless)
+                                }
+                                if project.supportsGit {
+                                    Menu("worktree作成時に自動起動") {
+                                        ForEach(["codex", "claude", "shell"], id: \.self) {provider in
+                                            Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",
+                                                   isOn: Binding(get: {project.worktreeStartup?.contains(provider) == true},
+                                                                 set: {enabled in Task {await model.setWorktreeStartup(project, provider: provider, enabled: enabled)}}))
+                                        }
+                                    }
+                                    .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
+                                    Divider()
                                 }
                                 Menu("Workspaceへ移動") {
                                     ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
@@ -270,17 +316,26 @@ struct Sidebar: View {
                                             Text(workspace.name).lineLimit(1)
                                             Spacer(minLength: 0)
                                             WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
-                                            WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspace.id}, connected: model.connected)
+                                            WorkspaceActivityStatus(workspaceId: workspace.id)
                                         }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
                                             .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                                     }.buttonStyle(.plain)
                                     .contextMenu {
+                                        if workspace.kind == "root" {
+                                            Button {
+                                                if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
+                                                    model.error = "未保存の編集があります。保存または破棄してから更新してください。"
+                                                } else {Task {await model.syncDefault(workspace)}}
+                                            } label: {
+                                                Label("リモートの最新に更新", systemImage: "arrow.down.circle")
+                                            }
+                                                .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
+                                                .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
+                                        }
                                         if workspace.kind == "worktree" {
-                                            Button("worktreeを削除…", role: .destructive) {
-                                                if DraftCache.shared.load(workspace.id).values.contains(where: { $0.dirty }) {
-                                                    model.error = "未保存の編集があります。ファイルを保存するか変更を破棄してから削除してください。"
-                                                } else {deleting = workspace}
-                                            }.disabled(model.busy || !model.connected || model.state.features?.contains("workspace.delete") != true)
+                                            Button("worktreeを削除", role: .destructive) {
+                                                deleteWorkspace(workspace)
+                                            }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                         }
                                     }
                                 }
@@ -290,7 +345,7 @@ struct Sidebar: View {
                     if projects.isEmpty {
                         VStack(spacing: 10) {
                             Text("プロジェクトを作成して始める").font(.system(size: 12)).foregroundStyle(.secondary)
-                            Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.busy)
+                            Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
                             Button("フォルダを開く…") {model.addProject()}
                         }.padding(.vertical, 24)
                     }
@@ -329,7 +384,7 @@ struct Sidebar: View {
     }
 }
 struct WelcomeView: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     var body: some View {
         VStack(spacing: 18) {
             Image(systemName: "square.stack.3d.up").font(.system(size: 36, weight: .ultraLight)).foregroundStyle(.secondary)
@@ -337,33 +392,36 @@ struct WelcomeView: View {
             Text("Codexへの相談も、ブラウザでの調べものも。フォルダなしで始められます。")
                 .font(.system(size: 13)).foregroundStyle(.secondary)
             Button("新しいプロジェクト…") {model.showNewProject = true}.controlSize(.large).padding(.top, 6)
-                .disabled(!model.connected || !model.supportsFolderless || model.busy)
+                .disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
             Button("フォルダを開く…") {model.addProject()}
             Text("⌘ O").font(.system(size: 11)).foregroundStyle(.tertiary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 struct NewWorkspaceSheet: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     @Environment(\.dismiss) var dismiss
     @State private var projectId = ""
-    @State private var base = "HEAD"
+    @State private var base = ""
+    @State private var customBase = false
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("新しい作業").font(.system(size: 20, weight: .semibold))
             Text("専用のブランチとworktreeを作成します。サイドバーの作業名には、CodexやClaude Codeの会話名が自動で反映されます。").foregroundStyle(.secondary)
             Form {
                 Picker("プロジェクト", selection: $projectId) {ForEach(model.gitProjects) {Text($0.name).tag($0.id)}}
-                TextField("作成元", text: $base)
+                Text("originのデフォルトブランチを取得し、最新コードから作成します。").font(.caption).foregroundStyle(.secondary)
+                Toggle("作成元を指定", isOn: $customBase)
+                if customBase {TextField("ブランチ・コミット", text: $base)}
             }
-            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.busy {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: base)}}.keyboardShortcut(.defaultAction).disabled(model.busy || !model.connected || projectId.isEmpty || base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)}
+            HStack {Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction); Spacer(); if model.isBusy("project.create.\(projectId)") {ProgressView().controlSize(.small)}; Button("作成") {Task {await model.createWorkspace(projectId: projectId, base: customBase ? base.trimmingCharacters(in: .whitespacesAndNewlines) : nil)}}.keyboardShortcut(.defaultAction).disabled(model.isBusy("project.create.\(projectId)") || !model.connected || projectId.isEmpty || (customBase && base.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) || model.state.features?.contains("workspace.remote-default") != true)}
         }.padding(28).frame(width: 440)
         .onAppear {projectId = model.gitProjects.first(where: {$0.id == model.selected?.projectId})?.id ?? model.gitProjects.first?.id ?? ""}
     }
 }
 
 struct NewProjectSheet: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) var model
     @Environment(\.dismiss) var dismiss
     @State private var name = ""
     var body: some View {
@@ -372,13 +430,13 @@ struct NewProjectSheet: View {
             Text("会話やブラウザをまとめる場所です。フォルダは後から紐づけられます。").foregroundStyle(.secondary)
             TextField("プロジェクト名", text: $name)
             HStack {
-                Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction).disabled(model.busy)
+                Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction).disabled(model.isBusy("project.create"))
                 Spacer()
-                if model.busy {ProgressView().controlSize(.small)}
+                if model.isBusy("project.create") {ProgressView().controlSize(.small)}
                 Button("作成") {Task {await model.createProject(name: name.trimmingCharacters(in: .whitespacesAndNewlines))}}
                     .keyboardShortcut(.defaultAction)
-                    .disabled(model.busy || !model.connected || !model.supportsFolderless || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.count > 80)
+                    .disabled(model.isBusy("project.create") || !model.connected || !model.supportsFolderless || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.count > 80)
             }
-        }.padding(28).frame(width: 420).interactiveDismissDisabled(model.busy)
+        }.padding(28).frame(width: 420).interactiveDismissDisabled(model.isBusy("project.create"))
     }
 }

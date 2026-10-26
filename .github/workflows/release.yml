@@ -13,8 +13,30 @@ concurrency:
   # Older pending runs may be replaced even when cancellation is false.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  build:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      required: ${{ steps.changes.outputs.required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag=$(gh release list --limit 100 --json tagName,isDraft --jq '[.[] | select(.isDraft == false) | select(.tagName | test("^native-[0-9]+$"))] | sort_by(.tagName | ltrimstr("native-") | tonumber) | last | .tagName // empty')
+            if [ -n "$tag" ]; then
+              CI_RELEASE_BASE=$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha)
+              export CI_RELEASE_BASE
+            fi
+          fi
+          node scripts/ci/changes.mjs --release
+  native-build:
+    needs: changes
+    if: needs.changes.outputs.required == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +59,12 @@ jobs:
       - run: node scripts/native/chromium/smoke.mjs
       - run: node scripts/native/release/package.mjs
       - run: node scripts/native/release/smoke.mjs
+      - name: Retain crash symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuraOS-symbols-arm64
+          path: apps/macos/dist/neuraOS.app.dSYM
+          retention-days: 90
       - name: Archive
         run: |
           test "$(node -p process.arch)" = 'arm64'
@@ -46,9 +74,28 @@ jobs:
           name: neuraOS-arm64
           path: neuraOS-darwin-arm64.zip
           retention-days: 7
+  build:
+    if: always()
+    needs: [changes, native-build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful release validation or documentation-only changes
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          REQUIRED: ${{ needs.changes.outputs.required }}
+          BUILD_RESULT: ${{ needs.native-build.result }}
+          ALLOWED_REF: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
+        run: |
+          test "$CHANGES_RESULT" = success
+          test "$REQUIRED" = true || test "$REQUIRED" = false
+          if [ "$REQUIRED" = true ] && [ "$ALLOWED_REF" = true ]; then
+            test "$BUILD_RESULT" = success
+          else
+            test "$BUILD_RESULT" = skipped
+          fi
   publish:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.native-build.result == 'success'
+    needs: [build, native-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write

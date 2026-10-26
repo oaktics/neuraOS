@@ -16,6 +16,10 @@ await mkdir(join(output,'Contents/Resources'),{recursive:true});
 await copyFile(join(native,'Assets/AppIcon.icns'),join(output,'Contents/Resources/AppIcon.icns'));
 await rm(join(output,'Contents/Resources/Terminal'),{recursive:true,force:true});
 await copyFile(join(native,'.build/release/NeuraOS'),join(output,'Contents/MacOS/NeuraOS'));
+await copyFile(join(native,'.build/release/NeuraSleepHelper'),join(output,'Contents/MacOS/NeuraSleepHelper'));
+// Preserve symbols outside the app so crash UUID/offsets can be decoded per build.
+await rm(`${output}.dSYM`,{recursive:true,force:true});
+execFileSync('dsymutil',[join(output,'Contents/MacOS/NeuraOS'),'-o',`${output}.dSYM`],{stdio:'inherit'});
 const resourceRoot=join(native,'.build/release');
 for(const file of await readdir(resourceRoot))if(file.endsWith('.bundle'))await cp(join(resourceRoot,file),join(output,'Contents/Resources',file),{recursive:true});
 await mkdir(join(output,'Contents/Resources/Licenses'),{recursive:true});

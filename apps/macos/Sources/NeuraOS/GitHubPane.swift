@@ -32,7 +32,7 @@ struct GitHubResult: Decodable {let ok: Bool; let message: String; let url: Stri
 func methodLabel(_ method: String) -> String {method == "squash" ? "Squash" : method == "rebase" ? "Rebase" : "Merge commit"}
 
 struct GitHubSidebar: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let visible: Bool
     let openTerminal: () -> Void
@@ -56,7 +56,7 @@ struct GitHubSidebar: View {
 }
 
 struct GitHubPane: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(AppModel.self) private var model
     let workspace: Workspace
     let visible: Bool
     let openTerminal: () -> Void
@@ -92,7 +92,7 @@ struct GitHubPane: View {
                             Label("GitHub の状態を確認してください", systemImage: "exclamationmark.circle").fontWeight(.medium)
                             Text(error).textSelection(.enabled)
                             if snapshot != nil {Text("表示中の情報は前回の取得結果です。更新が成功するまで操作できません。").foregroundStyle(.secondary)}
-                            Button("ターミナルを開く", action: openTerminal).disabled(model.busy)
+                            Button("ターミナルを開く", action: openTerminal).disabled(model.isBusy(workspace.id))
                             Text("初回設定: brew install gh → gh auth login --hostname github.com → gh auth setup-git").font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
                         }.foregroundStyle(.orange)
                     }
