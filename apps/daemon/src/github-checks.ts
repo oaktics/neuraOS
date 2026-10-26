@@ -44,6 +44,7 @@ export class ChecksCache {
     for(const [old,value] of this.entries){if(this.entries.size<=256)break;if(value.expires!==Infinity)this.entries.delete(old);}
     return entry.result;
   }
+  invalidate(prefix:string){for(const key of this.entries.keys())if(key.startsWith(prefix))this.entries.delete(key);}
   private async limited(fetch:()=>Promise<CISnapshot>):Promise<CISnapshot>{
     if(this.active>=4)await new Promise<void>(resolve=>this.waiting.push(resolve));
     else this.active++;

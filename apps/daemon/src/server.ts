@@ -183,7 +183,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/workspaces/:id/file',async req=>work.file(workspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
   const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
-  app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path));
+  app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path,(req.query as {refresh?:string}).refresh==='true'));
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
   app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
   return {app,store,token};

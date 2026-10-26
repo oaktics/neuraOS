@@ -1,3 +1,4 @@
+import {GitHubRefreshCache} from './github-refresh.ts';
 import {execFile} from 'node:child_process';
 import {access,realpath} from 'node:fs/promises';
 import {constants} from 'node:fs';
@@ -46,6 +47,7 @@ export const runGitHub:Runner=async(cwd,args)=>{
 
 export class GitHub {
   private checksCache=new ChecksCache();
+  private statusCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchStatus']>>>(()=>60000);
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
   private async api(root:string,endpoint:string,args:string[]=[]){return JSON.parse(await this.run(root,['api','--hostname','github.com',endpoint,...args])) as unknown;}
   private async pages(root:string,endpoint:string){return z.array(z.array(z.unknown())).parse(await this.api(root,endpoint,['--paginate','--slurp'])).flat();}
@@ -90,8 +92,15 @@ export class GitHub {
     catch{return {state:'unavailable',checks:[],fetchedAt:new Date().toISOString()};}
     return result;
   }
-  async status(root:string){
+  async status(root:string,force=false){
     const context=await this.context(root);
+    const key=JSON.stringify([context.repository,context.branch,context.head]);
+    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context),force);
+    const current=await this.context(root);
+    if(JSON.stringify(current)!==JSON.stringify(context))throw new Fault('github_stale','ブランチまたはコミットが変更されました。更新してください。',409);
+    return result;
+  }
+  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>){
     const [repo,pulls]=await Promise.all([this.repository(root,context.repository),this.pulls(root,context)]);
     const selected=pulls.find(pr=>pr.state==='open')??pulls[0];
     const result={...context,defaultBranch:repo.default_branch,mergeMethods:[...(repo.allow_squash_merge?['squash']:[]),...(repo.allow_merge_commit?['merge']:[]),...(repo.allow_rebase_merge?['rebase']:[])],fetchedAt:new Date().toISOString()};
@@ -116,6 +125,14 @@ export class GitHub {
     return context;
   }
   async mutate(root:string,c:Mutation){
+    // Also invalidate uncertain write outcomes, and detach pre-write in-flight reads.
+    const prefix=JSON.stringify([c.repository]).slice(0,-1)+',';
+    this.statusCache.invalidate(prefix);
+    this.checksCache.invalidate(c.repository+':');
+    try{return await this.performMutation(root,c);}
+    finally{this.statusCache.invalidate(prefix);this.checksCache.invalidate(c.repository+':');}
+  }
+  private async performMutation(root:string,c:Mutation){
     const context=await this.target(root,c);
     if(c.type==='github.push'){
       // An explicit refspec and URL avoid push.default, pushurl, mirror and upstream surprises.
