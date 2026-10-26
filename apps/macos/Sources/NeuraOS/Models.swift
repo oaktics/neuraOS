@@ -88,6 +88,7 @@ final class DaemonClient {
 
 @MainActor final class AppModel: ObservableObject {
     let api = DaemonClient()
+    let agentSleep = AgentSleepController()
     let workspaceUpdated = PassthroughSubject<String, Never>()
     @Published var state = Snapshot()
     @Published var selectedId: String? = UserDefaults.standard.string(forKey: "selectedWorkspace")
@@ -180,6 +181,7 @@ final class DaemonClient {
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
             await agentNotifications?.receive(state, api: api)
         } catch {if connected {Diagnostics.shared.record("daemon.disconnected")}; connected = false}
+        agentSleep.update(terminals: state.terminals, connected: connected)
     }
     func select(_ id: String?) {
         Diagnostics.shared.record("action.select-workspace")

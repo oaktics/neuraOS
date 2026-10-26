@@ -37,6 +37,7 @@ struct NeuraOSApp: App {
         }
     }
     var body: some Scene {
+        Settings {AgentSleepSettings(controller: model.agentSleep)}
         Window("neuraOS", id: "main") {
             RootView().environmentObject(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
