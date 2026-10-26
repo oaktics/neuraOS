@@ -17,6 +17,7 @@ test('native client decodes legacy v1 and gates GitHub on advertised features',{
       resolve('apps/macos/Sources/NeuraOS/Models.swift'),
       resolve('apps/macos/Sources/NeuraOS/Diagnostics.swift'),
       resolve('apps/macos/Sources/NeuraOS/AgentNotifications.swift'),
+      resolve('apps/macos/Sources/NeuraOS/AgentSleep.swift'),
       resolve('apps/macos/Sources/NeuraOS/SidebarSpaces.swift'),
       resolve('tests/native/fixtures/daemon-capabilities.swift'),'-o',binary],{timeout:180000});
     const {stdout}=await exec(binary,[],{timeout:10000});
