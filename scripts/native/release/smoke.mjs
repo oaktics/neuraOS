@@ -41,8 +41,15 @@ try {
   for (const [key, value] of [['CFBundleIdentifier', 'com.neuraos.reliability-smoke.' + process.pid], ['NeuraDataDirectory', data], ['NeuraEndpoint', 'http://127.0.0.1:1']]) {
     execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist]);
   }
+  await cp(join(original, 'Frameworks'), join(app, 'Contents/Frameworks'), {recursive: true, verbatimSymlinks: true});
+  execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
   const report = join(data, 'diagnostic-report.json');
-  execFileSync(executable, ['--reliability-smoke', report], {stdio: 'inherit', timeout: 20000});
+  // Run the actual event pump. AX performPress alone misses native modal click routing bugs.
+  const ui = spawn(executable, ['--reliability-smoke', report, '--with-chromium'], {stdio: 'inherit', detached: true});
+  const stopUI = () => {if (ui.pid) {try {process.kill(-ui.pid, 'SIGKILL');} catch {ui.kill('SIGKILL');}}};
+  const uiTimeout = setTimeout(stopUI, 30000);
+  try {const [code] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: ${code}`);}
+  finally {clearTimeout(uiTimeout); stopUI();}
   const diagnostic = JSON.parse(await readFile(report, 'utf8'));
   if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
   await rm(join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});

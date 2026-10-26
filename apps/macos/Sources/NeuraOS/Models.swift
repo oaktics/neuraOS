@@ -109,6 +109,7 @@ final class DaemonClient {
         return true
     }
     func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
+    @Published var pendingWorkspaceDeletion: Workspace?
     @Published var showNewWorkspace = false
     @Published var showNewSpace = false
     @Published var sidebarSpaces: SidebarSpaces = {
