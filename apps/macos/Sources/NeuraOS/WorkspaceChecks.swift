@@ -24,41 +24,46 @@ struct WorkspaceChecksSnapshot: Decodable {
         if let head {lines.append("コミット: \(head.prefix(7))")}
         for check in checks {lines.append("\(check.name): \(check.state)")}
         if let message {lines.append(message)}
-        lines.append("表示中は60秒ごとに更新")
+        lines.append("表示中は選択状態に応じて自動更新")
         return lines.joined(separator: "\n")
     }
 }
 
 struct WorkspaceChecksIndicator: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.scenePhase) private var scenePhase
     let workspace: Workspace
     var visible = true
     @State private var snapshot: WorkspaceChecksSnapshot?
     @State private var failed = false
-    private var enabled: Bool {visible && workspace.supportsGit && model.connected && model.state.features?.contains("github.checks") == true}
+    @State private var generation = 0
+    private var selected: Bool {model.selectedId == workspace.id}
+    private var enabled: Bool {visible && scenePhase == .active && workspace.supportsGit && model.connected && model.state.features?.contains("github.checks") == true}
     private var showsBadge: Bool {failed || snapshot.map {!["none", "unpublished", "unsupported"].contains($0.state)} == true}
-    private var state: String {(!enabled || failed) ? "unavailable" : snapshot?.state ?? "unknown"}
+    private var state: String {(!model.connected || failed) ? "unavailable" : snapshot?.state ?? "unknown"}
     var body: some View {
         Group {
             if showsBadge {
                 WorkspaceChecksBadge(state: state,
-                    help: (!enabled || failed) ? "CIを取得できません。接続を確認しています。" : snapshot?.help ?? "CI 状態不明",
-                    label: (!enabled || failed) ? "CI 取得不可" : snapshot?.label ?? "CI 状態不明")
+                    help: (!model.connected || failed) ? "CIを取得できません。接続を確認しています。" : snapshot?.help ?? "CI 状態不明",
+                    label: (!model.connected || failed) ? "CI 取得不可" : snapshot?.label ?? "CI 状態不明")
             }
         }
-        .task(id: "\(workspace.id):\(enabled)") {
+        .onReceive(model.githubUpdated) {id in if id == workspace.id {generation += 1}}
+        .task(id: "\(workspace.id):\(enabled):\(selected):\(generation)") {
             guard enabled else {return}
-            snapshot = nil; failed = false
+            var failures = 0
             while !Task.isCancelled {
                 do {
                     let next: WorkspaceChecksSnapshot = try await model.api.get("v1/workspaces/\(workspace.id)/checks")
                     guard !Task.isCancelled else {return}
                     snapshot = next; failed = false
+                    failures = next.state == "unavailable" ? failures + 1 : 0
                 } catch {
                     guard !Task.isCancelled else {return}
-                    failed = true
+                    failed = true; failures += 1
                 }
-                do {try await Task.sleep(for: .seconds(60))} catch {return}
+                do {try await Task.sleep(for: .seconds(failures > 0 ? GitHubRefreshPolicy.retryDelay(failures: failures) : selected ? 60 : 120))} catch {return}
             }
         }
     }

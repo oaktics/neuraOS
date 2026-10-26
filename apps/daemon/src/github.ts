@@ -1,4 +1,5 @@
 import {randomUUID} from 'node:crypto';
+import {GitHubRefreshCache} from './github-refresh.ts';
 import {execFile} from 'node:child_process';
 import {access,realpath} from 'node:fs/promises';
 import {constants} from 'node:fs';
@@ -63,14 +64,15 @@ export function pullRequestNumber(input:string,repository:string){
 
 export class GitHub {
   private checksCache=new ChecksCache();
+  private statusCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchStatus']>>>(()=>60000);
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
   async pullRequests(root:string,query=''){
     const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
     if(/^#?\d+$/.test(query)||/^https?:\/\//i.test(query)){
       const number=pullRequestNumber(query,repository);
-      return {pullRequests:[sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',repository,'--json',sourceFields])))]};
+      return {pullRequests:[sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json',sourceFields])))]};
     }
-    const args=['pr','list','--repo',repository,'--state','all','--limit','50','--json',sourceFields];
+    const args=['pr','list','--repo',`github.com/${repository}`,'--state','all','--limit','50','--json',sourceFields];
     if(query)args.push('--search',query);
     return {pullRequests:z.array(sourcePullSchema).parse(JSON.parse(await this.run(root,args)))};
   }
@@ -78,7 +80,7 @@ export class GitHub {
     const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
     const number=pullRequestNumber(input,repository);
     // Validate access/existence for all PR states; never check out the user's main folder.
-    sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',repository,'--json',sourceFields])));
+    sourcePullSchema.parse(JSON.parse(await this.run(root,['pr','view',String(number),'--repo',`github.com/${repository}`,'--json',sourceFields])));
     const ref=`refs/neura/pr-fetch/${randomUUID()}`;
     try {
       await this.gitRun(root,['fetch','--no-tags','origin',`+refs/pull/${number}/head:${ref}`]);
@@ -129,8 +131,15 @@ export class GitHub {
     catch{return {state:'unavailable',checks:[],fetchedAt:new Date().toISOString()};}
     return result;
   }
-  async status(root:string){
+  async status(root:string,force=false){
     const context=await this.context(root);
+    const key=JSON.stringify([context.repository,context.branch,context.head]);
+    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context),force);
+    const current=await this.context(root);
+    if(JSON.stringify(current)!==JSON.stringify(context))throw new Fault('github_stale','ブランチまたはコミットが変更されました。更新してください。',409);
+    return result;
+  }
+  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>){
     const [repo,pulls]=await Promise.all([this.repository(root,context.repository),this.pulls(root,context)]);
     const selected=pulls.find(pr=>pr.state==='open')??pulls[0];
     const result={...context,defaultBranch:repo.default_branch,mergeMethods:[...(repo.allow_squash_merge?['squash']:[]),...(repo.allow_merge_commit?['merge']:[]),...(repo.allow_rebase_merge?['rebase']:[])],fetchedAt:new Date().toISOString()};
@@ -155,6 +164,14 @@ export class GitHub {
     return context;
   }
   async mutate(root:string,c:Mutation){
+    // Also invalidate uncertain write outcomes, and detach pre-write in-flight reads.
+    const prefix=JSON.stringify([c.repository]).slice(0,-1)+',';
+    this.statusCache.invalidate(prefix);
+    this.checksCache.invalidate(c.repository+':');
+    try{return await this.performMutation(root,c);}
+    finally{this.statusCache.invalidate(prefix);this.checksCache.invalidate(c.repository+':');}
+  }
+  private async performMutation(root:string,c:Mutation){
     const context=await this.target(root,c);
     if(c.type==='github.push'){
       // An explicit refspec and URL avoid push.default, pushurl, mirror and upstream surprises.
