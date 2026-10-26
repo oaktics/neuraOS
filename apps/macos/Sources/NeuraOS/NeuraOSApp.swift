@@ -281,6 +281,17 @@ struct Sidebar: View {
                                 if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
                             }.padding(.horizontal, 12).padding(.vertical, 5)
                             .contextMenu {
+                                if project.supportsGit {
+                                    Menu("worktree作成時に自動起動") {
+                                        ForEach(["codex", "claude", "shell"], id: \.self) {provider in
+                                            Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",
+                                                   isOn: Binding(get: {project.worktreeStartup?.contains(provider) == true},
+                                                                 set: {enabled in Task {await model.setWorktreeStartup(project, provider: provider, enabled: enabled)}}))
+                                        }
+                                    }
+                                    .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
+                                    Divider()
+                                }
                                 Menu("Workspaceへ移動") {
                                     ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
                                         Button(space.name) {model.moveProject(project.id, to: space.id)}
