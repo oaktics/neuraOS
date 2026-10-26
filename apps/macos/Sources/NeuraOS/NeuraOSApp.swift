@@ -100,7 +100,8 @@ struct RootView: View {
                 .help(model.showSidebar ? "左サイドバーを閉じる（⌃⌘S）" : "左サイドバーを開く（⌃⌘S）")
                 .accessibilityLabel(model.showSidebar ? "左サイドバーを閉じる" : "左サイドバーを開く")
                 .padding(.leading, 72)
-                Text("neuraOS").font(.system(size: 13, weight: .semibold))
+                Text(model.state.projects.first(where: {$0.id == model.selected?.projectId})?.name ?? "neuraOS")
+                    .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 if let selected = model.selected {Text("/").foregroundStyle(.quaternary); Text(selected.name).foregroundStyle(.secondary).lineLimit(1)}
                 Spacer()
                 if !model.pendingActions.isEmpty {
