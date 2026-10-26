@@ -1,4 +1,4 @@
-import {mkdtemp, rm, mkdir, cp, readFile} from 'node:fs/promises';
+import {mkdtemp, rm, mkdir, cp, readFile, writeFile, access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {spawn, execFileSync} from 'node:child_process';
@@ -37,6 +37,22 @@ try {
       sleepConfig.MachServices?.['app.neuraos.native.sleep'] !== true ||
       sleepConfig.KeepAlive?.SuccessfulExit !== false) throw new Error('Invalid packaged sleep service');
   const sleepExecutable = resolve(original, '..', sleepConfig.BundleProgram);
+  // Prove the reported injection path is blocked on the actual packaged client.
+  // The unhardened control must load the same test dylib, avoiding a vacuous pass.
+  const probeSource = join(data, 'injection.c'), controlSource = join(data, 'control.c');
+  const probe = join(data, 'injection.dylib'), control = join(data, 'control'), marker = join(data, 'injected');
+  await writeFile(probeSource, '#include <stdio.h>\n#include <stdlib.h>\n__attribute__((constructor)) static void probe(void) {const char *p=getenv("NEURA_INJECTION_MARKER");if(p){FILE*f=fopen(p,"w");if(f){fputs("injected",f);fclose(f);}}}\n');
+  await writeFile(controlSource, 'int main(void) {return 0;}\n');
+  execFileSync('xcrun', ['clang', '-dynamiclib', probeSource, '-o', probe]);
+  execFileSync('xcrun', ['clang', controlSource, '-o', control]);
+  const injectionEnv = {...process.env, DYLD_INSERT_LIBRARIES: probe, NEURA_INJECTION_MARKER: marker};
+  execFileSync(control, [], {env: injectionEnv, timeout: 5000});
+  await access(marker);
+  await rm(marker);
+  execFileSync(join(original, 'MacOS/NeuraOS'), ['--check-bundled-resources'], {env: injectionEnv, timeout: 15000});
+  try {await access(marker); throw new Error('Packaged client allowed DYLD injection');}
+  catch (error) {if (error.code !== 'ENOENT') throw error;}
+
   execFileSync('/usr/bin/codesign', ['--verify', '--strict', sleepExecutable]);
   // Verify the packaged service fails closed without root. Never register it or
   // change system power settings in CI/smoke tests.

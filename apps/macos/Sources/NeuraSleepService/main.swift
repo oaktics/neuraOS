@@ -105,7 +105,7 @@ do {
     // Recover before signature validation so an interrupted app update cannot
     // prevent restoration of a previous session's power setting.
     let power = try PowerControl()
-    let service = Service(power: power, clientRequirement: try SleepService.requirement(for: app))
+    let service = Service(power: power, clientRequirement: try SleepService.requirement(for: app, requireHardenedRuntime: true))
     let listener = NSXPCListener(machServiceName: SleepService.name)
     listener.delegate = service
     listener.setConnectionCodeSigningRequirement(service.clientRequirement)

@@ -85,7 +85,7 @@ enum AgentSleepPolicy {
                 return
             }
             let helper = Bundle.main.executableURL!.deletingLastPathComponent().appendingPathComponent("NeuraSleepService")
-            let requirement = try SleepService.requirement(for: helper)
+            let requirement = try SleepService.requirement(for: helper, requireHardenedRuntime: true)
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("neura-sleep-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             lease = directory.appendingPathComponent("lease")
