@@ -22,7 +22,18 @@ jobs:
         with:
           fetch-depth: 0
       - id: changes
-        run: node scripts/ci/changes.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag=$(gh release list --limit 100 --json tagName,isDraft --jq '[.[] | select(.isDraft == false) | select(.tagName | test("^native-[0-9]+$"))] | sort_by(.tagName | ltrimstr("native-") | tonumber) | last | .tagName // empty')
+            if [ -n "$tag" ]; then
+              CI_RELEASE_BASE=$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha)
+              export CI_RELEASE_BASE
+            fi
+          fi
+          node scripts/ci/changes.mjs --release
   native-build:
     needs: changes
     if: needs.changes.outputs.required == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')

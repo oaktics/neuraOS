@@ -4,7 +4,7 @@ import {mkdtempSync, rmSync, writeFileSync, mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {docsOnly, needsChecks} from '../../scripts/ci/changes.mjs';
+import {docsOnly, needsChecks, needsReleaseChecks} from '../../scripts/ci/changes.mjs';
 
 test('only known documentation paths bypass checks', () => {
   assert.equal(docsOnly(['README.md', 'docs/design.svg', '.github/pull_request_template.md']), true);
@@ -42,4 +42,16 @@ test('PR comparison excludes base-only changes and code moved into docs still ru
     git(['commit', '-m', 'move code into docs']);
     assert.equal(needsChecks('push', {before: base, after: git(['rev-parse', 'HEAD']).trim()}, git), true);
   } finally { rmSync(dir, {recursive: true, force: true}); }
+});
+
+test('release docs pushes retain code changes since the last published commit', () => {
+  const published = '1'.repeat(40), before = '2'.repeat(40), after = '3'.repeat(40);
+  const event = {before, after};
+  const git = args => {
+    assert.deepEqual(args.slice(4, 6), [published, after]);
+    return 'app.js\0README.md\0';
+  };
+  assert.equal(needsReleaseChecks('push', event, published, git), true);
+  assert.equal(needsReleaseChecks('push', event, published, () => 'README.md\0'), false);
+  assert.equal(needsReleaseChecks('push', event, undefined, () => { throw new Error('No release base'); }), true);
 });

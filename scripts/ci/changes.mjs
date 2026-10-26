@@ -23,9 +23,19 @@ export function needsChecks(eventName, event, git = args => execFileSync('git', 
   return !docsOnly(paths);
 }
 
+// Release concurrency may replace a pending code push with a docs push.
+// Compare against the last published version, never just the previous push.
+export function needsReleaseChecks(eventName, event, publishedSha, git) {
+  if (eventName !== 'push') return needsChecks(eventName, event, git);
+  if (!publishedSha) return true;
+  return needsChecks('push', {...event, before: publishedSha}, git);
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
-  const required = needsChecks(process.env.GITHUB_EVENT_NAME, event);
+  const required = process.argv.includes('--release')
+    ? needsReleaseChecks(process.env.GITHUB_EVENT_NAME, event, process.env.CI_RELEASE_BASE)
+    : needsChecks(process.env.GITHUB_EVENT_NAME, event);
   appendFileSync(process.env.GITHUB_OUTPUT, `required=${required}\n`);
   console.log(required ? 'Code checks required' : 'Documentation only: native checks omitted');
 }
