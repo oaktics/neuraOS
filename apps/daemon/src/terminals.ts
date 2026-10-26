@@ -87,14 +87,34 @@ export class Terminals {
   stop(id:string){const proc=this.processes.get(id);if(proc){this.kill(proc,'SIGHUP');const timer=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);timer.unref();}return {ok:true};}
   async stopWorkspace(workspaceId:string){
     const ids=this.store.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===workspaceId&&t.status==='running').map(t=>t.id);
-    await Promise.all(ids.map(id=>new Promise<void>((resolve,reject)=>{
+    await Promise.all(ids.map(async id=>{
       const proc=this.processes.get(id);
-      if(!proc){reject(new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409));return;}
-      const escalation=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);
-      const timeout=setTimeout(()=>{subscription.dispose();reject(new Fault('terminal_stop_timeout','ターミナルの終了を確認できません。もう一度削除してください。',409));},5000);
-      const subscription=proc.onExit(()=>{clearTimeout(escalation);clearTimeout(timeout);subscription.dispose();resolve();});
-      this.kill(proc,'SIGHUP');
-    })));
+      if(!proc)throw new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409);
+      // node-pty resets proc.pid to -1 on exit; retain the original process group.
+      const groupId=proc.pid;
+      if(groupId<=0)throw new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409);
+      const signalGroup=(signal:'SIGHUP'|'SIGKILL')=>{
+        if(process.platform==='win32'){if(this.processes.has(id))proc.kill();return;}
+        try{process.kill(-groupId,signal);}catch(error){if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;}
+      };
+      const groupAlive=()=>{
+        if(process.platform==='win32')return this.processes.has(id);
+        try{process.kill(-groupId,0);return true;}catch(error){
+          if((error as NodeJS.ErrnoException).code==='ESRCH')return false;
+          throw error;
+        }
+      };
+      signalGroup('SIGHUP');
+      const started=Date.now();let escalated=false;
+      // PTY exit only proves the leader exited. Children may still hold the group.
+      while(groupAlive()||this.processes.has(id)){
+        const elapsed=Date.now()-started;
+        if(!escalated&&elapsed>=1500){signalGroup('SIGKILL');escalated=true;}
+        if(elapsed>=5000)throw new Fault('terminal_stop_timeout','ターミナルの終了を確認できません。もう一度削除してください。',409);
+        await new Promise(resolve=>setTimeout(resolve,25));
+      }
+    }));
   }
+
   async shutdown(){this.closing=true;const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
 }
