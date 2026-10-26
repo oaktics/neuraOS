@@ -40,16 +40,44 @@ final class AgentSleepTests: XCTestCase {
         defer {try? FileManager.default.removeItem(at: directory)}
         let file = directory.appendingPathComponent("lease"), link = directory.appendingPathComponent("link")
         let token = UUID().uuidString
-        try "\(token)\nwork\n".write(to: file, atomically: true, encoding: .utf8)
+        let heartbeat = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+        try AgentSleepController.leaseValue(token: token, state: "work", awakeNanoseconds: heartbeat).write(to: file, atomically: true, encoding: .utf8)
         XCTAssertEqual(SleepLease.read(path: file.path, owner: getuid(), token: token), "work")
         XCTAssertNil(SleepLease.read(path: file.path, owner: getuid() + 1, token: token))
         XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: "other"))
-        XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: token, now: Date().addingTimeInterval(16)))
+        XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: token, awakeNanoseconds: heartbeat + 15_000_000_000))
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
         XCTAssertNil(SleepLease.read(path: link.path, owner: getuid(), token: token))
         try "\(token)\nwork; touch /tmp/invalid\n".write(to: file, atomically: true, encoding: .utf8)
         XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: token))
         XCTAssertNil(SleepLease.read(path: directory.path, owner: getuid(), token: token))
+    }
+    func testLeaseSurvivesSystemSleepButExpiresWhenAppStopsWhileAwake() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer {try? FileManager.default.removeItem(at: directory)}
+        let file = directory.appendingPathComponent("lease"), token = UUID().uuidString
+        let heartbeat: UInt64 = 100_000_000_000
+        for state in ["work", "done", "unknown"] {
+            try AgentSleepController.leaseValue(token: token, state: state, awakeNanoseconds: heartbeat)
+                .write(to: file, atomically: true, encoding: .utf8)
+            // An hour of system sleep ages mtime but not CLOCK_UPTIME_RAW.
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-3600)], ofItemAtPath: file.path)
+            XCTAssertEqual(SleepLease.read(path: file.path, owner: getuid(), token: token,
+                                          awakeNanoseconds: heartbeat + 2_000_000_000), state)
+            XCTAssertEqual(SleepLease.read(path: file.path, owner: getuid(), token: token,
+                                          awakeNanoseconds: heartbeat + 14_999_999_999), state)
+            // No new heartbeat after waking still expires at 15 awake seconds.
+            XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: token,
+                                        awakeNanoseconds: heartbeat + 15_000_000_000))
+            XCTAssertNil(SleepLease.read(path: file.path, owner: getuid(), token: token,
+                                        awakeNanoseconds: heartbeat - 1))
+        }
+        // The next heartbeat renews protection without new authorization.
+        try AgentSleepController.leaseValue(token: token, state: "work", awakeNanoseconds: heartbeat + 20_000_000_000)
+            .write(to: file, atomically: true, encoding: .utf8)
+        XCTAssertEqual(SleepLease.read(path: file.path, owner: getuid(), token: token,
+                                      awakeNanoseconds: heartbeat + 21_000_000_000), "work")
     }
     @MainActor func testSupervisorQuotesUntrustedPathsAndRestoresOnExit() {
         XCTAssertEqual(AgentSleepController.quote("a'b"), "'a'\\''b'")

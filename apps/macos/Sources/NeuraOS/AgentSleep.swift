@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import Darwin
 
 /// Uses every terminal, including those in inactive workspaces. Waiting for a
 /// person is not autonomous work. Unknown/disconnected state never means done.
@@ -79,7 +80,7 @@ enum AgentSleepPolicy {
     private func heartbeat() {
         guard enabled, let lease else {return}
         let fresh = Date().timeIntervalSince(lastSnapshot) < 20
-        let value = "\(token)\n\(fresh && working ? "work" : fresh && complete ? "done" : "unknown")\n"
+        let value = Self.leaseValue(token: token, state: fresh && working ? "work" : fresh && complete ? "done" : "unknown")
         do {try value.write(to: lease, atomically: true, encoding: .utf8)}
         catch {disable(); status = "作業状態を書き込めないため解除しました。"; return}
         let file = URL(fileURLWithPath: "/var/run/neuraos-agent-sleep/status")
@@ -87,6 +88,10 @@ enum AgentSleepPolicy {
             starting = false
             status = String(text.dropFirst(token.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
         }
+    }
+    nonisolated static func leaseValue(token: String, state: String,
+                                      awakeNanoseconds: UInt64 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) -> String {
+        "\(token)\n\(state)\n\(awakeNanoseconds)\n"
     }
     nonisolated static func quote(_ value: String) -> String {"'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"}
     nonisolated static func supervisedCommand(helper: String, lease: String, uid: uid_t, token: String) -> String {
