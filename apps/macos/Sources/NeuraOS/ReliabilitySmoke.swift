@@ -21,19 +21,42 @@ import ChromiumBridge
         let model = AppModel(startPolling: false)
         model.showSidebar = true
         model.showInspector = false
-        let workspace = Workspace(id: "smoke-workspace", projectId: "smoke-project", name: "Smoke", path: report.deletingLastPathComponent().path, branch: "", kind: "folder")
+        let interactiveMenu = CommandLine.arguments.contains("--interactive-menu-smoke")
+        let workspace = Workspace(id: "smoke-workspace", projectId: "smoke-project", name: "Smoke", path: report.deletingLastPathComponent().path, branch: "", kind: interactiveMenu ? "worktree" : "folder")
         model.state.projects = [Project(id: workspace.projectId, name: "Smoke", path: workspace.path, isGit: false)]
         model.state.workspaces = [workspace]
-        let first = WorkspaceTab(kind: "shell", number: 1)
+        let first = WorkspaceTab(kind: interactiveMenu ? "browser" : "shell", number: 1)
         let second = WorkspaceTab(kind: "shell", number: 2)
         let storageKey = "workspaceTabs.\(workspace.id)"
         UserDefaults.standard.set(try? JSONEncoder().encode(WorkspaceTabState(tabs: [first, second], selectedId: first.id)), forKey: storageKey)
         model.select(workspace.id)
+        // Keep real observation updates running while native controls track clicks.
+        let polling = Timer(timeInterval: 0.05, repeats: true) {_ in
+            MainActor.assumeIsolated {
+                let tick = model.state.revision + 1
+                model.applySnapshot(Snapshot(revision: tick, features: model.state.features,
+                    projects: model.state.projects, workspaces: model.state.workspaces,
+                    terminals: [TerminalRecord(id: "polling-terminal", workspaceId: interactiveMenu ? workspace.id : "background",
+                        provider: "codex", status: "running", cols: 80 + tick % 2, rows: 24,
+                        activity: tick.isMultiple(of: 2) ? "working" : "waiting")]))
+            }
+        }
+        RunLoop.main.add(polling, forMode: .common)
+        RunLoop.main.add(polling, forMode: .modalPanel)
         let host = NSHostingView(rootView: RootView().environment(model))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
+        if interactiveMenu {
+            model.updateConnection(true)
+            model.state.features = ["workspace.delete"]
+            app.setActivationPolicy(.regular)
+            app.activate(ignoringOtherApps: true)
+            app.run()
+            return
+        }
         Task { @MainActor in
+            defer {polling.invalidate()}
             do {
                 try await Task.sleep(for: .milliseconds(500))
                 if CommandLine.arguments.contains("--with-chromium") {
@@ -53,7 +76,7 @@ import ChromiumBridge
                     browserWindow.orderOut(nil)
                     window.makeKeyAndOrderFront(nil)
                     model.state.features = ["workspace.delete", "workspace.delete.discard"]
-                    for _ in 0..<3 {
+                    for _ in 0..<10 {
                         model.pendingWorkspaceDeletion = workspace
                         try await Task.sleep(for: .milliseconds(500))
                         guard let sheet = window.attachedSheet else {throw SmokeFailure.missingButton}
@@ -82,8 +105,8 @@ import ChromiumBridge
                     FileHandle.standardOutput.write(Data("Native sheet/app-modal clicks and Chromium resume passed.\n".utf8))
                 }
                 guard let button = findButton(host, label: "左サイドバーを閉じる") else {throw SmokeFailure.missingButton}
-                guard press(button) else {throw SmokeFailure.pressFailed}
-                try await Task.sleep(for: .milliseconds(100))
+                guard click(button, in: window) else {throw SmokeFailure.pressFailed}
+                try await Task.sleep(for: .milliseconds(350))
                 guard !model.showSidebar else {throw SmokeFailure.noEffect}
                 // Background work must not disable navigation in the real view.
                 model.beginAction("smoke-background", label: "確認中")
@@ -142,9 +165,24 @@ import ChromiumBridge
         } else if object.responds(to: NSSelectorFromString("accessibilityFrame")), let frame = object.value(forKey: "accessibilityFrame") as? NSValue {
             point = window.convertPoint(fromScreen: NSPoint(x: frame.rectValue.midX, y: frame.rectValue.midY))
         } else {return false}
+        let windowNumber = window.windowNumber
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {return false}
-            NSApp.postEvent(event, atStart: false)
+            guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else {return false}
+            if type == .leftMouseUp {
+                let release = Timer(timeInterval: 0.15, repeats: false) {_ in
+                    MainActor.assumeIsolated {
+                        if let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: windowNumber,
+                            context: nil, eventNumber: 0, clickCount: 1, pressure: 0) {
+                            NSApp.postEvent(up, atStart: false)
+                        }
+                    }
+                }
+                RunLoop.main.add(release, forMode: .common)
+                RunLoop.main.add(release, forMode: .modalPanel)
+            } else {
+                NSApp.postEvent(event, atStart: false)
+            }
         }
         return true
     }

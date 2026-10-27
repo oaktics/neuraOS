@@ -114,6 +114,40 @@ final class ModelObservationTests: XCTestCase {
         withExtendedLifetime((actions, terminals)) {}
     }
 
+    @MainActor func testActivityAndResizeDoNotInvalidateTabMembershipOrDeletionPresentation() {
+        let model = AppModel(startPolling: false)
+        var snapshot = fixture()
+        model.applySnapshot(snapshot)
+        model.pendingWorkspaceDeletion = snapshot.workspaces[0]
+        let membership = ObservationFlag(), confirmation = ObservationFlag()
+        withObservationTracking {_ = model.state.terminalMembership} onChange: {membership.mark()}
+        withObservationTracking {
+            _ = model.pendingWorkspaceDeletion
+            _ = model.state.features
+        } onChange: {confirmation.mark()}
+        for index in 0..<20 {
+            snapshot.revision += 1
+            snapshot.terminals = [TerminalRecord(id: "terminal", workspaceId: "workspace", provider: "codex",
+                status: index == 19 ? "exited" : "running", cols: 80 + index, rows: 24,
+                activity: index.isMultiple(of: 2) ? "working" : "waiting")]
+            model.applySnapshot(snapshot)
+        }
+        XCTAssertFalse(membership.changed)
+        XCTAssertFalse(confirmation.changed)
+        XCTAssertEqual(model.terminal(id: "terminal")?.status, "exited")
+        snapshot.terminals.append(TerminalRecord(id: "new", workspaceId: "workspace", provider: "shell",
+            status: "running", cols: 80, rows: 24))
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(membership.changed)
+        XCTAssertFalse(confirmation.changed)
+        XCTAssertEqual(model.state.terminalMembership.map(\.id), ["terminal", "new"])
+        let removal = ObservationFlag()
+        withObservationTracking {_ = model.state.terminalMembership} onChange: {removal.mark()}
+        snapshot.terminals = []
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(removal.changed)
+    }
+
     private func fixture() -> Snapshot {
         Snapshot(revision: 1, features: ["terminal.multiple"],
                  projects: [Project(id: "project", name: "Project", path: "/tmp/project", isGit: true)],

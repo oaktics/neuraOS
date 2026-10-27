@@ -132,6 +132,15 @@ static NSString *StartChromiumImpl() {
     char name[] = "NeuraOS"; char *argv[] = {name, nullptr}; cef_main_args_t args = {1, argv};
     if (!p_cef_initialize(&args, &settings, nullptr, nullptr)) return @"Chromiumを開始できませんでした。別のneuraOSで同じプロファイルを使用していないか確認してください。";
     initialized = true;
+    // SwiftUI context menus can service default-mode turns while they track.
+    // Run-loop mode alone does not protect their mouse-up/action dispatch.
+    NSHashTable<NSMenu *> *trackingMenus = [NSHashTable weakObjectsHashTable];
+    [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidBeginTrackingNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        [trackingMenus addObject:note.object];
+    }];
+    [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidEndTrackingNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+        [trackingMenus removeObject:note.object];
+    }];
     pump = [NSTimer timerWithTimeInterval:0.01 repeats:YES block:^(NSTimer *) {
         // CEF's external pump drains AppKit events in the default run-loop mode.
         // Native modal windows/sheets must route their own mouse events; otherwise
@@ -139,14 +148,17 @@ static NSString *StartChromiumImpl() {
         if (!initialized || pumping) return;
         // Retry a deferred shutdown on a turn that does not enter CEF again.
         if (shuttingDown && browsers.empty()) {CompleteShutdown(); return;}
-        if (NSApp.modalWindow) return;
+        if (NSApp.modalWindow || trackingMenus.count > 0) return;
         for (NSWindow *window in NSApp.windows) {
             if (window.attachedSheet || window.sheetParent) return;
         }
         pumping = true;
         @try {p_cef_do_message_loop_work();} @finally {pumping = false;}
     }];
-    [NSRunLoop.mainRunLoop addTimer:pump forMode:NSRunLoopCommonModes];
+    // Never enter Chromium's nested event pump while AppKit tracks a button,
+    // context menu or drag. Common modes include NSEventTrackingRunLoopMode.
+    // The timer resumes automatically when native tracking returns to default mode.
+    [NSRunLoop.mainRunLoop addTimer:pump forMode:NSDefaultRunLoopMode];
     return nil;
 }
 
