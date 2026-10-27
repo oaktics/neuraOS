@@ -47,6 +47,43 @@ final class RichFileTests: XCTestCase {
         XCTAssertNil(ExplorerFiles.remap("docs/a.txt", change: ExplorerChange(oldPath: "docs", newPath: nil)))
     }
 
+    func testGitCaseAliasesCannotCreateOrMoveIntoMetadata() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fm = FileManager.default
+        try fm.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("nested/.git"), withIntermediateDirectories: true)
+        defer {try? fm.removeItem(at: root)}
+        let source = root.appendingPathComponent("note.txt")
+        try Data("keep me".utf8).write(to: source)
+        for alias in [".git", ".GIT", ".Git", ".gIt"] {
+            XCTAssertThrowsError(try ExplorerFiles.perform(.newFile, root: root.path, source: "", destination: alias + "/index.lock"))
+            XCTAssertThrowsError(try ExplorerFiles.perform(.move, root: root.path, source: "note.txt", destination: alias + "/index.lock"))
+            XCTAssertThrowsError(try ExplorerFiles.target(root: root.path, path: "nested/" + alias + "/config", mustExist: false))
+        }
+        XCTAssertEqual(try String(contentsOf: source, encoding: .utf8), "keep me")
+        XCTAssertFalse(fm.fileExists(atPath: root.appendingPathComponent(".git/index.lock").path))
+    }
+
+    func testLineNumbersCountLFAndCRLFIncludingScrolledPrefixes() {
+        for ending in ["\n", "\r\n"] {
+            let lines = ["日本語😀", "second", "third"]
+            let text = (lines.joined(separator: ending) + ending) as NSString
+            var offset = 0
+            var lineNumber = 1
+            for (index, line) in lines.enumerated() {
+                // Match both calculations in the ruler: initial visible prefix and each fragment.
+                XCTAssertEqual(CodePresentation.lineFeedCount(text.substring(to: offset)) + 1, index + 1)
+                XCTAssertEqual(lineNumber, index + 1)
+                let fragment = NSRange(location: offset, length: ((line + ending) as NSString).length)
+                lineNumber += CodePresentation.lineFeedCount(text.substring(with: fragment))
+                offset += fragment.length
+            }
+            XCTAssertEqual(lineNumber, 4)
+        }
+        XCTAssertEqual(CodePresentation.lineFeedCount("first\r\nsecond\nthird\r\n"), 3)
+        XCTAssertEqual(CodePresentation.lineFeedCount(""), 0)
+    }
+
     @MainActor func testPDFLoadsAndNavigates() throws {
         _ = NSApplication.shared
         let document = PDFDocument()

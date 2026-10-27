@@ -2,6 +2,9 @@ import AppKit
 import Highlighter
 
 enum CodePresentation {
+    // CRLF is one Swift Character, but always contains an LF UTF-16 code unit.
+    static func lineFeedCount(_ text: String) -> Int {text.utf16.filter {$0 == 10}.count}
+
     static func language(_ path: String) -> String? {
         let ext = (path as NSString).pathExtension.lowercased()
         if (path as NSString).lastPathComponent == "Dockerfile" {return "dockerfile"}
@@ -34,7 +37,7 @@ final class CodeLineRuler: NSRulerView {
             return
         }
         let first = manager.characterIndexForGlyph(at: visible.location)
-        var number = (text.substring(to: first).filter {$0 == "\n"}).count + 1
+        var number = CodePresentation.lineFeedCount(text.substring(to: first)) + 1
         manager.enumerateLineFragments(forGlyphRange: visible) { [self] lineRect, _, _, glyphRange, _ in
             let index = manager.characterIndexForGlyph(at: glyphRange.location)
             if index == 0 || text.character(at: index - 1) == 10 {
@@ -44,7 +47,7 @@ final class CodeLineRuler: NSRulerView {
                 label.draw(at: NSPoint(x: ruleThickness - 8 - label.size(withAttributes: attributes).width, y: y), withAttributes: attributes)
             }
             let chars = manager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-            number += text.substring(with: chars).filter {$0 == "\n"}.count
+            number += CodePresentation.lineFeedCount(text.substring(with: chars))
         }
     }
 }

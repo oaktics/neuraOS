@@ -16,7 +16,7 @@ enum ExplorerFiles {
     static func target(root: String, path: String, mustExist: Bool) throws -> URL {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !path.isEmpty, !(path as NSString).isAbsolutePath,
-              !parts.contains(where: {$0.isEmpty || $0 == "." || $0 == ".." || $0 == ".git"}), !path.contains("\0") else {
+              !parts.contains(where: {$0.isEmpty || $0 == "." || $0 == ".." || $0.lowercased() == ".git"}), !path.contains("\0") else {
             throw CocoaError(.fileReadNoPermission)
         }
         var url = URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL
