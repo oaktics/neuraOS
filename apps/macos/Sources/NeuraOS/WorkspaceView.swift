@@ -8,17 +8,28 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var number = 1
     var terminalId: String?
     var browserTitle: String?
+    var filePath: String?
     var title: String {
+        if kind == "file", let filePath {return (filePath as NSString).lastPathComponent}
         if kind == "browser", let browserTitle, !browserTitle.isEmpty {return browserTitle}
         let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
         return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
     }
-    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : kind == "files" ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
+    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
 struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
+
+    mutating func openFile(_ path: String) {
+        if let existing = tabs.first(where: {$0.kind == "file" && $0.filePath == path}) {
+            selectedId = existing.id
+        } else {
+            let tab = WorkspaceTab(kind: "file", filePath: path)
+            tabs.append(tab); selectedId = tab.id
+        }
+    }
 
     mutating func reconcileTerminals(_ terminals: [TerminalRecord], seen: inout Set<String>, startingTabs: Set<String>) {
         // A manual launch publishes its record before assigning the owning tab's
@@ -46,7 +57,8 @@ struct WorkspaceView: View {
     @State private var gitError: String?
     @State private var inspector = "files"
     @State private var treeVersion = 0
-    @State private var requestedFile: String?
+    @State private var documents: [String: OpenDocument] = [:]
+    private var selectedFile: String? {layout.tabs.first {$0.id == layout.selectedId}?.filePath}
     @State private var closingTab: WorkspaceTab?
     @State private var popupViews: [String: NCChromiumView] = [:]
     private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
@@ -107,6 +119,7 @@ struct WorkspaceView: View {
             }
         }
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
+        .onChange(of: documents) {_, value in DraftCache.shared.update(workspace.id, value)}
         .onChange(of: layout.tabs) {_, _ in persist()}
         .onChange(of: layout.selectedId) {_, _ in Diagnostics.shared.record("action.select-tab"); persist()}
         .confirmationDialog("タブを閉じてプロセスを停止しますか？", isPresented: Binding(get: {closingTab != nil}, set: {if !$0 {closingTab = nil}})) {
@@ -135,9 +148,10 @@ struct WorkspaceView: View {
                                     HStack(spacing: 6) {
                                         Image(systemName: item.icon)
                                         Text(item.title).lineLimit(1)
+                                        if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
                                         if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityLabel(item.title)
+                                }.buttonStyle(.plain).accessibilityLabel(item.title).help(item.filePath ?? item.title)
                                 Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
@@ -175,13 +189,13 @@ struct WorkspaceView: View {
                 let visible = active && model.selectedId == workspace.id
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    else if item.kind == "file", let path = item.filePath {
+                        FilePane(workspace: workspace, path: path, visible: visible, documents: $documents)
+                    }
                     else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }
-            // Keep drafts mounted even when the editor tab is closed.
-            if workspace.hasFolder {FilePane(workspace: workspace, visible: activeKind == "files" && model.selectedId == workspace.id, requestedFile: $requestedFile)
-                .opacity(activeKind == "files" ? 1 : 0).allowsHitTesting(activeKind == "files").accessibilityHidden(activeKind != "files")}
             if activeKind == "diff" {
                 if let diff = selectedDiff {
                     VStack(alignment: .leading, spacing: 0) {
@@ -207,7 +221,7 @@ struct WorkspaceView: View {
                     Spacer()
                     Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")
                 }.padding(.horizontal, 8).frame(height: 28)
-                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: requestedFile, onSelect: {path in requestedFile = path; showUtility("files")}).id(treeVersion).padding(.horizontal, 10)}
+                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: selectedFile, onSelect: {path in layout.openFile(path)}).id(treeVersion).padding(.horizontal, 10)}
             } else if inspector == "github" {
                 GitHubSidebar(workspace: workspace, visible: model.showInspector && model.selectedId == workspace.id, openTerminal: {add("shell")})
             } else if workspace.supportsGit {gitPane}
@@ -285,7 +299,12 @@ struct WorkspaceView: View {
         if layout.tabs.contains(where: {$0.kind == "github" && $0.id == layout.selectedId}) {
             inspector = "github"; model.showInspector = true
         }
-        layout.tabs.removeAll {$0.kind == "github"}
+        documents = DraftCache.shared.load(workspace.id)
+        let wasFiles = layout.tabs.first {$0.id == layout.selectedId}?.kind == "files"
+        layout.tabs.removeAll {$0.kind == "github" || $0.kind == "files"}
+        let previousSelection = layout.selectedId
+        for path in documents.keys.sorted() where documents[path]?.dirty == true {layout.openFile(path)}
+        if !wasFiles, layout.tabs.contains(where: {$0.id == previousSelection}) {layout.selectedId = previousSelection}
         // Recover running sessions, including sessions opened while this UI was disconnected.
         let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
         seenTerminalIds = Set(terminals.map(\.id))
@@ -375,60 +394,6 @@ struct TerminalPane: View {
     }
 }
 
-struct OpenDocument: Codable, Equatable {var original: FileContent; var text: String; var dirty: Bool {text != original.content}}
-struct FilePane: View {
-    @Environment(AppModel.self) private var model
-    let workspace: Workspace
-    let visible: Bool
-    @Binding var requestedFile: String?
-    @State private var documents: [String: OpenDocument] = [:]
-    @State private var order: [String] = []
-    @State private var selected: String?
-    @State private var saving = false
-    var body: some View {
-            VStack(spacing: 0) {
-                if let path = selected, let document = documents[path] {
-                    HStack(spacing: 8) {
-                        ScrollView(.horizontal) {
-                            HStack(spacing: 2) {ForEach(order, id: \.self) {name in
-                                Button {selected = name; requestedFile = name} label: {
-                                    HStack(spacing: 5) {Text((name as NSString).lastPathComponent); if documents[name]?.dirty == true {Circle().frame(width: 5, height: 5)}}
-                                        .font(.system(size: 11)).padding(.horizontal, 8).frame(height: 30)
-                                        .background(selected == name ? Color.primary.opacity(0.05) : .clear)
-                                }.buttonStyle(.plain).help(name)
-                            }}
-                        }.scrollIndicators(.hidden)
-                        Text(document.dirty ? "未保存" : "保存済み").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
-                        Button("保存") {save(path)}.keyboardShortcut("s").controlSize(.small).disabled(!document.dirty || saving || !visible)
-                    }.padding(.trailing, 8).frame(height: 30)
-                    Rectangle().fill(Palette.line).frame(height: 1)
-                    if visible {NativeTextEditor(text: Binding(get: {documents[path]?.text ?? ""}, set: {documents[path]?.text = $0}), editable: true, diff: false).frame(maxWidth: .infinity, maxHeight: .infinity).id(path)}
-                    else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
-                } else {Text("ファイルを選択").font(.system(size: 12)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, maxHeight: .infinity)}
-            }.frame(minWidth: 250, maxWidth: .infinity, maxHeight: .infinity)
-        .task {documents = DraftCache.shared.load(workspace.id); order = documents.keys.sorted(); selected = order.first; if let requestedFile {open(requestedFile)}}
-        .onChange(of: requestedFile) {_, path in if let path {open(path)}}
-        .onChange(of: documents) {_, value in DraftCache.shared.update(workspace.id, value)}
-        .onReceive(model.workspaceUpdated) {id in
-            guard id == workspace.id else {return}
-            // Refresh clean buffers; preserve edits made while the network request was running.
-            let reopen = selected
-            documents = documents.filter {$0.value.dirty}
-            order = order.filter {documents[$0] != nil}
-            selected = order.first
-            DraftCache.shared.update(workspace.id, documents)
-            if let reopen {open(reopen)}
-        }
-    }
-    private func open(_ path: String) {
-        if documents[path] != nil {selected = path; return}
-        Task {do {let content: FileContent = try await model.api.get("v1/workspaces/\(workspace.id)/file", query: ["path": path]); if documents[path] == nil {documents[path] = OpenDocument(original: content, text: content.content); order.append(path)}; selected = path} catch {model.report(error)}}
-    }
-    private func save(_ path: String) {
-        guard let doc = documents[path] else {return}; saving = true
-        Task {defer {saving = false}; do {let content: FileContent = try await model.api.command(["type": "file.save", "workspaceId": workspace.id, "path": path, "content": doc.text, "expectedHash": doc.original.hash]); documents[path]?.original = content} catch {model.report(error)}}
-    }
-}
 struct FileTree: View {
     @Environment(AppModel.self) private var model
     let workspaceId: String; let path: String; let selected: String?; let onSelect: (String) -> Void
@@ -463,6 +428,7 @@ struct NativeTextEditor: NSViewRepresentable {
     var editable: Bool
     var diff: Bool
     var visible: Bool = true
+    var wrapsLines: Bool = true
     func makeCoordinator() -> Coordinator {Coordinator(self)}
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false
@@ -476,7 +442,9 @@ struct NativeTextEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         scroll.isHidden = !visible
-        guard let editor = scroll.documentView as? NSTextView, editor.string != text else {return}
+        guard let editor = scroll.documentView as? NSTextView else {return}
+        Self.configureWrapping(editor, in: scroll, enabled: wrapsLines)
+        guard editor.string != text else {return}
         let selection = editor.selectedRange(); editor.string = text
         editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
         if diff, let storage = editor.textStorage {
@@ -488,6 +456,15 @@ struct NativeTextEditor: NSViewRepresentable {
                 if let color {storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: offset, length: length))}; offset += length + 1
             }
         }
+    }
+    static func configureWrapping(_ editor: NSTextView, in scroll: NSScrollView, enabled: Bool) {
+        scroll.hasHorizontalScroller = !enabled
+        editor.minSize = NSSize(width: 0, height: scroll.contentSize.height)
+        editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        editor.isHorizontallyResizable = !enabled
+        editor.textContainer?.widthTracksTextView = enabled
+        editor.textContainer?.containerSize = NSSize(width: enabled ? max(1, scroll.contentSize.width - 16) : CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        if enabled {editor.setFrameSize(NSSize(width: scroll.contentSize.width, height: editor.frame.height))}
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeTextEditor
