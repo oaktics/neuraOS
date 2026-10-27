@@ -45,6 +45,7 @@ struct FilePane: View {
     let workspace: Workspace
     let path: String
     let visible: Bool
+    let openFile: (String) -> Void
     @Binding var documents: [String: OpenDocument]
     @State private var saving = false
     @State private var loading = false
@@ -81,7 +82,8 @@ struct FilePane: View {
                 if FilePresentation.isMarkdown(path) && markdownPreview {
                     if visible {
                         ScrollView {
-                            GitHubMarkdown(source: document.text, baseURL: URL(fileURLWithPath: workspace.path).appendingPathComponent(path))
+                            GitHubMarkdown(source: document.text, baseURL: WorkspaceMarkdownResources.baseURL(path: path),
+                                           workspaceRoot: URL(fileURLWithPath: workspace.path), openFile: openFile)
                                 .padding(24).frame(maxWidth: 960).frame(maxWidth: .infinity)
                         }
                     } else {Color.clear}

@@ -9,12 +9,14 @@ import cmark_gfm_extensions
 struct GitHubMarkdown: View {
     let source: String
     let baseURL: URL?
+    var workspaceRoot: URL? = nil
+    var openFile: ((String) -> Void)? = nil
     @State private var height: CGFloat = 1
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         if GitHubMarkdownHTML.resourcesAvailable {
-            GitHubMarkdownWebView(source: source, baseURL: baseURL, dark: colorScheme == .dark, height: $height)
+            GitHubMarkdownWebView(source: source, baseURL: baseURL, workspaceRoot: workspaceRoot, openFile: openFile, dark: colorScheme == .dark, height: $height)
                 .frame(height: height)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
@@ -67,7 +69,7 @@ enum GitHubMarkdownHTML {
     static let page = """
     <!doctype html><html><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src https: http:; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src https: http: neura-workspace:; base-uri 'none'; form-action 'none'">
     <style>\(style)</style></head><body><main id="markdown"></main></body></html>
     """
 }
@@ -75,6 +77,8 @@ enum GitHubMarkdownHTML {
 struct GitHubMarkdownWebView: NSViewRepresentable {
     let source: String
     let baseURL: URL?
+    var workspaceRoot: URL? = nil
+    var openFile: ((String) -> Void)? = nil
     let dark: Bool
     @Binding var height: CGFloat
 
@@ -89,6 +93,9 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.userContentController = controller
+        if let workspaceRoot {
+            configuration.setURLSchemeHandler(WorkspaceMarkdownResources(root: workspaceRoot), forURLScheme: WorkspaceMarkdownResources.scheme)
+        }
         let view = GitHubMarkdownScrollingWebView(frame: .zero, configuration: configuration)
         view.setValue(false, forKey: "drawsBackground")
         view.navigationDelegate = context.coordinator
@@ -140,6 +147,12 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if action.navigationType == .other, action.request.url?.absoluteString == "about:blank", !ready {
                 decisionHandler(.allow); return
+            }
+            if action.navigationType == .linkActivated, let url = action.request.url,
+               let root = parent.workspaceRoot, url.scheme == WorkspaceMarkdownResources.scheme,
+               let path = try? WorkspaceMarkdownResources(root: root).relativePath(for: url) {
+                parent.openFile?(path)
+                decisionHandler(.cancel); return
             }
             if action.navigationType == .linkActivated, let url = action.request.url,
                ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {NSWorkspace.shared.open(url)}

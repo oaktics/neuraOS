@@ -190,7 +190,7 @@ struct WorkspaceView: View {
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
-                        FilePane(workspace: workspace, path: path, visible: visible, documents: $documents)
+                        FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents)
                     }
                     else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 

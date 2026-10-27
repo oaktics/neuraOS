@@ -6,6 +6,7 @@ struct GitHubSnapshot: Decodable {
     let repository: String; let branch: String; let head: String; let defaultBranch: String
     let mergeMethods: [String]; let fetchedAt: String; let pullRequest: GitHubPR?
     let sourcePullRequest: GitHubPRSource?
+    var canCreatePullRequest: Bool {sourcePullRequest != nil || pullRequest?.state != "OPEN"}
     func target(workspaceId: String, type: String) -> [String: Any] {
         ["type": type, "workspaceId": workspaceId, "repository": repository, "branch": branch, "expectedHead": head]
     }
@@ -108,7 +109,7 @@ struct GitHubPane: View {
                             if let url = URL(string: "https://github.com/\(snapshot.repository)") {Link("リポジトリを開く ↗", destination: url)}
                             HStack {
                                 Button("Push…") {confirmPush(snapshot)}.disabled(disabled)
-                                if snapshot.pullRequest?.state != "OPEN" {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
+                                if snapshot.canCreatePullRequest {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
                             }.controlSize(.small)
                         }
                         Text(snapshot.sourcePullRequest == nil ? "Push・PR に含まれるのはコミット済みの変更です。" : "作成元の PR を表示しています。Push はローカルブランチへ送信し、元の PR は更新しません。").font(.system(size: 11)).foregroundStyle(.secondary)
