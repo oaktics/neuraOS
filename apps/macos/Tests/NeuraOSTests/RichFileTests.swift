@@ -33,6 +33,26 @@ final class RichFileTests: XCTestCase {
         XCTAssertThrowsError(try ExplorerFiles.perform(.move, root: root.path, source: "notes", destination: "notes/nested"))
     }
 
+    func testCaseOnlyRenamePreservesContentsAndCollisionProtection() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: false)
+        defer {try? fm.removeItem(at: root)}
+        try Data("keep me".utf8).write(to: root.appendingPathComponent("readme.md"))
+        _ = try ExplorerFiles.perform(.rename, root: root.path, source: "readme.md", destination: "README.md")
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: root.path).contains("README.md"))
+        XCTAssertFalse(try fm.contentsOfDirectory(atPath: root.path).contains("readme.md"))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("README.md"), encoding: .utf8), "keep me")
+        XCTAssertThrowsError(try ExplorerFiles.perform(.duplicate, root: root.path, source: "README.md", destination: "README.md"))
+        try Data("other".utf8).write(to: root.appendingPathComponent("other.md"))
+        XCTAssertThrowsError(try ExplorerFiles.perform(.rename, root: root.path, source: "other.md", destination: "README.md"))
+        try fm.createDirectory(at: root.appendingPathComponent("docs"), withIntermediateDirectories: false)
+        try Data("nested".utf8).write(to: root.appendingPathComponent("docs/note.txt"))
+        _ = try ExplorerFiles.perform(.move, root: root.path, source: "docs", destination: "DOCS")
+        XCTAssertTrue(try fm.contentsOfDirectory(atPath: root.path).contains("DOCS"))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("DOCS/note.txt"), encoding: .utf8), "nested")
+    }
+
     func testMutationRejectsTraversalGitAndSymlinks() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
