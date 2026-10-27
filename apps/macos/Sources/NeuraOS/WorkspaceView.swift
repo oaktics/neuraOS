@@ -190,7 +190,7 @@ struct WorkspaceView: View {
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
-                        FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents)
+                        FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }
                     else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
@@ -221,12 +221,38 @@ struct WorkspaceView: View {
                     Spacer()
                     Button {treeVersion += 1} label: {Image(systemName: "arrow.clockwise")}.buttonStyle(.plain).help("ファイル一覧を更新")
                 }.padding(.horizontal, 8).frame(height: 28)
-                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: selectedFile, onSelect: {path in layout.openFile(path)}).id(treeVersion).padding(.horizontal, 10)}
+                .modifier(ExplorerActions(workspaceId: workspace.id, path: "", directory: true, dirtyPaths: dirtyFilePaths, onChange: applyFileChange))
+                Text("右クリックで作成・移動・ファイル操作").font(.system(size: 10)).foregroundStyle(.tertiary).padding(.horizontal, 8)
+                ScrollView {FileTree(workspaceId: workspace.id, path: "", selected: selectedFile, refreshVersion: treeVersion, dirtyPaths: dirtyFilePaths, onChange: applyFileChange, onSelect: {path in layout.openFile(path)}).padding(.horizontal, 10)}
             } else if inspector == "github" {
                 GitHubSidebar(workspace: workspace, visible: model.showInspector && model.selectedId == workspace.id, openTerminal: {add("shell")})
             } else if workspace.supportsGit {gitPane}
             else {Text("このフォルダではGitを使用していません。").font(.system(size: 12)).foregroundStyle(.secondary).padding(18); Spacer()}
         }
+    }
+    private var dirtyFilePaths: Set<String> {Set(documents.filter {$0.value.dirty}.keys)}
+    private func applyFileChange(_ change: ExplorerChange) {
+        guard change.oldPath != nil else {return}
+        for tab in layout.tabs {
+            guard let path = tab.filePath else {continue}
+            let mapped = ExplorerFiles.remap(path, change: change)
+            if mapped != path {
+                // Edits can arrive while a background filesystem operation is completing.
+                if mapped == nil, documents[path]?.dirty == true {continue}
+                if let mapped, let index = layout.tabs.firstIndex(where: {$0.id == tab.id}) {layout.tabs[index].filePath = mapped}
+                else {layout.tabs.removeAll {$0.id == tab.id}}
+            }
+        }
+        var updated: [String: OpenDocument] = [:]
+        for (path, var document) in documents {
+            if let mapped = ExplorerFiles.remap(path, change: change) {
+                document.original = FileContent(path: mapped, content: document.original.content, hash: document.original.hash)
+                updated[mapped] = document
+            } else if document.dirty {updated[path] = document}
+        }
+        documents = updated
+        if !layout.tabs.contains(where: {$0.id == layout.selectedId}) {layout.selectedId = layout.tabs.first?.id}
+        persist()
     }
     private var gitPane: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -396,29 +422,30 @@ struct TerminalPane: View {
 
 struct FileTree: View {
     @Environment(AppModel.self) private var model
-    let workspaceId: String; let path: String; let selected: String?; let onSelect: (String) -> Void
+    let workspaceId: String; let path: String; let selected: String?; let refreshVersion: Int; let dirtyPaths: Set<String>; let onChange: (ExplorerChange) -> Void; let onSelect: (String) -> Void
     @State private var entries: [FileEntry] = []
     @State private var error: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let error {Text(error).font(.system(size: 10)).foregroundStyle(.secondary)}
             ForEach(entries) {entry in
-                if entry.isDirectory {FolderRow(workspaceId: workspaceId, entry: entry, selected: selected, onSelect: onSelect)}
+                if entry.isDirectory {FolderRow(workspaceId: workspaceId, entry: entry, selected: selected, refreshVersion: refreshVersion, dirtyPaths: dirtyPaths, onChange: onChange, onSelect: onSelect)}
                 else {Button {onSelect(entry.path)} label: {HStack(spacing: 7) {Image(systemName: "doc").foregroundStyle(.tertiary); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).padding(.vertical, 6).padding(.horizontal, 6).background(selected == entry.path ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 4)).contentShape(Rectangle())}.buttonStyle(.plain).onDrag {
                     guard let workspace = model.state.workspaces.first(where: { $0.id == workspaceId }) else { return NSItemProvider() }
                     return NSItemProvider(object: URL(fileURLWithPath: workspace.path).appendingPathComponent(entry.path) as NSURL)
-                }}
+                }.modifier(ExplorerActions(workspaceId: workspaceId, path: entry.path, directory: false, dirtyPaths: dirtyPaths, onChange: onChange))}
             }
-        }.task {do {let listing: DirectoryListing = try await model.api.get("v1/workspaces/\(workspaceId)/files", query: ["path": path]); entries = listing.entries} catch {self.error = error.localizedDescription}}
+        }.task(id: refreshVersion) {do {let listing: DirectoryListing = try await model.api.get("v1/workspaces/\(workspaceId)/files", query: ["path": path]); entries = listing.entries; error = nil} catch {self.error = error.localizedDescription}}
     }
 }
 struct FolderRow: View {
-    let workspaceId: String; let entry: FileEntry; let selected: String?; let onSelect: (String) -> Void
+    let workspaceId: String; let entry: FileEntry; let selected: String?; let refreshVersion: Int; let dirtyPaths: Set<String>; let onChange: (ExplorerChange) -> Void; let onSelect: (String) -> Void
     @State private var expanded = false
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {expanded.toggle()} label: {HStack(spacing: 5) {Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 8)); Image(systemName: "folder"); Text(entry.name).lineLimit(1); Spacer(minLength: 0)}.font(.system(size: 11)).foregroundStyle(.secondary).padding(.vertical, 6).contentShape(Rectangle())}.buttonStyle(.plain)
-            if expanded {FileTree(workspaceId: workspaceId, path: entry.path, selected: selected, onSelect: onSelect).padding(.leading, 12)}
+            .modifier(ExplorerActions(workspaceId: workspaceId, path: entry.path, directory: true, dirtyPaths: dirtyPaths, onChange: onChange))
+            if expanded {FileTree(workspaceId: workspaceId, path: entry.path, selected: selected, refreshVersion: refreshVersion, dirtyPaths: dirtyPaths, onChange: onChange, onSelect: onSelect).padding(.leading, 12)}
         }
     }
 }
@@ -429,6 +456,9 @@ struct NativeTextEditor: NSViewRepresentable {
     var diff: Bool
     var visible: Bool = true
     var wrapsLines: Bool = true
+    var language: String? = nil
+    var showsLineNumbers = false
+    var findRequest = 0
     func makeCoordinator() -> Coordinator {Coordinator(self)}
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false
@@ -437,16 +467,26 @@ struct NativeTextEditor: NSViewRepresentable {
         editor.isHorizontallyResizable = true; editor.isVerticallyResizable = true; editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.font = .monospacedSystemFont(ofSize: 12, weight: .regular); editor.textColor = .labelColor; editor.drawsBackground = false; editor.textContainerInset = NSSize(width: 8, height: 8)
-        editor.delegate = context.coordinator; scroll.documentView = editor; return scroll
+        editor.usesFindBar = true; editor.isIncrementalSearchingEnabled = true
+        editor.delegate = context.coordinator; scroll.documentView = editor
+        if showsLineNumbers {scroll.verticalRulerView = CodeLineRuler(editor: editor, scroll: scroll); scroll.hasVerticalRuler = true; scroll.rulersVisible = true}
+        return scroll
     }
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         scroll.isHidden = !visible
         guard let editor = scroll.documentView as? NSTextView else {return}
         Self.configureWrapping(editor, in: scroll, enabled: wrapsLines)
+        if context.coordinator.lastFindRequest != findRequest {
+            context.coordinator.lastFindRequest = findRequest
+            let item = NSMenuItem(); item.tag = NSTextFinder.Action.showFindInterface.rawValue
+            editor.performFindPanelAction(item)
+        }
+        context.coordinator.scheduleHighlight(editor)
         guard editor.string != text else {return}
         let selection = editor.selectedRange(); editor.string = text
         editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
+        context.coordinator.scheduleHighlight(editor)
         if diff, let storage = editor.textStorage {
             storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSRange(location: 0, length: storage.length))
             var offset = 0
@@ -468,7 +508,32 @@ struct NativeTextEditor: NSViewRepresentable {
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NativeTextEditor
+        var lastFindRequest = 0
+        var highlightTask: Task<Void, Never>?
+        var highlightedText: String?
+        var highlightedDark: Bool?
         init(_ parent: NativeTextEditor) {self.parent = parent}
-        func textDidChange(_ notification: Notification) {if let editor = notification.object as? NSTextView {parent.text = editor.string}}
+        func textDidChange(_ notification: Notification) {
+            if let editor = notification.object as? NSTextView {parent.text = editor.string; scheduleHighlight(editor)}
+        }
+        func scheduleHighlight(_ editor: NSTextView) {
+            editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
+            guard let language = parent.language, !editor.hasMarkedText() else {return}
+            let source = editor.string
+            let dark = editor.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            guard source != highlightedText || dark != highlightedDark else {return}
+            highlightedText = source; highlightedDark = dark
+            highlightTask?.cancel()
+            highlightTask = Task { @MainActor [weak editor] in
+                do {try await Task.sleep(for: .milliseconds(180))} catch {return}
+                let result = await CodeHighlighter.shared.highlight(source, language: language, dark: dark)
+                guard !Task.isCancelled, let editor, editor.string == source, !editor.hasMarkedText(), let manager = editor.layoutManager else {return}
+                let range = NSRange(location: 0, length: (source as NSString).length)
+                manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
+                result?.enumerateAttribute(.foregroundColor, in: range) {color, range, _ in
+                    if let color {manager.addTemporaryAttribute(.foregroundColor, value: color, forCharacterRange: range)}
+                }
+            }
+        }
     }
 }

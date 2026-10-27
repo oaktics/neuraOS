@@ -31,6 +31,7 @@ await mkdir(join(output,'Contents/Resources/Licenses'),{recursive:true});
 for(const [name,source] of [
   ['SwiftTerm','SwiftTerm/LICENSE'],
   ['MarkdownUI','swift-markdown-ui/LICENSE'],
+  ['HighlighterSwift','HighlighterSwift/LICENCE.md'],
   ['NetworkImage','NetworkImage/LICENSE'],
   ['cmark-gfm','swift-cmark/COPYING'],
 ]) {

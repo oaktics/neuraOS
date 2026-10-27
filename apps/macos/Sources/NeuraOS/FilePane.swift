@@ -53,6 +53,7 @@ struct FilePane: View {
     @State private var previewURL: URL?
     @State private var markdownPreview = true
     @State private var wrapsLines = true
+    @State private var findRequest = 0
     @State private var revision = 0
     @State private var confirmReload = false
     private var document: OpenDocument? {documents[path]}
@@ -70,10 +71,13 @@ struct FilePane: View {
                         }.pickerStyle(.segmented).frame(width: 150)
                     }
                     if !FilePresentation.isMarkdown(path) || !markdownPreview {
+                        Button("検索") {findRequest += 1}.keyboardShortcut("f").disabled(!visible)
                         Toggle("折り返し", isOn: $wrapsLines).toggleStyle(.button)
                     }
                     Button("保存") {save()}.keyboardShortcut("s").disabled(!document.dirty || saving || !visible)
                 }
+                Button {if let url = try? FilePresentation.previewURL(root: workspace.path, path: path) {NSWorkspace.shared.activateFileViewerSelecting([url])}} label: {Image(systemName: "folder")}.help("Finderで表示")
+                Button {if let url = try? FilePresentation.previewURL(root: workspace.path, path: path) {NSWorkspace.shared.open(url)}} label: {Image(systemName: "arrow.up.forward.square")}.help("外部アプリで開く")
                 Button {if document?.dirty == true {confirmReload = true} else {revision += 1}} label: {Image(systemName: "arrow.clockwise")}
                     .disabled(loading || saving).help("ファイルを再読み込み")
             }.font(.system(size: 11)).controlSize(.small).padding(.horizontal, 10).frame(height: 36)
@@ -89,10 +93,10 @@ struct FilePane: View {
                     } else {Color.clear}
                 } else {
                     NativeTextEditor(text: Binding(get: {documents[path]?.text ?? ""}, set: {documents[path]?.text = $0}),
-                                     editable: true, diff: false, visible: visible, wrapsLines: wrapsLines)
+                                     editable: true, diff: false, visible: visible, wrapsLines: wrapsLines, language: CodePresentation.language(path), showsLineNumbers: true, findRequest: findRequest)
                 }
             } else if let previewURL {
-                if visible {FileQuickLook(url: previewURL).id(revision)} else {Color.clear}
+                if visible {RichFilePreview(url: previewURL).id(revision)} else {Color.clear}
             } else if loading {ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)}
             else {
                 ContentUnavailableView {
