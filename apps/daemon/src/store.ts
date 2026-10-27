@@ -53,6 +53,21 @@ export class Store {
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
+  removeProject(id:string){
+    this.db.exec('BEGIN IMMEDIATE');try{
+      const workspaces=this.list<Workspace>('workspaces').filter(w=>w.projectId===id);
+      const workspaceIds=new Set(workspaces.map(w=>w.id));
+      for(const terminal of this.list<TerminalRecord>('terminals').filter(t=>workspaceIds.has(t.workspaceId))){
+        this.db.prepare('DELETE FROM notification_events WHERE terminalId=?').run(terminal.id);
+        this.db.prepare('DELETE FROM output WHERE terminalId=?').run(terminal.id);
+        this.db.prepare('DELETE FROM terminals WHERE id=?').run(terminal.id);
+      }
+      for(const workspace of workspaces)this.db.prepare('DELETE FROM workspaces WHERE id=?').run(workspace.id);
+      this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
+      this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run('projects',id,new Date().toISOString());
+      this.db.exec('COMMIT');
+    }catch(e){this.db.exec('ROLLBACK');throw e;}
+  }
   state(){return {protocolVersion:1,hostName:process.env.NEURA_HOST_NAME??'このMac',revision:Number(this.db.prepare('SELECT COALESCE(MAX(sequence),0) AS n FROM events').get()!.n),projects:this.list<Project>('projects'),workspaces:this.list<Workspace>('workspaces'),terminals:this.list<TerminalRecord>('terminals')};}
   notifications(after:number){
     const rows=this.db.prepare('SELECT sequence,data FROM notification_events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after);

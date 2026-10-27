@@ -53,6 +53,14 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       return mutation;
     }
     switch(c.type){
+      case 'project.remove':{
+        requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        const workspaces=store.list<Workspace>('workspaces').filter(w=>w.projectId===c.projectId);
+        // Stop owned processes before forgetting them; never remove folders or Git worktrees.
+        for(const record of workspaces)await terminals.stopWorkspace(record.id);
+        store.removeProject(c.projectId);
+        return {ok:true};
+      }
       case 'project.create':{
         const directory=join(dataDir,'projects',operationId);
         await mkdir(directory,{recursive:true,mode:0o700});
@@ -185,7 +193,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     const isGitHub=command.type.startsWith('github.');
     const isRemoteWorkspace=command.type==='workspace.sync-default'||(command.type==='workspace.create'&&!command.baseRef);
     // Deletion is a barrier: finish GitHub mutations before removing their cwd.
-    const isDelete=command.type==='workspace.delete';
+    const isDelete=command.type==='workspace.delete'||command.type==='project.remove';
     const preceding=isDelete?Promise.allSettled([queue,githubQueue]):isGitHub?githubQueue:isRemoteWorkspace?workspaceNetworkQueue:queue;
     const result=preceding.catch(()=>{}).then(async()=>{
       if(traced)diagnostics.record('operation.executing',command.type,operationId,performance.now()-started);
