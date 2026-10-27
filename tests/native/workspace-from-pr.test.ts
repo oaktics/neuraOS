@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {GitHub,pullRequestNumber} from '../../apps/daemon/src/github.ts';
 import {git} from '../../apps/daemon/src/workspace.ts';
+import {Store} from '../../apps/daemon/src/store.ts';
 import {createDaemon} from '../../apps/daemon/src/server.ts';
 
 const pr={number:17,title:'Restore old work',state:'CLOSED',headRefName:'deleted-branch'};
@@ -59,6 +60,10 @@ test('closed/merged PRs with deleted source branches create independent worktree
       const saved=await cmd({type:'file.save',workspaceId:root.id,path:'file',content:'dirty root',expectedHash:file.hash});assert.equal(saved.statusCode,200,saved.body);
       release!();const response=await pending;assert.equal(response.statusCode,200,response.body);
       const worktree=response.json();assert.equal((await git(worktree.path,['rev-parse','HEAD'])).trim(),head);
+      assert.deepEqual(worktree.pullRequestSource,{repository:'owner/repo',number:17,sourceHead:head,localBranch:worktree.branch});
+      assert.deepEqual(daemon.store.get<{pullRequestSource:unknown}>('workspaces',worktree.id)?.pullRequestSource,worktree.pullRequestSource);
+      const reopened=new Store(join(dir,'data','developer.sqlite'));
+      assert.deepEqual(reopened.get<{pullRequestSource:unknown}>('workspaces',worktree.id)?.pullRequestSource,worktree.pullRequestSource);reopened.close();
       assert.match(worktree.branch,/^neura\//);assert.notEqual(worktree.branch,pr.headRefName);
       assert.equal(await readFile(join(repo,'file'),'utf8'),'dirty root');assert.equal((await git(repo,['rev-parse','HEAD'])).trim(),rootHead);
       assert.equal((await cmd(command,id)).body,response.body);

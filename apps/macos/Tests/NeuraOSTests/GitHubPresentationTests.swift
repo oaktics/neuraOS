@@ -28,6 +28,23 @@ final class GitHubPresentationTests: XCTestCase {
         return Data(json.utf8)
     }
 
+    func testSourcePRDoesNotHideLocalPRCreation() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData()) as? [String: Any])
+        var pr = try XCTUnwrap(object["pullRequest"] as? [String: Any])
+        pr["state"] = "OPEN"; object["pullRequest"] = pr
+        func decode() throws -> GitHubSnapshot {
+            try JSONDecoder().decode(GitHubSnapshot.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertFalse(try decode().canCreatePullRequest)
+        object["sourcePullRequest"] = ["repository": "oaktics/neuraOS", "number": 1]
+        XCTAssertTrue(try decode().canCreatePullRequest)
+        object.removeValue(forKey: "sourcePullRequest")
+        pr["state"] = "MERGED"; object["pullRequest"] = pr
+        XCTAssertTrue(try decode().canCreatePullRequest)
+        object.removeValue(forKey: "pullRequest")
+        XCTAssertTrue(try decode().canCreatePullRequest)
+    }
+
     func testOlderDaemonWithoutFileMetadataStillDecodes() throws {
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData()) as? [String: Any])
         var pr = try XCTUnwrap(object["pullRequest"] as? [String: Any])

@@ -2,17 +2,19 @@ import {z} from 'zod';
 
 export const protocolVersion = 1;
 // Additive features are negotiated separately so existing v1 clients keep working.
-export const daemonFeatures = ['github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.folderless','workspace.from-pr'] as const;
+export const daemonFeatures = ['project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.folderless','workspace.from-pr'] as const;
 const id = z.uuid();
 const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);
 export type Provider = z.infer<typeof Provider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; createdAt:string}
-export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string}
+export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
+export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource}
 export type AgentActivity = 'working'|'waiting'|'idle'|'unknown';
 export interface TerminalRecord {id:string; workspaceId:string; provider:Provider; status:'running'|'exited'|'interrupted'; activity?:AgentActivity; createdAt:string; exitCode?:number; cols:number; rows:number}
 export interface AgentNotification {id:string;terminalId:string;workspaceId:string;provider:Provider;kind:'waiting'|'completed';createdAt:string}
 export const Command = z.discriminatedUnion('type', [
+  z.object({type:z.literal('project.remove'), projectId:id}),
   z.object({type:z.literal('project.create'), name:z.string().trim().min(1).max(80)}),
   z.object({type:z.literal('project.attach'), projectId:id, path:z.string().min(1).max(4096)}),
   z.object({type:z.literal('project.add'), path:z.string().min(1).max(4096)}),

@@ -97,8 +97,8 @@ final class GitHubMarkdownTests: XCTestCase {
         return view.subviews.lazy.compactMap {self.webView(in: $0)}.first
     }
 
-    @MainActor private func host(_ source: String, width: CGFloat = 380, dark: Bool = false) async throws -> (NSWindow, NSHostingView<some View>, WKWebView) {
-        let content = GitHubMarkdown(source: source, baseURL: URL(string: "https://github.com/oaktics/neuraOS/pull/3"))
+    @MainActor private func host(_ source: String, width: CGFloat = 380, dark: Bool = false, workspaceRoot: URL? = nil, path: String = "docs/README.md", openFile: ((String) -> Void)? = nil) async throws -> (NSWindow, NSHostingView<some View>, WKWebView) {
+        let content = GitHubMarkdown(source: source, baseURL: workspaceRoot == nil ? URL(string: "https://github.com/oaktics/neuraOS/pull/3") : WorkspaceMarkdownResources.baseURL(path: path), workspaceRoot: workspaceRoot, openFile: openFile)
             .padding(10).frame(width: width)
             .background(Color(nsColor: .windowBackgroundColor))
             .environment(\.colorScheme, dark ? .dark : .light)
@@ -112,6 +112,48 @@ final class GitHubMarkdownTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(100))
         window.setContentSize(host.fittingSize); host.layoutSubtreeIfNeeded()
         return (window, host, web)
+    }
+
+    @MainActor func testWorkspaceImagesLoadAndLinksRemainBounded() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("images"), withIntermediateDirectories: true)
+        defer {try? FileManager.default.removeItem(at: root)}
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: root.appendingPathComponent("images/example.png"))
+        try Data("linked document".utf8).write(to: root.appendingPathComponent("next.md"))
+        try FileManager.default.createSymbolicLink(atPath: root.appendingPathComponent("escape.png").path, withDestinationPath: "/etc/passwd")
+        let resources = WorkspaceMarkdownResources(root: root)
+        let link = try XCTUnwrap(WorkspaceMarkdownResources.baseURL(path: "next.md"))
+        XCTAssertEqual(try resources.relativePath(for: link), "next.md")
+        for path in ["../outside", ".git/config", "escape.png"] {
+            XCTAssertThrowsError(try resources.fileURL(for: XCTUnwrap(WorkspaceMarkdownResources.baseURL(path: path))))
+        }
+        XCTAssertThrowsError(try resources.fileURL(for: XCTUnwrap(URL(string: "neura-workspace://other/next.md"))))
+        XCTAssertThrowsError(try resources.image(for: link), "Document files are never served as image resources")
+        var openedPath: String?
+        let (window, _, web) = try await host("""
+        ## Local preview
+        ![example](../images/example.png)
+        [next](../next.md)
+        [unsafe](file:///etc/passwd)
+        """, workspaceRoot: root, openFile: {openedPath = $0})
+        defer {window.contentView = nil}
+        var loaded = false
+        for _ in 0..<100 {
+            loaded = (try await javascript(web, "return document.querySelector('img').naturalWidth === 2")) as? Bool == true
+            if loaded {break}
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(loaded, "The scoped scheme and CSP must allow local images in real WebKit")
+        let links = try await javascript(web, "return Array.from(document.querySelectorAll('a[href]'), a => a.href)") as? [String]
+        XCTAssertEqual(links, [link.absoluteString])
+        _ = try await javascript(web, "document.querySelector('a[href]').click()")
+        for _ in 0..<100 {
+            if openedPath != nil {break}
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertEqual(openedPath, "next.md")
     }
 
     @MainActor func testCodexHTMLAndDisclosureFitBothAppearances() async throws {

@@ -6,6 +6,8 @@ const dropped = new Set('script style iframe object embed form svg math template
 function safeURL(value, base, image = false) {
     try {
         const url = new URL(value, base);
+        const origin = new URL(base);
+        if (origin.protocol === "neura-workspace:" && url.protocol === origin.protocol && url.host === origin.host) return url.href;
         return (image ? ['https:', 'http:'] : ['https:', 'http:', 'mailto:']).includes(url.protocol) ? url.href : null;
     } catch { return null; }
 }
