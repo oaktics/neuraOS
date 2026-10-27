@@ -26,6 +26,18 @@ export function parseProcessTable(stdout:string){
   });
 }
 
+export function processGroupAlive(group:number,probe:(pid:number,signal:0)=>unknown=process.kill){
+  if(!Number.isSafeInteger(group)||group<=0)throw new Error('Invalid process group');
+  try{probe(-group,0);return true;}catch(error){
+    const code=(error as NodeJS.ErrnoException).code;
+    if(code==='ESRCH')return false;
+    // A permission-denied probe does not prove exit. Keep waiting (bounded by
+    // stopWorkspace's timeout), without suppressing errors from actual signals.
+    if(code==='EPERM')return true;
+    throw error;
+  }
+}
+
 async function readProcessTable(){
   try{return (await execFileAsync('/bin/ps',['-axo','pid=,ppid=,pgid='],{maxBuffer:8*1024*1024,timeout:5000})).stdout;}
   catch{throw new Fault('terminal_process_table_unavailable','ターミナルの子プロセス一覧を取得できませんでした。もう一度削除してください。',409);}
@@ -145,9 +157,7 @@ export class Terminals {
       const groupAlive=()=>{
         if(process.platform==='win32')return this.processes.has(id);
         let alive=false;
-        for(const group of groups)try{process.kill(-group,0);alive=true;}catch(error){
-          if((error as NodeJS.ErrnoException).code!=='ESRCH')throw error;
-        }
+        for(const group of groups)if(processGroupAlive(group))alive=true;
         return alive;
       };
       await discoverGroups();

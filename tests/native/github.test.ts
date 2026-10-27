@@ -12,7 +12,7 @@ const head='a'.repeat(40),otherHead='b'.repeat(40),workspaceId=randomUUID();
 const target={workspaceId,repository:'owner/repo',branch:'feature/test',expectedHead:head};
 function fixture(){
   const calls:{kind:string;args:string[]}[]=[];
-  const state={branch:target.branch,head,remote:'https://github.com/owner/repo.git',pushRemote:'git@github.com:owner/repo.git',remoteHead:head,hasPR:true,unresolved:false,merged:true,fail:false,
+  const state={branch:target.branch,head,remote:'https://github.com/owner/repo.git',pushRemote:'git@github.com:owner/repo.git',remoteHead:head,hasPR:true,pullBranch:target.branch,pullNumber:17,unresolved:false,merged:true,fail:false,
     pr:{number:17,title:'A PR',body:'Description',url:'https://github.com/owner/repo/pull/17',state:'OPEN',isDraft:false,headRefName:target.branch,headRefOid:head,baseRefName:'main',mergeStateStatus:'CLEAN',reviewDecision:'APPROVED',headRepository:{name:'repo'},headRepositoryOwner:{login:'owner'},author:{login:'alice'},additions:42,deletions:7,changedFiles:1,files:[{path:'src/main.ts',additions:42,deletions:7}],statusCheckRollup:[{name:'test',status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/owner/repo/actions/runs/1'}]}};
   const git=async(_root:string,args:string[])=>{
     calls.push({kind:'git',args});
@@ -32,9 +32,12 @@ function fixture(){
     if(endpoint==='repos/owner/repo')value={full_name:'owner/repo',default_branch:'main',allow_merge_commit:true,allow_squash_merge:true,allow_rebase_merge:false};
     else if(endpoint.startsWith('repos/owner/repo/pulls?')){
       assert.ok(args.includes('--paginate'));assert.ok(args.includes('--slurp'));
-      value=[[{number:99,state:'open',head:{ref:target.branch,repo:{full_name:'someone/repo'}}}],[...(state.hasPR?[{number:17,state:'open',head:{ref:target.branch,repo:{full_name:'owner/repo'}}}]:[])]];
+      value=[[{number:99,state:'open',head:{ref:target.branch,repo:{full_name:'someone/repo'}}}],[...(state.hasPR?[{number:state.pullNumber,state:'open',head:{ref:state.pullBranch,repo:{full_name:'owner/repo'}}}]:[])]];
     } else if(endpoint.includes('/git/ref/'))value={object:{sha:state.remoteHead}};
-    else if(endpoint==='repos/owner/repo/pulls')value={html_url:'https://github.com/owner/repo/pull/18'};
+    else if(endpoint==='repos/owner/repo/pulls'){
+      value={html_url:'https://github.com/owner/repo/pull/18'};state.hasPR=true;state.pullBranch=state.branch;state.pullNumber=18;
+      state.pr={...state.pr,number:18,state:'OPEN',headRefName:state.branch};
+    }
     else if(endpoint.endsWith('/merge'))value={merged:state.merged};
     else if(endpoint==='graphql')value=[{data:{repository:{pullRequest:{reviewThreads:{nodes:[{isResolved:true}]}}}}},{data:{repository:{pullRequest:{reviewThreads:{nodes:[{isResolved:!state.unresolved}]}}}}}];
     else if(endpoint.includes('/reviews?'))value=[[{id:3,user:{login:'reviewer'},body:'',html_url:'https://github.com/owner/repo/pull/17#review-3',submitted_at:'2026-01-02',state:'APPROVED'}]];
@@ -166,7 +169,7 @@ test('explicit PR identity supports renamed local branches and forks without com
   const status=await service.status('/repo',false,source);
   assert.equal(status.pullRequest?.number,17);
   assert.deepEqual(status.sourcePullRequest,{repository:source.repository,number:17});
-  assert.equal(calls.some(c=>c.args[3]?.includes('/pulls?')),false);
+  assert.ok(calls.some(c=>c.kind==='gh'&&c.args[0]==='pr'&&c.args[2]==='17'));
   await service.mutate('/repo',{...mergeCommand(),branch:state.branch},source);
   assert.ok(mutations(calls)[0].args.includes('repos/owner/repo/pulls/17/merge'));
   calls.length=0;
@@ -207,4 +210,17 @@ test('two explicit PRs at the same commit do not share cached identity; changed 
   state.pr.number=17;state.pr.headRefOid=otherHead;
   await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch},source),{code:'github_stale'});
   assert.deepEqual(mutations(calls),[]);
+});
+
+for(const originalState of ['CLOSED','MERGED'])test(`new local PR supersedes ${originalState} source for display and merge`,async()=>{
+  const {service,state,calls}=fixture();state.branch=source.localBranch;state.hasPR=false;state.pr.state=originalState;
+  assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
+  await service.mutate('/repo',{...createCommand(),branch:state.branch},source);
+  const status=await service.status('/repo',true,source);
+  assert.equal(status.pullRequest?.number,18);assert.equal(status.sourcePullRequest,null);
+  calls.length=0;
+  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch},source),{code:'github_pr_mismatch'});
+  assert.deepEqual(mutations(calls),[]);
+  await service.mutate('/repo',{...mergeCommand(),branch:state.branch,number:18},source);
+  assert.ok(mutations(calls)[0].args.includes('repos/owner/repo/pulls/18/merge'));
 });
