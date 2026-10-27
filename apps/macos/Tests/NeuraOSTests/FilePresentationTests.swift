@@ -21,6 +21,23 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertNil(old.filePath)
     }
 
+    func testFailedReloadInvalidatesOnlyTheCleanTargetBuffer() {
+        let content = FileContent(path: "note.txt", content: "old text", hash: "old-hash")
+        let clean = OpenDocument(original: content, text: content.content)
+        var documents = ["note.txt": clean, "other.txt": clean]
+        FilePresentation.invalidateCleanDocument("note.txt", in: &documents)
+        XCTAssertNil(documents["note.txt"], "Deleted or non-editable files must reach the fallback/unavailable view")
+        XCTAssertEqual(documents["other.txt"], clean)
+
+        // A request started with a clean buffer, then the user edited it before failure.
+        documents["note.txt"] = clean
+        documents["note.txt"]?.text = "edit made during reload"
+        FilePresentation.invalidateCleanDocument("note.txt", in: &documents)
+        XCTAssertEqual(documents["note.txt"]?.text, "edit made during reload")
+        XCTAssertEqual(documents["note.txt"]?.original, content)
+        XCTAssertEqual(documents["note.txt"]?.dirty, true)
+    }
+
     func testPresentationTypes() {
         XCTAssertTrue(FilePresentation.isMarkdown("README.MD"))
         for path in ["photo.png", "scan.pdf", "movie.mp4", "audio.mp3", "document.docx", "sheet.xlsx"] {

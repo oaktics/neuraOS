@@ -10,6 +10,11 @@ struct OpenDocument: Codable, Equatable {
 }
 
 enum FilePresentation {
+    static func invalidateCleanDocument(_ path: String, in documents: inout [String: OpenDocument]) {
+        // Inspect the current buffer: edits may have arrived while a read was pending.
+        if documents[path]?.dirty != true {documents.removeValue(forKey: path)}
+    }
+
     static func isMarkdown(_ path: String) -> Bool {
         ["md", "markdown", "mdown", "mkd"].contains((path as NSString).pathExtension.lowercased())
     }
@@ -110,7 +115,7 @@ struct FilePane: View {
 
     private func load() async {
         guard document?.dirty != true else {return}
-        loading = true; error = nil
+        loading = true; error = nil; previewURL = nil
         defer {loading = false}
         if FilePresentation.prefersPreview(path) {
             do {previewURL = try FilePresentation.previewURL(root: workspace.path, path: path)}
@@ -124,6 +129,7 @@ struct FilePane: View {
         } catch {
             guard !Task.isCancelled else {return}
             self.error = error.localizedDescription
+            FilePresentation.invalidateCleanDocument(path, in: &documents)
             // Office documents, legacy encodings and other non-editable formats can
             // still be displayed by the system's installed preview providers.
             previewURL = try? FilePresentation.previewURL(root: workspace.path, path: path)
