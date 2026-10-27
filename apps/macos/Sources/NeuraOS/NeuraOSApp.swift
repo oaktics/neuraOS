@@ -174,6 +174,7 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var collapsed: Set<String> = []
+    @State private var removingProject: Project?
     private var deleting: Workspace? {
         get {model.pendingWorkspaceDeletion}
         nonmutating set {model.pendingWorkspaceDeletion = newValue}
@@ -247,6 +248,20 @@ struct Sidebar: View {
             var transaction = Transaction(); transaction.disablesAnimations = true
             withTransaction(transaction) {swipeTranslation = 0; settling = false}
         }
+        .alert("neuraOSからプロジェクトを削除しますか？", isPresented: Binding(get: {removingProject != nil}, set: {if !$0 {removingProject = nil}}), presenting: removingProject) {project in
+            Button("キャンセル", role: .cancel) {removingProject = nil}
+            Button("neuraOSから削除", role: .destructive) {
+                removingProject = nil
+                let workspaces = model.state.workspaces.filter {$0.projectId == project.id}
+                guard !workspaces.contains(where: {DraftCache.shared.load($0.id).values.contains(where: {$0.dirty})}) else {
+                    model.error = "未保存の編集があります。保存または破棄してから削除してください。"
+                    return
+                }
+                Task {await model.removeProject(project)}
+            }
+        } message: {project in
+            Text("「\(project.name)」と配下の作業をneuraOSの一覧から削除します。フォルダ・ファイル・worktree・ブランチはそのまま残ります。実行中のターミナルとエージェントは終了します。")
+        }
         .alert("変更を破棄してworktreeを削除しますか？", isPresented: Binding(get: {deleting != nil}, set: {if !$0 {deleting = nil}}), presenting: deleting) {workspace in
             Button("キャンセル", role: .cancel) {deleting = nil}
             if model.state.features?.contains("workspace.delete.discard") == true {
@@ -308,6 +323,9 @@ struct Sidebar: View {
                                         Button(space.name) {model.moveProject(project.id, to: space.id)}
                                     }
                                 }.disabled(model.sidebarSpaces.spaces.count < 2)
+                                Divider()
+                                Button("neuraOSから削除…", role: .destructive) {removingProject = project}
+                                    .disabled(!model.connected || model.isBusy("project.remove.\(project.id)") || model.state.features?.contains("project.remove") != true)
                             }
                             if !collapsed.contains(project.id) {
                                 ForEach(model.state.workspaces.filter {$0.projectId == project.id && (searchQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(searchQuery) || project.name.localizedCaseInsensitiveContains(searchQuery))}) {workspace in

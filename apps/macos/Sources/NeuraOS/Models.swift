@@ -314,6 +314,18 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
+    func removeProject(_ project: Project) async {
+        let key = "project.remove.\(project.id)"
+        guard beginAction(key, label: "プロジェクトを削除中") else {return}
+        defer {endAction(key)}
+        do {
+            guard state.features?.contains("project.remove") == true else {
+                throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+            }
+            let _: OK = try await api.command(["type": "project.remove", "projectId": project.id])
+            await refresh()
+        } catch {report(error)}
+    }
     func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
         guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
         defer {endAction(workspace.id)}
