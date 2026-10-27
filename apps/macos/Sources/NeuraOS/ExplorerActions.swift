@@ -36,7 +36,19 @@ enum ExplorerFiles {
             return ExplorerChange(oldPath: source, newPath: nil)
         }
         let to = try target(root: root, path: destination, mustExist: false)
-        guard !fm.fileExists(atPath: to.path) else {throw CocoaError(.fileWriteFileExists)}
+        if fm.fileExists(atPath: to.path) {
+            let from = try target(root: root, path: source, mustExist: true)
+            let parent = from.deletingLastPathComponent()
+            // An existing case alias is safe only when it is the same directory entry.
+            // Checking exact directory names also rejects distinct files and hard links.
+            let names = try fm.contentsOfDirectory(atPath: parent.path)
+            guard operation == .rename || operation == .move,
+                  parent.path == to.deletingLastPathComponent().path,
+                  from.lastPathComponent.caseInsensitiveCompare(to.lastPathComponent) == .orderedSame,
+                  names.contains(from.lastPathComponent), !names.contains(to.lastPathComponent) else {
+                throw CocoaError(.fileWriteFileExists)
+            }
+        }
         switch operation {
         case .newFile: try Data().write(to: to, options: .withoutOverwriting)
         case .newFolder: try fm.createDirectory(at: to, withIntermediateDirectories: false)
