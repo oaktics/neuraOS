@@ -6,7 +6,7 @@ import {constants} from 'node:fs';
 import {homedir} from 'node:os';
 import {join,delimiter} from 'node:path';
 import {z} from 'zod';
-import {Fault,type Command} from './contracts.ts';
+import {Fault,type Command,type PullRequestSource} from './contracts.ts';
 import {git} from './workspace.ts';
 import {ChecksCache,parseChecks,type CISnapshot} from './github-checks.ts';
 
@@ -85,7 +85,7 @@ export class GitHub {
     try {
       await this.gitRun(root,['fetch','--no-tags','origin',`+refs/pull/${number}/head:${ref}`]);
       const commit=(await this.gitRun(root,['rev-parse','--verify',`${ref}^{commit}`])).trim();
-      return {branch:`PR #${number}`,commit};
+      return {branch:`PR #${number}`,commit,pullRequestSource:{repository,number,sourceHead:commit}};
     } finally {await this.gitRun(root,['update-ref','-d',ref]).catch(()=>{});}
   }
   private async api(root:string,endpoint:string,args:string[]=[]){return JSON.parse(await this.run(root,['api','--hostname','github.com',endpoint,...args])) as unknown;}
@@ -131,18 +131,32 @@ export class GitHub {
     catch{return {state:'unavailable',checks:[],fetchedAt:new Date().toISOString()};}
     return result;
   }
-  async status(root:string,force=false){
+  private async source(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
+    const parsed=z.object({repository:repoName,number:z.number().int().positive().safe(),localBranch:z.string().min(1),sourceHead:z.string().regex(/^[a-f0-9]{40,64}$/)}).safeParse(source);
+    if(!parsed.success)return undefined;
+    const value=parsed.data;
+    if(value.repository.toLowerCase()!==context.repository.toLowerCase()||value.localBranch!==context.branch)return undefined;
+    // Commits made on this worktree retain its explicit identity. An unrelated reset does not.
+    try{await this.gitRun(root,['merge-base','--is-ancestor',value.sourceHead,context.head]);}catch{return undefined;}
+    return value;
+  }
+  async status(root:string,force=false,source?:PullRequestSource){
     const context=await this.context(root);
-    const key=JSON.stringify([context.repository,context.branch,context.head]);
-    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context),force);
+    const binding=await this.source(root,context,source);
+    const key=JSON.stringify([context.repository,context.branch,context.head,binding??null]);
+    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context,binding),force);
     const current=await this.context(root);
     if(JSON.stringify(current)!==JSON.stringify(context))throw new Fault('github_stale','ブランチまたはコミットが変更されました。更新してください。',409);
     return result;
   }
-  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>){
-    const [repo,pulls]=await Promise.all([this.repository(root,context.repository),this.pulls(root,context)]);
-    const selected=pulls.find(pr=>pr.state==='open')??pulls[0];
-    const result={...context,defaultBranch:repo.default_branch,mergeMethods:[...(repo.allow_squash_merge?['squash']:[]),...(repo.allow_merge_commit?['merge']:[]),...(repo.allow_rebase_merge?['rebase']:[])],fetchedAt:new Date().toISOString()};
+  private async selectedPull(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
+    const pulls=await this.pulls(root,context);
+    const local=pulls.find(pr=>pr.state==='open')??pulls[0];
+    return local?{number:local.number,isSource:false}:source?{number:source.number,isSource:true}:undefined;
+  }
+  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
+    const [repo,selected]=await Promise.all([this.repository(root,context.repository),this.selectedPull(root,context,source)]);
+    const result={...context,sourcePullRequest:source&&selected?.isSource?{repository:source.repository,number:source.number}:null,defaultBranch:repo.default_branch,mergeMethods:[...(repo.allow_squash_merge?['squash']:[]),...(repo.allow_merge_commit?['merge']:[]),...(repo.allow_rebase_merge?['rebase']:[])],fetchedAt:new Date().toISOString()};
     if(!selected)return {...result,pullRequest:null};
     const endpoint=`repos/${context.repository}`;
     const [pr,issueComments,reviews,lineComments,unresolvedThreads]=await Promise.all([
@@ -163,15 +177,15 @@ export class GitHub {
     if(context.repository!==c.repository||context.branch!==c.branch||context.head!==c.expectedHead)throw new Fault('github_stale','リポジトリ、ブランチ、またはコミットが変更されています。更新してから操作してください。',409);
     return context;
   }
-  async mutate(root:string,c:Mutation){
+  async mutate(root:string,c:Mutation,source?:PullRequestSource){
     // Also invalidate uncertain write outcomes, and detach pre-write in-flight reads.
     const prefix=JSON.stringify([c.repository]).slice(0,-1)+',';
     this.statusCache.invalidate(prefix);
     this.checksCache.invalidate(c.repository+':');
-    try{return await this.performMutation(root,c);}
+    try{return await this.performMutation(root,c,source);}
     finally{this.statusCache.invalidate(prefix);this.checksCache.invalidate(c.repository+':');}
   }
-  private async performMutation(root:string,c:Mutation){
+  private async performMutation(root:string,c:Mutation,source?:PullRequestSource){
     const context=await this.target(root,c);
     if(c.type==='github.push'){
       // An explicit refspec and URL avoid push.default, pushurl, mirror and upstream surprises.
@@ -191,7 +205,10 @@ export class GitHub {
       return {ok:true,message:'PR を作成しました。',url:pr.html_url};
     }
     const [pr,unresolved,repo]=await Promise.all([this.detail(root,context.repository,c.number),this.unresolved(root,context.repository,c.number),this.repository(root,context.repository)]);
-    if(pr.headRefName!==context.branch||`${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`.toLowerCase()!==context.repository.toLowerCase())throw new Fault('github_pr_mismatch','この作業ブランチの PR ではありません。',409);
+    const binding=await this.source(root,context,source);
+    const selected=binding?await this.selectedPull(root,context,binding):undefined;
+    const matches=binding ? selected?.number===c.number : pr.headRefName===context.branch&&`${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`.toLowerCase()===context.repository.toLowerCase();
+    if(!matches)throw new Fault('github_pr_mismatch','この作業ブランチの PR ではありません。',409);
     if(pr.headRefOid!==c.expectedPRHead||pr.headRefOid!==context.head)throw new Fault('github_stale','PR とローカルのコミットが一致しません。更新・push 後に再確認してください。',409);
     if(pr.state!=='OPEN'||pr.isDraft||pr.mergeStateStatus!=='CLEAN'||pr.reviewDecision==='CHANGES_REQUESTED'||unresolved>0)throw new Fault('github_merge_blocked','マージできません。Draft、CI、レビュー、未解決コメント、競合を確認してください。',409);
     if(!({merge:repo.allow_merge_commit,squash:repo.allow_squash_merge,rebase:repo.allow_rebase_merge}[c.method]))throw new Fault('github_merge_method','このリポジトリでは選択したマージ方式を利用できません。',409);
