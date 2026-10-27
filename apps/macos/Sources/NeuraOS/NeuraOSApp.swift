@@ -225,11 +225,9 @@ struct Sidebar: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(model.sidebarSpaces.spaces) {space in
-                            Button {switchSpace(space.id)} label: {
-                                Circle().fill(space.id == model.sidebarSpaces.active.id ? Color.accentColor : Color.secondary.opacity(0.3))
-                                    .frame(width: 8, height: 8).frame(width: 20, height: 28).contentShape(Rectangle())
-                            }.help(space.name).accessibilityLabel(space.name)
-                                .accessibilityAddTraits(space.id == model.sidebarSpaces.active.id ? .isSelected : [])
+                            SidebarSpaceButton(space: space, isSelected: space.id == model.sidebarSpaces.active.id) {
+                                switchSpace(space.id)
+                            }
                         }
                     }
                 }.scrollIndicators(.hidden)
