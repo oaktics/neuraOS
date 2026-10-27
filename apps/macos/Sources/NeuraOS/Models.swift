@@ -33,6 +33,8 @@ struct Snapshot: Codable {
     var projects: [Project] = []
     var workspaces: [Workspace] = []
     var terminals: [TerminalRecord] = []
+    // Tab ownership changes independently of activity, dimensions and process status.
+    private(set) var terminalMembership: [TerminalMembership] = []
     var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
     var supportsGitHub: Bool {protocolVersion == 1 && features?.contains("github") == true}
 
@@ -43,14 +45,21 @@ struct Snapshot: Codable {
         if features != snapshot.features {features = snapshot.features}
         if projects != snapshot.projects {projects = snapshot.projects}
         if workspaces != snapshot.workspaces {workspaces = snapshot.workspaces}
+        let membership = snapshot.terminals.map {TerminalMembership(id: $0.id, workspaceId: $0.workspaceId, provider: $0.provider)}
+        if terminalMembership != membership {terminalMembership = membership}
         if terminals != snapshot.terminals {terminals = snapshot.terminals}
     }
+}
+struct TerminalMembership: Equatable {
+    let id: String
+    let workspaceId: String
+    let provider: String
 }
 struct FileEntry: Codable, Identifiable {var id: String {path}; let name: String; let path: String; let isDirectory: Bool}
 struct DirectoryListing: Codable {let path: String; let entries: [FileEntry]}
 struct FileContent: Codable, Equatable {let path: String; let content: String; let hash: String}
-struct Change: Codable, Identifiable {var id: String {path}; let path: String; let status: String}
-struct GitStatus: Codable {var branch: String = ""; var changes: [Change] = []}
+struct Change: Codable, Identifiable, Equatable {var id: String {path}; let path: String; let status: String}
+struct GitStatus: Codable, Equatable {var branch: String = ""; var changes: [Change] = []}
 struct Diff: Codable {let path: String; let content: String}
 struct TerminalChunk: Codable {let data: String; let cols: Int?; let rows: Int?}
 struct TerminalOutput: Codable {let data: String; let chunks: [TerminalChunk]; let cursor: Int; let more: Bool; let status: String; let cols: Int; let rows: Int}

@@ -97,7 +97,7 @@ struct WorkspaceView: View {
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .onAppear {restore(); openRequestedTerminal()}
-        .onChange(of: model.state.terminals) {_, _ in reconcileTerminals()}
+        .onChange(of: model.state.terminalMembership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
             Task { @MainActor in reconcileTerminals() }
@@ -149,7 +149,7 @@ struct WorkspaceView: View {
                                         Image(systemName: item.icon)
                                         Text(item.title).lineLimit(1)
                                         if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
-                                        if model.terminal(id: item.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5)}
+                                        TerminalRunningIndicator(terminalId: item.terminalId)
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityLabel(item.title).help(item.filePath ?? item.title)
                                 Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
@@ -349,7 +349,27 @@ struct WorkspaceView: View {
                                   seen: &seenTerminalIds, startingTabs: model.startingTerminalTabs)
     }
     private func persist() {guard restored, let data = try? JSONEncoder().encode(layout) else {return}; UserDefaults.standard.set(data, forKey: storageKey)}
-    private func refreshGit() async {guard workspace.supportsGit else {return}; do {git = try await model.api.get("v1/workspaces/\(workspace.id)/git"); gitError = nil} catch {gitError = error.localizedDescription}}
+    private func refreshGit() async {
+        guard workspace.supportsGit else {return}
+        do {
+            let next: GitStatus = try await model.api.get("v1/workspaces/\(workspace.id)/git")
+            if git != next {git = next}
+            if gitError != nil {gitError = nil}
+        } catch {
+            if gitError != error.localizedDescription {gitError = error.localizedDescription}
+        }
+    }
+}
+
+// Observe activity-bearing records only at the leaf, never in the tab bar owner.
+private struct TerminalRunningIndicator: View {
+    @Environment(AppModel.self) private var model
+    let terminalId: String?
+    var body: some View {
+        if model.terminal(id: terminalId)?.status == "running" {
+            Circle().fill(.green).frame(width: 5, height: 5)
+        }
+    }
 }
 
 struct TerminalPane: View {
