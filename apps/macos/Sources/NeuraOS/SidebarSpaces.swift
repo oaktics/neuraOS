@@ -29,6 +29,54 @@ struct SidebarSpaces: Codable {
     }
 }
 
+/// Keep terminal observation in each button, away from sidebar menus and gestures.
+struct SidebarSpaceButton: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovered = false
+    let space: SidebarSpace
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let activity = model.sidebarSpaces.activity(in: space.id, workspaces: model.state.workspaces,
+                                                   terminals: model.state.terminals, connected: model.connected)
+        let description = activity.map {"\(space.name)・\($0.label)"} ?? space.name
+        Button(action: action) {
+            Group {
+                if activity == .working {
+                    if reduceMotion {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 12)).foregroundStyle(Color.accentColor)
+                    } else {
+                        ProgressView().controlSize(.mini).frame(width: 14, height: 14)
+                    }
+                } else {
+                    Circle().fill(activity == .waiting ? Color.orange :
+                                  isSelected ? Color.accentColor : Color.secondary.opacity(0.3))
+                        .frame(width: 8, height: 8)
+                }
+            }
+            .frame(width: 28, height: 28)
+            .background(Color.primary.opacity(hovered ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 7))
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .onHover {hovered = $0}
+        .help(description)
+        .accessibilityLabel(space.name)
+        .accessibilityValue(activity?.label ?? "")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+}
+
+extension SidebarSpaces {
+    func activity(in spaceId: String, workspaces: [Workspace], terminals: [TerminalRecord], connected: Bool) -> AgentActivity? {
+        let workspaceIds = Set(workspaces.filter {owner(of: $0.projectId) == spaceId}.map(\.id))
+        return WorkspaceActivity(terminals: terminals.filter {workspaceIds.contains($0.workspaceId)}, connected: connected).activity
+    }
+}
+
 /// Own a precise, phased gesture only after it locks horizontally inside the sidebar.
 struct SidebarSwipeArea: NSViewRepresentable {
     var canBegin: () -> Bool
