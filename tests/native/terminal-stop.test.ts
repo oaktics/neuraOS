@@ -64,7 +64,9 @@ setInterval(()=>{},1000);
     assert.ok(childPid,'child installed its SIGHUP handler');
     let stopped=false;
     const stopping=terminals.stopWorkspace('w').then(()=>{stopped=true;});
-    await new Promise(r=>setTimeout(r,300));
+    // Wait for the observable leader exit instead of assuming process discovery
+    // and PTY delivery finish within 300 ms on a busy CI runner.
+    for(let i=0;i<40&&store.state().terminals.find(t=>t.id===terminal.id)?.status==='running';i++)await new Promise(r=>setTimeout(r,25));
     assert.equal(store.state().terminals.find(t=>t.id===terminal.id)?.status,'exited');
     process.kill(childPid,0);
     assert.equal(stopped,false,'leader exit must not resolve group cleanup');
