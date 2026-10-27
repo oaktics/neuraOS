@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
-import {Terminals,parseProcessTable} from '../../apps/daemon/src/terminals.ts';
+import {Terminals,parseProcessTable,processGroupAlive} from '../../apps/daemon/src/terminals.ts';
 import {Store} from '../../apps/daemon/src/store.ts';
 
 test('process table accepts zero PGIDs but rejects malformed rows with an actionable error',()=>{
@@ -64,7 +64,9 @@ setInterval(()=>{},1000);
     assert.ok(childPid,'child installed its SIGHUP handler');
     let stopped=false;
     const stopping=terminals.stopWorkspace('w').then(()=>{stopped=true;});
-    await new Promise(r=>setTimeout(r,300));
+    // Wait for the observable leader exit instead of assuming process discovery
+    // and PTY delivery finish within 300 ms on a busy CI runner.
+    for(let i=0;i<40&&store.state().terminals.find(t=>t.id===terminal.id)?.status==='running';i++)await new Promise(r=>setTimeout(r,25));
     assert.equal(store.state().terminals.find(t=>t.id===terminal.id)?.status,'exited');
     process.kill(childPid,0);
     assert.equal(stopped,false,'leader exit must not resolve group cleanup');
@@ -76,4 +78,15 @@ setInterval(()=>{},1000);
     if(previous===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=previous;
     await rm(dir,{recursive:true,force:true});
   }
+});
+
+test('group liveness waits on EPERM, only ESRCH proves exit, and zero is never probed',()=>{
+  const probes:number[]=[];
+  assert.equal(processGroupAlive(42,(pid,signal)=>{probes.push(pid);assert.equal(signal,0);}),true);
+  assert.deepEqual(probes,[-42]);
+  for(const [code,alive] of [['EPERM',true],['ESRCH',false]] as const){
+    assert.equal(processGroupAlive(42,()=>{throw Object.assign(new Error(code),{code});}),alive);
+  }
+  assert.throws(()=>processGroupAlive(42,()=>{throw Object.assign(new Error('unexpected'),{code:'EINVAL'});}),{code:'EINVAL'});
+  assert.throws(()=>processGroupAlive(0,()=>assert.fail('must not probe own group')));
 });

@@ -5,7 +5,7 @@ import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {mkdir,readFile,writeFile,chmod,stat,realpath} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
-import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command} from './contracts.ts';
+import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command,type PullRequestSource} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
 import {ProviderUsageService} from './provider-usage.ts';
@@ -32,7 +32,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   });
   app.setErrorHandler((error,req,reply)=>{const e=error instanceof Fault?error:error instanceof z.ZodError?new Fault('invalid_request','要求の形式が正しくありません。'):new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);reply.code(e.status).send({error:e.code,message:e.message});});
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
-  async function execute(c:Command,operationId:string,fetchedTarget?:Awaited<ReturnType<typeof work.fetchDefault>>):Promise<unknown>{
+  async function execute(c:Command,operationId:string,fetchedTarget?:(Awaited<ReturnType<typeof work.fetchDefault>> & {pullRequestSource?:Omit<PullRequestSource,'localBranch'>})):Promise<unknown>{
     if(c.type==='workspace.create'&&c.baseRef&&c.pullRequest)throw new Fault('invalid_source','作成元は一つだけ指定してください。');
     if(!fetchedTarget && ((c.type==='workspace.create'&&!c.baseRef)||c.type==='workspace.sync-default')){
       let root:string;
@@ -102,7 +102,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
-        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString()};store.put('workspaces',record);
+        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString(),...(fetchedTarget?.pullRequestSource?{pullRequestSource:{...fetchedTarget.pullRequestSource,localBranch:branch}}:{})};store.put('workspaces',record);
         // Worktree creation is successful even if an optional CLI cannot start.
         // The operation's cached response prevents retries from opening duplicates.
         const startupErrors:string[]=[];
@@ -145,7 +145,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'terminal.resize':return terminals.resize(c.terminalId,c.clientId,c.cols,c.rows);
       case 'terminal.stop':return terminals.stop(c.terminalId);
       case 'file.save':return work.saveFile(fileWorkspace(c.workspaceId).path,c.path,c.content,c.expectedHash);
-      case 'github.push':case 'github.create':case 'github.merge':return github.mutate(gitWorkspace(c.workspaceId).path,c);
+      case 'github.push':case 'github.create':case 'github.merge':{const w=gitWorkspace(c.workspaceId);return github.mutate(w.path,c,w.pullRequestSource);}
     }
   }
   let folderRefresh:Promise<void>|undefined;
@@ -220,7 +220,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   const fileWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='scratch')throw new Fault('folder_required','ファイルを操作するにはフォルダを紐づけてください。');return value;};
   const gitWorkspace=(id:string)=>{const value=workspace(id);if(value.kind==='folder'||value.kind==='scratch')throw new Fault('git_required','このフォルダではGitを使用していません。');return value;};
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
-  app.get('/v1/workspaces/:id/github',async req=>github.status(gitWorkspace((req.params as {id:string}).id).path,(req.query as {refresh?:string}).refresh==='true'));
+  app.get('/v1/workspaces/:id/github',async req=>{const w=gitWorkspace((req.params as {id:string}).id);return github.status(w.path,(req.query as {refresh?:string}).refresh==='true',w.pullRequestSource);});
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
   app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
   return {app,store,token};

@@ -1,8 +1,11 @@
 import SwiftUI
 
+struct GitHubPRSource: Decodable {let repository: String; let number: Int}
+
 struct GitHubSnapshot: Decodable {
     let repository: String; let branch: String; let head: String; let defaultBranch: String
     let mergeMethods: [String]; let fetchedAt: String; let pullRequest: GitHubPR?
+    let sourcePullRequest: GitHubPRSource?
     func target(workspaceId: String, type: String) -> [String: Any] {
         ["type": type, "workspaceId": workspaceId, "repository": repository, "branch": branch, "expectedHead": head]
     }
@@ -108,7 +111,7 @@ struct GitHubPane: View {
                                 if snapshot.pullRequest?.state != "OPEN" {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
                             }.controlSize(.small)
                         }
-                        Text("Push・PR に含まれるのはコミット済みの変更です。").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text(snapshot.sourcePullRequest == nil ? "Push・PR に含まれるのはコミット済みの変更です。" : "作成元の PR を表示しています。Push はローカルブランチへ送信し、元の PR は更新しません。").font(.system(size: 11)).foregroundStyle(.secondary)
                         if let pr = snapshot.pullRequest {pullRequest(pr, snapshot: snapshot)}
                         else {
                             VStack(alignment: .leading, spacing: 8) {

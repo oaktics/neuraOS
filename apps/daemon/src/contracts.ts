@@ -8,7 +8,8 @@ const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.
 export const Provider = z.enum(['codex', 'claude', 'shell']);
 export type Provider = z.infer<typeof Provider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; createdAt:string}
-export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string}
+export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
+export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource}
 export type AgentActivity = 'working'|'waiting'|'idle'|'unknown';
 export interface TerminalRecord {id:string; workspaceId:string; provider:Provider; status:'running'|'exited'|'interrupted'; activity?:AgentActivity; createdAt:string; exitCode?:number; cols:number; rows:number}
 export interface AgentNotification {id:string;terminalId:string;workspaceId:string;provider:Provider;kind:'waiting'|'completed';createdAt:string}
