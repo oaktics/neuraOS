@@ -199,10 +199,6 @@ struct Sidebar: View {
             }.padding(12)
             HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
                 .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
-            HStack {Text("プロジェクト").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary); Spacer(); Menu {
-                Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
-                Button("フォルダを開く…") {model.addProject()}
-            } label: {Image(systemName: "plus").frame(width: 24, height: 24)}.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("プロジェクトを追加")}.padding(.horizontal, 10).padding(.bottom, 4)
             GeometryReader {geometry in
                 ZStack {
                     ForEach(pagerSpaces) {space in
@@ -217,6 +213,15 @@ struct Sidebar: View {
                     .onAppear {sidebarWidth = geometry.size.width}
                     .onChange(of: geometry.size.width) {_, width in sidebarWidth = width}
             }
+            Menu {
+                Button("新しいプロジェクト…") {model.showNewProject = true}
+                    .disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
+                Button("フォルダを開く…") {model.addProject()}
+            } label: {
+                Label("プロジェクトを追加", systemImage: "folder.badge.plus")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+            }.menuStyle(.borderlessButton).menuIndicator(.hidden).padding(.horizontal, 16)
             Spacer(minLength: 0)
             Divider()
             HStack(spacing: 6) {
@@ -235,7 +240,7 @@ struct Sidebar: View {
                     .disabled(model.sidebarSpaces.adjacent(1) == nil).help("次のWorkspace")
                 Button {model.showNewSpace = true} label: {Image(systemName: "plus").frame(width: 24, height: 28)}.help("新しいWorkspace")
             }.buttonStyle(.plain).padding(8)
-        }.background(Palette.surface).clipped()
+        }.background(Color(nsColor: .windowBackgroundColor)).clipped()
         .background(SidebarSwipeArea(canBegin: {!settling}, onProgress: {translation in
             guard !settling else {return}
             let offset = translation < 0 ? 1 : -1
@@ -287,86 +292,116 @@ struct Sidebar: View {
         let active = spaces.firstIndex(where: {$0.id == model.sidebarSpaces.active.id}) ?? 0
         return CGFloat(index - active) * width
     }
+    @ViewBuilder
+    private func projectActions(_ project: Project, space: SidebarSpace) -> some View {
+        if project.supportsGit {
+            Button("新しいworktree…") {
+                if let workspace = model.state.workspaces.first(where: {$0.projectId == project.id}) {
+                    model.select(workspace.id)
+                }
+                model.showNewWorkspace = true
+            }
+            Divider()
+        }
+        if project.folderless == true {
+            Button("フォルダを紐づける…") {model.attachFolder(to: project)}
+                .disabled(!model.connected || model.isBusy("project.attach.\(project.id)") || !model.supportsFolderless)
+        }
+        if project.supportsGit {
+            Menu("worktree作成時に自動起動") {
+                ForEach(["codex", "claude", "shell"], id: \.self) {provider in
+                    Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",
+                           isOn: Binding(get: {project.worktreeStartup?.contains(provider) == true},
+                                         set: {enabled in Task {await model.setWorktreeStartup(project, provider: provider, enabled: enabled)}}))
+                }
+            }
+            .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
+            Divider()
+        }
+        Menu("Workspaceへ移動") {
+            ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
+                Button(space.name) {model.moveProject(project.id, to: space.id)}
+            }
+        }.disabled(model.sidebarSpaces.spaces.count < 2)
+        Divider()
+        Button("neuraOSから削除…", role: .destructive) {removingProject = project}
+            .disabled(!model.connected || model.isBusy("project.remove.\(project.id)") || model.state.features?.contains("project.remove") != true)
+    }
     private func projectList(_ space: SidebarSpace) -> some View {
         let projects = model.state.projects.filter {model.sidebarSpaces.owner(of: $0.id) == space.id}
         let searchQuery = space.id == model.sidebarSpaces.active.id ? query : ""
-        return ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(projects) {project in
-                        VStack(alignment: .leading, spacing: 4) {
+        return List(selection: Binding<String?>(
+            get: {model.selectedId},
+            set: {if space.id == model.sidebarSpaces.active.id, let id = $0 {model.select(id)}}
+        )) {
+            ForEach(projects) {project in
+                Section {
+                    if !collapsed.contains(project.id) {
+                        ForEach(model.state.workspaces.filter {$0.projectId == project.id && (searchQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(searchQuery) || project.name.localizedCaseInsensitiveContains(searchQuery))}) {workspace in
                             HStack(spacing: 8) {
-                                Button {if collapsed.contains(project.id) {collapsed.remove(project.id)} else {collapsed.insert(project.id)}} label: {Image(systemName: collapsed.contains(project.id) ? "chevron.right" : "chevron.down").font(.system(size: 9))}.buttonStyle(.plain)
-                                Text(project.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                                Spacer()
-                                if project.supportsGit {Button {if let w = model.state.workspaces.first(where: {$0.projectId == project.id}) {model.select(w.id)}; model.showNewWorkspace = true} label: {Image(systemName: "plus").font(.system(size: 11))}.buttonStyle(.plain).help("新しいworktree")}
-                            }.padding(.horizontal, 12).padding(.vertical, 5)
-                            .contextMenu {
-                                if project.folderless == true {
-                                    Button("フォルダを紐づける…") {model.attachFolder(to: project)}
-                                        .disabled(!model.connected || model.isBusy("project.attach.\(project.id)") || !model.supportsFolderless)
-                                }
-                                if project.supportsGit {
-                                    Menu("worktree作成時に自動起動") {
-                                        ForEach(["codex", "claude", "shell"], id: \.self) {provider in
-                                            Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",
-                                                   isOn: Binding(get: {project.worktreeStartup?.contains(provider) == true},
-                                                                 set: {enabled in Task {await model.setWorktreeStartup(project, provider: provider, enabled: enabled)}}))
-                                        }
-                                    }
-                                    .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
-                                    Divider()
-                                }
-                                Menu("Workspaceへ移動") {
-                                    ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
-                                        Button(space.name) {model.moveProject(project.id, to: space.id)}
-                                    }
-                                }.disabled(model.sidebarSpaces.spaces.count < 2)
-                                Divider()
-                                Button("neuraOSから削除…", role: .destructive) {removingProject = project}
-                                    .disabled(!model.connected || model.isBusy("project.remove.\(project.id)") || model.state.features?.contains("project.remove") != true)
+                                Label(workspace.name, systemImage: workspace.kind == "worktree" ? "arrow.triangle.branch" : "folder")
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                                WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
+                                WorkspaceActivityStatus(workspaceId: workspace.id)
                             }
-                            if !collapsed.contains(project.id) {
-                                ForEach(model.state.workspaces.filter {$0.projectId == project.id && (searchQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(searchQuery) || project.name.localizedCaseInsensitiveContains(searchQuery))}) {workspace in
-                                    Button {model.select(workspace.id)} label: {
-                                        HStack(spacing: 8) {
-                                            Text(workspace.name).lineLimit(1)
-                                            Spacer(minLength: 0)
-                                            WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
-                                            WorkspaceActivityStatus(workspaceId: workspace.id)
-                                        }.font(.system(size: 12)).padding(.vertical, 6).padding(.horizontal, 8).padding(.leading, 10).contentShape(Rectangle())
-                                            .background(model.selectedId == workspace.id ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                                    }.buttonStyle(.plain)
-                                    .contextMenu {
-                                        if workspace.kind == "root" {
-                                            Button {
-                                                if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
-                                                    model.error = "未保存の編集があります。保存または破棄してから更新してください。"
-                                                } else {Task {await model.syncDefault(workspace)}}
-                                            } label: {
-                                                Label("リモートの最新に更新", systemImage: "arrow.down.circle")
-                                            }
-                                                .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
-                                                .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
-                                        }
-                                        if workspace.kind == "worktree" {
-                                            Button("worktreeを削除", role: .destructive) {
-                                                deleteWorkspace(workspace)
-                                            }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
-                                        }
+                            .tag(workspace.id)
+                            .contextMenu {
+                                if workspace.kind == "root" {
+                                    Button {
+                                        if DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) {
+                                            model.error = "未保存の編集があります。保存または破棄してから更新してください。"
+                                        } else {Task {await model.syncDefault(workspace)}}
+                                    } label: {
+                                        Label("リモートの最新に更新", systemImage: "arrow.down.circle")
                                     }
+                                        .help("originのデフォルトブランチに切り替えて更新します。変更や実行中のターミナルがある場合は停止します。")
+                                        .disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.remote-default") != true)
+                                }
+                                if workspace.kind == "worktree" {
+                                    Button("worktreeを削除", role: .destructive) {
+                                        deleteWorkspace(workspace)
+                                    }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
                                 }
                             }
                         }
                     }
-                    if projects.isEmpty {
-                        VStack(spacing: 10) {
-                            Text("プロジェクトを作成して始める").font(.system(size: 12)).foregroundStyle(.secondary)
-                            Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
-                            Button("フォルダを開く…") {model.addProject()}
-                        }.padding(.vertical, 24)
-                    }
-                }.padding(.horizontal, 8)
+                } header: {
+                    HStack(spacing: 8) {
+                        Button {
+                            if collapsed.contains(project.id) {collapsed.remove(project.id)} else {collapsed.insert(project.id)}
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: collapsed.contains(project.id) ? "chevron.right" : "chevron.down")
+                                    .font(.system(size: 9, weight: .semibold)).frame(width: 10)
+                                Text(project.name).font(.caption.weight(.semibold)).lineLimit(1)
+                            }.foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityLabel("\(project.name)を\(collapsed.contains(project.id) ? "展開" : "折りたたむ")")
+                        if project.supportsGit {
+                            Button {
+                                if let workspace = model.state.workspaces.first(where: {$0.projectId == project.id}) {
+                                    model.select(workspace.id)
+                                }
+                                model.showNewWorkspace = true
+                            } label: {
+                                Label("worktree", systemImage: "plus")
+                                    .font(.caption).fixedSize()
+                            }.buttonStyle(.borderless).controlSize(.small).help("新しいworktree").accessibilityLabel("新しいworktree")
+                        }
+                    }.padding(.horizontal, 4).padding(.vertical, 4)
+                    .contextMenu {projectActions(project, space: space)}
+                }
             }
+            if projects.isEmpty {
+                VStack(spacing: 10) {
+                    Text("プロジェクトを作成して始める").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Button("新しいプロジェクト…") {model.showNewProject = true}.disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
+                    Button("フォルダを開く…") {model.addProject()}
+                }.padding(.vertical, 24)
+            }
+        }
+        .listStyle(.sidebar)
     }
     private func finishSwipe(_ offset: Int?) {
         guard !settling else {return}
