@@ -109,7 +109,7 @@ struct NativeTerminal: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: TerminalView, context: Context) {
-        context.coordinator.running = terminal.status == "running"
+        context.coordinator.updateStatus(terminal.status)
         context.coordinator.setVisible(visible)
     }
     static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {coordinator.stop(); view.terminalDelegate = nil}
@@ -120,12 +120,27 @@ struct NativeTerminal: NSViewRepresentable {
         var delay: Task<Void, Never>?
         var running = true; var cursor = 0; var pendingInput = ""; var pendingSize: (Int, Int)?; var desiredSize: (Int, Int)?
         var visible = false
+        private var ended = false
         var applying = false; var caughtUp = false; var reportedError = false
-        init(terminal: TerminalRecord, api: DaemonClient, onError: @escaping (Error) -> Void) {self.terminal = terminal; self.api = api; self.onError = onError; self.running = terminal.status == "running"}
+        init(terminal: TerminalRecord, api: DaemonClient, onError: @escaping (Error) -> Void) {self.terminal = terminal; self.api = api; self.onError = onError; self.running = terminal.status == "running"; self.ended = terminal.status != "running"}
+        func updateStatus(_ status: String) {
+            // A terminal ID never restarts. Ignore stale running snapshots after exit.
+            if status != "running" {ended = true}
+            running = !ended && status == "running"
+            if !running {pendingInput = ""; pendingSize = nil}
+        }
+        @discardableResult func handleLifecycleError(_ error: Error) -> Bool {
+            guard let error = error as? APIError,
+                  ["terminal_stopped", "terminal_missing"].contains(error.error) else {return false}
+            updateStatus("exited")
+            // Stopped terminals retain their final output; deleted terminals do not.
+            if error.error == "terminal_missing" {stop()}
+            return true
+        }
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard !applying, newCols >= 20, newRows >= 5 else {return}
             desiredSize = (min(400, newCols), min(200, newRows))
-            if caughtUp && visible {pendingSize = desiredSize}
+            if running && caughtUp && visible {pendingSize = desiredSize}
         }
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             guard running, applying || (visible && caughtUp) else {return}
@@ -141,6 +156,7 @@ struct NativeTerminal: NSViewRepresentable {
             NSWorkspace.shared.open(url)
         }
         func stop() {
+            updateStatus("exited")
             setVisible(false)
             delay?.cancel()
             polling?.cancel()
@@ -152,7 +168,7 @@ struct NativeTerminal: NSViewRepresentable {
             visible = value
             if value {
                 delay?.cancel()
-                if caughtUp {pendingSize = desiredSize}
+                if running && caughtUp {pendingSize = desiredSize}
                 focusIfVisible()
             } else {
                 pendingSize = nil
@@ -168,6 +184,7 @@ struct NativeTerminal: NSViewRepresentable {
             }
         }
         func apply(_ output: TerminalOutput, to view: TerminalView) {
+            updateStatus(output.status)
             applying = true
             for chunk in output.chunks {
                 if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
@@ -176,7 +193,7 @@ struct NativeTerminal: NSViewRepresentable {
             applying = false; cursor = output.cursor
             if !caughtUp && !output.more {
                 caughtUp = true
-                if visible, let size = desiredSize {applying = true; view.getTerminal().resize(cols: size.0, rows: size.1); applying = false; pendingSize = size}
+                if running, visible, let size = desiredSize {applying = true; view.getTerminal().resize(cols: size.0, rows: size.1); applying = false; pendingSize = size}
                 focusIfVisible()
             }
             if visible && !output.chunks.isEmpty {view.needsDisplay = true}
@@ -210,6 +227,8 @@ struct NativeTerminal: NSViewRepresentable {
                         await pause(milliseconds: output.more ? 10 : visible ? 60 : 500)
                     } catch {
                         applying = false
+                        guard !Task.isCancelled else {return}
+                        if handleLifecycleError(error) {continue}
                         if visible, !reportedError, !(error is CancellationError) {reportedError = true; onError(error)}
                         await pause(milliseconds: 2000)
                     }
