@@ -18,6 +18,7 @@ function fixture(){
     calls.push({kind:'git',args});
     if(args[0]==='remote')return args.includes('--push')?state.pushRemote:state.remote;
     if(args[0]==='branch')return state.branch;
+    if(args[0]==='merge-base'){if(state.head===otherHead)throw new Error('unrelated history');return '';}
     if(args[0]==='rev-parse')return state.head;
     if(args.includes('push'))return '';
     throw new Error(`unexpected git: ${args}`);
@@ -157,4 +158,53 @@ test('status shares identical checkout reads and refreshes after mutations or HE
   await service.mutate('/repo',Command.parse({type:'github.push',...target}) as Extract<Command,{type:'github.push'}>);
   await service.status('/repo');assert.equal(details(),2);
   state.head=otherHead;await service.status('/repo');assert.equal(details(),3);
+});
+
+const source={repository:'owner/repo',number:17,localBranch:'neura/worktree-072c8145',sourceHead:head};
+test('explicit PR identity supports renamed local branches and forks without commit-based PR selection',async()=>{
+  const {service,state,calls}=fixture();state.branch=source.localBranch;state.pr.headRepositoryOwner.login='fork-owner';
+  const status=await service.status('/repo',false,source);
+  assert.equal(status.pullRequest?.number,17);
+  assert.deepEqual(status.sourcePullRequest,{repository:source.repository,number:17});
+  assert.equal(calls.some(c=>c.args[3]?.includes('/pulls?')),false);
+  await service.mutate('/repo',{...mergeCommand(),branch:state.branch},source);
+  assert.ok(mutations(calls)[0].args.includes('repos/owner/repo/pulls/17/merge'));
+  calls.length=0;
+  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch,number:18},source),{code:'github_pr_mismatch'});
+  assert.deepEqual(mutations(calls),[]);
+});
+test('source identity partitions cache and invalidates on branch, repository or unrelated history changes',async()=>{
+  const {service,state}=fixture();state.branch=source.localBranch;state.hasPR=false;
+  assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
+  assert.equal((await service.status('/repo')).pullRequest,null);
+  for(const binding of [{...source,repository:'other/repo'},{...source,localBranch:'other'},{...source,number:0}]){
+    assert.equal((await service.status('/repo',false,binding)).pullRequest,null);
+  }
+  state.branch='other';assert.equal((await service.status('/repo',false,source)).pullRequest,null);
+  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:'other'},source),{code:'github_pr_mismatch'});
+  state.branch=source.localBranch;state.head=otherHead;
+  assert.equal((await service.status('/repo',false,source)).pullRequest,null);
+});
+test('source PR metadata survives daemon restart and workspace reselection',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-pr-restore-')),f=fixture();f.state.branch=source.localBranch;
+  let daemon=await createDaemon(dir,f.service);
+  daemon.store.put('workspaces',{id:workspaceId,projectId:randomUUID(),name:'PR',path:'/repo',branch:source.localBranch,kind:'worktree',createdAt:new Date().toISOString(),pullRequestSource:source});
+  try{
+    for(let i=0;i<2;i++){
+      const response=await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers:{authorization:`Bearer ${daemon.token}`}});
+      assert.equal(response.statusCode,200,response.body);assert.equal(response.json().pullRequest.number,17);
+      if(i===0){await daemon.app.close();const next=fixture();next.state.branch=source.localBranch;daemon=await createDaemon(dir,next.service);}
+    }
+  }finally{await daemon.app.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('two explicit PRs at the same commit do not share cached identity; changed PR heads block merge',async()=>{
+  const {service,state,calls}=fixture();state.branch=source.localBranch;
+  assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
+  state.pr.number=18;
+  assert.equal((await service.status('/repo',false,{...source,number:18})).pullRequest?.number,18);
+  assert.deepEqual(calls.filter(c=>c.kind==='gh'&&c.args[0]==='pr').map(c=>c.args[2]),['17','18']);
+  state.pr.number=17;state.pr.headRefOid=otherHead;
+  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch},source),{code:'github_stale'});
+  assert.deepEqual(mutations(calls),[]);
 });
