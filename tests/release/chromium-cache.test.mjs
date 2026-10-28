@@ -27,6 +27,25 @@ test('CEF cache verifies archives, reuses SDKs, separates architectures and publ
     const count=downloads;
     assert.equal(await cachedSDK(options),one);
     assert.equal(downloads,count);
+    // A missing header previously caused persistent ENOTEMPTY failures.
+    for(const header of ['cef_version.h','capi/cef_app_capi.h']) {
+      await rm(join(one,'include',header));
+      const repaired=await Promise.all([cachedSDK(options),cachedSDK(options)]);
+      assert.deepEqual(repaired,[one,one]);
+      assert.ok(await readFile(join(one,'include',header)));
+      const afterRepair=downloads;
+      assert.equal(await cachedSDK(options),one);
+      assert.equal(downloads,afterRepair);
+    }
+    await writeFile(join(one,'../version.json'),'invalid stamp');
+    assert.equal(await cachedSDK(options),one);
+    // A failed replacement must not remove the existing entry; retry repairs it.
+    await rm(join(one,'include/cef_version.h'));
+    await assert.rejects(cachedSDK({...options,download:async target=>{
+      await writeFile(target,'corrupt download');
+    }}),/checksum mismatch/);
+    assert.equal(await readFile(join(one,'include/capi/cef_app_capi.h'),'utf8'),'api');
+    assert.equal(await cachedSDK(options),one);
     assert.notEqual(await cachedSDK({...options,arch:'x64'}),one);
     await assert.rejects(cachedSDK({...options,version:{...version,sha1:'0'.repeat(40)}}),/checksum mismatch/);
     assert.equal((await readdir(cacheRoot)).some(name=>name.startsWith('.prepare-')),false);
