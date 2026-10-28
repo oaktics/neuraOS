@@ -12,7 +12,7 @@
 
 #define API(name) static decltype(&name) p_##name
 API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
-API(cef_browser_host_create_browser_sync); API(cef_api_hash);
+API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_userfree_utf16_free);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
 static bool pumping = false;
@@ -90,6 +90,8 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 - (void)createBrowser;
 @end
 
+#include "BrowserDownloads.inc"
+
 static void CompleteShutdown() {
     if (!shuttingDown || !browsers.empty()) return;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -102,6 +104,11 @@ static void CompleteShutdown() {
     });
 }
 
+BOOL NCChromiumUsesTestKeychain(void) {
+    id path = [NSUserDefaults.standardUserDefaults volatileDomainForName:@"NeuraChromiumSmoke"][@"NeuraChromiumSmokeData"];
+    return [path isKindOfClass:NSString.class] && [path length] > 0;
+}
+
 static NSString *StartChromiumImpl() {
     if (initialized) return nil;
     if (shuttingDown) return @"Chromiumは終了処理中です。";
@@ -111,7 +118,7 @@ static NSString *StartChromiumImpl() {
     if (!library) return @"Chromiumが同梱されていません。pnpm buildでアプリをビルドしてください。";
 #define LOAD(name) p_##name = (decltype(p_##name))dlsym(library, #name); if (!p_##name) return @"ChromiumのAPIが見つかりません。"
     LOAD(cef_initialize); LOAD(cef_shutdown); LOAD(cef_do_message_loop_work);
-    LOAD(cef_browser_host_create_browser_sync); LOAD(cef_api_hash);
+    LOAD(cef_browser_host_create_browser_sync); LOAD(cef_api_hash); LOAD(cef_string_userfree_utf16_free);
 #undef LOAD
     const char *apiHash = p_cef_api_hash(CEF_API_VERSION, 0);
     if (!apiHash || strcmp(apiHash, CEF_API_HASH_PLATFORM) != 0) return @"ChromiumのAPIバージョンが一致しません。";
@@ -139,7 +146,11 @@ static NSString *StartChromiumImpl() {
     settings.external_message_pump = 1;
     settings.log_severity = LOGSEVERITY_WARNING;
     NCString logPath([profile stringByAppendingPathComponent:@"chromium.log"]); settings.log_file = logPath.value;
-    char name[] = "NeuraOS"; char *argv[] = {name, nullptr}; cef_main_args_t args = {1, argv};
+    // Isolated smoke profiles must never read the user's real Keychain.
+    // Chromium's test keychain avoids permission dialogs for disposable fixture data.
+    BOOL smoke = NCChromiumUsesTestKeychain();
+    char name[] = "NeuraOS", mockKeychain[] = "--use-mock-keychain";
+    char *argv[] = {name, smoke ? mockKeychain : nullptr, nullptr}; cef_main_args_t args = {smoke ? 2 : 1, argv};
     if (!p_cef_initialize(&args, &settings, nullptr, nullptr)) return @"Chromiumを開始できませんでした。別のneuraOSで同じプロファイルを使用していないか確認してください。";
     initialized = true;
     // SwiftUI context menus can service default-mode turns while they track.
@@ -195,6 +206,7 @@ static cef_window_info_t WindowInfo(NCChromiumView *view) {
 }
 static cef_client_t *MakeClient(NCChromiumView *view) {
     auto c = new Handler<cef_client_t>(view);
+    c->api.get_download_handler = [](cef_client_t *self) -> cef_download_handler_t * {return MakeDownloadHandler(View(self));};
     c->api.get_display_handler = [](cef_client_t *self) -> cef_display_handler_t * {
         auto h = new Handler<cef_display_handler_t>(View(self));
         h->api.on_address_change = [](cef_display_handler_t *s, cef_browser_t *browser, cef_frame_t *frame, const cef_string_t *url) {
@@ -280,6 +292,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         };
         h->api.on_before_close = [](cef_life_span_handler_t *s, cef_browser_t *browser) {
             NCChromiumView *v = View(s);
+            CloseDownloads(browser->get_identifier(browser));
             if (v) {[v failDevTools:@"browser_tab_closed"]; Release(v->_devRegistration); v->_devRegistration = nullptr; v->_devOutstanding.clear(); v->_browser = nullptr; if (!shuttingDown && v.onClosed) v.onClosed();}
             auto found = browsers.find(browser->get_identifier(browser));
             if (found != browsers.end()) {Release(found->second); browsers.erase(found);}
@@ -371,6 +384,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
     if (_closed) return; _closed = YES; [self cancelDevTools];
+    if (_browser) CloseDownloads(_browser->get_identifier(_browser));
     if (_browser) {auto host = _browser->get_host(_browser); host->close_browser(host, 1); Release(host);}
 }
 - (void)dealloc {[self close];}
@@ -460,3 +474,6 @@ int NCRunChromiumSmoke(NSString *url, NSString *dataDirectory) {
     [window orderOut:nil];
     return result;
 }
+
+#include "BrowserDownloadSmoke.inc"
+#include "BrowserDownloadRegression.inc"

@@ -91,6 +91,7 @@ struct BrowserPane: View {
                     Image(systemName: browser.isLoading ? "xmark" : "arrow.clockwise")
                 }.help(browser.isLoading ? "読み込みを停止" : "再読み込み")
                 TextField("URL", text: $browser.address).textFieldStyle(.roundedBorder).onSubmit {browser.navigate()}
+                BrowserDownloadsButton()
                 Button {browser.navigate()} label: {Image(systemName: "arrow.right")}.help("開く")
                 Button {if let url = BrowserModel.navigationURL(browser.address), url.scheme != "about" {NSWorkspace.shared.open(url)}} label: {
                     Image(systemName: "arrow.up.right.square")
