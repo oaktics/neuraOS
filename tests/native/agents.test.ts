@@ -164,3 +164,21 @@ test('history selection in another terminal cannot take over a live session',asy
     assert.equal(f.agents.get(worker).status,'idle');
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+test('Codex name notifications update the exact tab and worktree but preserve manual worktree names',async()=>{
+  const f=fixture();try{
+    const {threadId:id}=await f.open(),agent=f.agents.get(id!);
+    f.store.put('terminals',{id:agent.terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',sessionId:id,cols:80,rows:24,createdAt:''});
+    const rename=(name:string)=>f.clients[0].emit({method:'thread/name/updated',params:{threadId:id,threadName:name}});
+    rename('生成されたタイトル');
+    assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'生成されたタイトル');
+    assert.equal(f.store.get<any>('terminals',agent.terminalId)?.sessionName,'生成されたタイトル');
+    f.store.put('workspaces',{...f.workspace,name:'Manual',nameSource:'manual'});
+    rename('更新されたタイトル');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'Manual');
+    f.store.put('workspaces',f.workspace);
+    f.store.put('terminals',{...f.store.get<any>('terminals',agent.terminalId),sessionId:'another'});
+    rename('古いセッション');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,f.workspace.name);
+    f.clients[0].emit({method:'thread/started',params:{thread:{id:'temporary',cwd:f.workspace.path,ephemeral:true}}});
+    assert.equal(f.agents.list().length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});

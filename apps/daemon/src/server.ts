@@ -144,7 +144,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
-        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString(),...(fetchedTarget?.pullRequestSource?{pullRequestSource:{...fetchedTarget.pullRequestSource,localBranch:branch}}:{})};store.put('workspaces',record);
+        const record:Workspace={id:operationId,projectId:project.id,name,nameSource:c.name?'manual':'session',path,branch,kind:'worktree',createdAt:new Date().toISOString(),...(fetchedTarget?.pullRequestSource?{pullRequestSource:{...fetchedTarget.pullRequestSource,localBranch:branch}}:{})};store.put('workspaces',record);
         // Worktree creation is successful even if an optional CLI cannot start.
         // The operation's cached response prevents retries from opening duplicates.
         const startupErrors:string[]=[];

@@ -10,7 +10,7 @@ export type Provider = z.infer<typeof Provider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; worktreeSetup?:string; createdAt:string}
 // Immutable workspace provenance. localBranch/sourceHead describe creation, not live Git state.
 export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
-export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource; setup?:{status:'running'|'succeeded'|'failed'; script:string; output:string; error?:string}}
+export interface Workspace {nameSource?:'manual'|'session'; sessionNameUpdatedAt?:number; id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource; setup?:{status:'running'|'succeeded'|'failed'; script:string; output:string; error?:string}}
 export type AgentActivity = 'working'|'waiting'|'idle'|'unknown';
 export interface TerminalRecord {id:string;agentId?:string; workspaceId:string; provider:Provider; status:'running'|'exited'|'interrupted'; activity?:AgentActivity; sessionId?:string; sessionName?:string; createdAt:string; exitCode?:number; cols:number; rows:number}
 export interface AgentNotification {id:string;terminalId:string;workspaceId:string;provider:Provider;kind:'waiting'|'completed';createdAt:string}
