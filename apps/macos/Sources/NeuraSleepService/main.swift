@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import OSLog
 import SleepControl
 
 final class Client: NSObject, SleepServiceProtocol {
@@ -99,12 +100,12 @@ final class Service: NSObject, NSXPCListenerDelegate {
 }
 
 guard geteuid() == 0 else {exit(77)}
-let executable = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
-let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 do {
     // Recover before signature validation so an interrupted app update cannot
     // prevent restoration of a previous session's power setting.
     let power = try PowerControl()
+    let executable = try SleepService.executableURL()
+    let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let service = Service(power: power, clientRequirement: try SleepService.requirement(for: app, requireHardenedRuntime: true))
     let listener = NSXPCListener(machServiceName: SleepService.name)
     listener.delegate = service
@@ -120,6 +121,7 @@ do {
     service.exitWhenIdle()
     withExtendedLifetime((service, listener, signals)) {dispatchMain()}
 } catch {
+    Logger(subsystem: SleepService.name, category: "startup").error("Sleep service failed: \(String(describing: error), privacy: .public)")
     FileHandle.standardError.write(Data(("Sleep service failed: \(error)\n").utf8))
     exit(78)
 }
