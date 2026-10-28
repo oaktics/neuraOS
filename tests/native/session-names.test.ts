@@ -208,3 +208,20 @@ test('manual workspace names and newer pushed names survive stale provider polli
   assert.equal(followsSessionName({...workspace,path:'/data/worktrees/project/worktree-a1234567'}),true);
   assert.equal(followsSessionName({...workspace,nameSource:'session'}),true);
 });
+
+test('an in-flight final lookup cannot overwrite a pushed terminal title',async()=>{
+  const store=new Store(':memory:');
+  try{
+    store.put('workspaces',{id:'w',projectId:'p',name:'Root',path:'/repo',branch:'main',kind:'root',createdAt:''});
+    const terminal:TerminalRecord={id:'t',workspaceId:'w',provider:'codex',sessionId:'s',status:'running',sessionName:'Old',cols:80,rows:24,createdAt:''};
+    store.put('terminals',terminal);
+    let release!:(value:{name:string;updatedAt:number})=>void;
+    const names=new SessionNames(store,{codex:async()=>new Promise(resolve=>{release=resolve;}),claude:async()=>undefined},0);
+    store.put('terminals',{...terminal,status:'exited'});
+    const refresh=names.refresh();
+    store.put('terminals',{...terminal,status:'exited',sessionName:'Pushed'});
+    release({name:'Stale',updatedAt:1});await refresh;
+    await names.refresh();
+    assert.equal(store.get<TerminalRecord>('terminals','t')?.sessionName,'Pushed');
+  }finally{store.close();}
+});

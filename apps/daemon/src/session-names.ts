@@ -78,7 +78,7 @@ export class SessionNames {
       const result=await this.readers[terminal.provider](workspace.path,terminal.sessionId).catch(()=>undefined);
       const name=displayName(result?.name),current=this.store.get<TerminalRecord>('terminals',terminal.id);
       // A resume/clear or exit can occur while the provider lookup is in flight.
-      if(name&&current&&current.sessionId===terminal.sessionId&&current.sessionName!==name)
+      if(name&&current&&current.sessionId===terminal.sessionId&&current.sessionName===terminal.sessionName&&current.sessionName!==name)
         this.store.put('terminals',{...current,sessionName:name});
     }));
     await Promise.all(this.store.list<Workspace>('workspaces').filter(w=>w.kind==='worktree').map(async workspace=>{
