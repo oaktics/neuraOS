@@ -153,13 +153,16 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  assert.equal((await call('list')).tabs.length,2);await assert.rejects(call('snapshot'),/browser_disabled/);evidence.checks.push('app restart reconnects registry and preserves user disconnect');
  evidence.passed=true;
 }catch(error){evidence.error=String(error);throw error;}finally{
+ // Preserve operation evidence even if process cleanup subsequently fails.
+ await writeFile(data+'/evidence.json',JSON.stringify(evidence,null,2));await writeFile(data+'/app.log',appLog);
  const watchdog=setTimeout(()=>{console.error('Fixture cleanup exceeded 20 seconds');process.exit(1)},20000);
  try{
   // Clean up even if initialize, package launch or evidence writing failed.
   const stopped=await Promise.allSettled([stopChild(cleanupApp),stopChild(cleanupMCP),stopChild(cleanupClaude)]);
   const errors=stopped.flatMap(r=>r.status==='rejected'?[String(r.reason)]:[]);
   if(errors.length){evidence.cleanupErrors=errors;evidence.passed=false;process.exitCode=1;}
-  if(cleanupDaemon)await cleanupDaemon.app.close();
+  if(cleanupDaemon)try{await cleanupDaemon.app.close();}catch(error){errors.push(String(error));}
+  if(errors.length){evidence.cleanupErrors=errors;evidence.passed=false;process.exitCode=1;}
   fixture.closeAllConnections();if(fixture.listening)await new Promise<void>(r=>fixture.close(()=>r()));
   evidence.finishedAt=new Date().toISOString();await writeFile(data+'/evidence.json',JSON.stringify(evidence,null,2));await writeFile(data+'/app.log',appLog);
   console.log(JSON.stringify(evidence,null,2));
