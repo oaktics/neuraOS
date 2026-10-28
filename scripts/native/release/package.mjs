@@ -38,7 +38,8 @@ async function copyPackage(source) {
   }
   return destination;
 }
-for (const name of ['fastify', 'zod', 'node-pty', '@anthropic-ai/claude-agent-sdk', 'tsx']) {
+const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+for (const name of new Set([...Object.keys(manifest.dependencies ?? {}), 'tsx'])) {
   const target = await copyPackage(await locate(name, root)), link = join(runtime, 'node_modules', name);
   await mkdir(dirname(link), {recursive: true});
   await symlink(relative(dirname(link), target), link);

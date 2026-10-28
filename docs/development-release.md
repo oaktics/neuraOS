@@ -59,7 +59,7 @@ node scripts/native/release/package.mjs
 node scripts/native/release/smoke.mjs
 ```
 
-パッケージ試験は一時データと空きポートで同梱Node／Daemon／SQLite／PTYを実行する。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
+実行時依存はルートの`package.json`の`dependencies`から同梱する（TypeScript起動用の`tsx`も含む）。パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱Node／Daemon／SQLite／PTYを実行する。開発環境の`node_modules`に依存した同梱漏れを検出する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
 
 ## Chromium browser
 
