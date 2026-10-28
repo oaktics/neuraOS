@@ -6,7 +6,7 @@ test('concurrent views share reads; manual refresh bypasses freshness',async()=>
   let now=0,calls=0;
   const cache=new GitHubRefreshCache<number>(()=>60000,()=>now);
   const fetch=async()=>++calls;
-  assert.deepEqual(await Promise.all([cache.read('repo:head',fetch),cache.read('repo:head',fetch,true)]),[1,1]);
+  assert.deepEqual(await Promise.all([cache.read('repo:head',fetch),cache.read('repo:head',fetch)]),[1,1]);
   assert.equal(await cache.read('repo:head',fetch),1);
   assert.equal(await cache.read('repo:head',fetch,true),2);
   now=60001;assert.equal(await cache.read('repo:head',fetch),3);
@@ -41,4 +41,38 @@ test('distinct PR refreshes bound network concurrency',async()=>{
     await new Promise(resolve=>setTimeout(resolve,5));active--;return i;
   })));
   assert.equal(maximum,4);
+});
+
+test('force during an in-flight read queues one fresh read shared by manual callers',async()=>{
+  const cache=new GitHubRefreshCache<number>(()=>60000);
+  let release!:(value:number)=>void,calls=0;
+  const initial=cache.read('key',()=>{calls++;return new Promise<number>(resolve=>{release=resolve;});});
+  const fetch=async()=>++calls;
+  const manual=cache.read('key',fetch,true),second=cache.read('key',fetch,true);
+  assert.equal(manual,second);assert.equal(calls,1);
+  release(17);assert.equal(await initial,17);
+  assert.equal(await manual,2);assert.equal(await cache.read('key',fetch),2);
+});
+test('queued force preserves an in-flight failure cooldown',async()=>{
+  const cache=new GitHubRefreshCache<number>(()=>60000);
+  let reject!:(error:Error)=>void;
+  const initial=cache.read('key',()=>new Promise<number>((_,fail)=>{reject=fail;}));
+  const forced=cache.read('key',async()=>42,true);
+  const assertions=[assert.rejects(initial,/offline/),assert.rejects(forced,/offline/)];
+  reject(new Error('offline'));await Promise.all(assertions);
+  await assert.rejects(cache.read('key',async()=>42,true),/offline/);
+});
+
+test('invalidation with a queued force and a replacement in-flight read cannot form a promise cycle',async()=>{
+  const cache=new GitHubRefreshCache<number>(()=>60000);
+  let releaseA!:(value:number)=>void,releaseB!:(value:number)=>void;
+  const a=cache.read('key',()=>new Promise<number>(resolve=>{releaseA=resolve;}));
+  const force=cache.read('key',async()=>3,true);
+  cache.invalidate('key');
+  const b=cache.read('key',()=>new Promise<number>(resolve=>{releaseB=resolve;}));
+  releaseA(1);await a;
+  await new Promise(resolve=>setImmediate(resolve));
+  releaseB(2);assert.equal(await b,2);
+  assert.equal(await force,3);
+  assert.equal(await cache.read('key',async()=>4),3);
 });
