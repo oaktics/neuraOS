@@ -228,6 +228,8 @@ struct Sidebar: View {
             Spacer(minLength: 0)
             Divider()
             HStack(spacing: 6) {
+                Button {step(-1)} label: {Image(systemName: "chevron.left").frame(width: 22, height: 28)}
+                    .disabled(model.sidebarSpaces.adjacent(-1) == nil).help("前のWorkspace")
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(model.sidebarSpaces.spaces) {space in
@@ -237,6 +239,8 @@ struct Sidebar: View {
                         }
                     }
                 }.scrollIndicators(.hidden)
+                Button {step(1)} label: {Image(systemName: "chevron.right").frame(width: 22, height: 28)}
+                    .disabled(model.sidebarSpaces.adjacent(1) == nil).help("次のWorkspace")
                 Button {model.showNewSpace = true} label: {Image(systemName: "plus").frame(width: 24, height: 28)}.help("新しいWorkspace")
             }.buttonStyle(.plain).padding(8)
         }.background(Palette.surface).clipped()
@@ -427,6 +431,9 @@ struct Sidebar: View {
                 settling = false
             }
         }
+    }
+    private func step(_ offset: Int) {
+        if let id = model.sidebarSpaces.adjacent(offset) {switchSpace(id)}
     }
     private func switchSpace(_ id: String) {
         guard !settling, id != model.sidebarSpaces.active.id else {return}
