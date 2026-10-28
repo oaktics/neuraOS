@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import type {AgentActivity,Provider} from './contracts.ts';
 
 export interface ActivityEvent {
-  hook_event_name?:string; session_id?:string; transcript_path?:string; agent_id?:string;
+  last_assistant_message?:string; hook_event_name?:string; session_id?:string; transcript_path?:string; agent_id?:string;
   turn_id?:string; tool_name?:string; tool_use_id?:string; source?:string; notification_type?:string;
 }
 

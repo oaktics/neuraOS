@@ -76,8 +76,8 @@ export class Terminals {
     let extraArgs:string[]=[];
     let managed:{endpoint:string;threadId:string|undefined}|undefined;
     if(provider==='codex'&&this.agents&&await supportsManagedCodex(program))managed=await this.agents.open(program,env,workspace,id,options.resumeId,options.parentTaskId,resume);
-    if((options.prompt||options.resumeId)&&!managed)throw new Fault('codex_supervision_unsupported','このCodex CLIは監督機能に対応していません。Codexを更新してください。',409);
-    if(provider==='claude'&&this.claudeMCP)extraArgs=await claudeMCPArguments(program,this.claudeMCP,workspace.id,id);
+    if(provider==='codex'&&(options.prompt||options.resumeId)&&!managed)throw new Fault('codex_supervision_unsupported','このCodex CLIは監督機能に対応していません。Codexを更新してください。',409);
+    if(provider==='claude'&&this.claudeMCP){extraArgs=await claudeMCPArguments(program,this.claudeMCP,workspace.id,id);this.agents?.prepareClaude(workspace,id,options.resumeId,options.parentTaskId,()=>this.processes.get(id)?.write('\x03'));}
     if(!managed&&await supportsActivity(provider,program)){
       const tracker=new ActivityTracker();
       // Status integration is optional: a failed observer must not block the CLI.
@@ -87,6 +87,7 @@ export class Terminals {
           const current=this.store.get<TerminalRecord>('terminals',id);
           if(!current||current.status!=='running')return;
           const activity=tracker.accept(event);
+          if(provider==='claude')this.agents?.claudeEvent(id,event);
           const notification=tracker.notification?{id:randomUUID(),terminalId:id,workspaceId:current.workspaceId,provider:current.provider,kind:tracker.notification,createdAt:new Date().toISOString()}:undefined;
           // Keep the last identity after SessionEnd for the final title read.
           const sessionId=tracker.sessionId??current.sessionId;
@@ -99,7 +100,7 @@ export class Terminals {
     }
     // Interactive user CLIs retain normal login/config, with full access selected at launch.
     let proc:pty.IPty;
-    try{proc=pty.spawn(program,managed?['resume',...(managed.threadId?[managed.threadId]:[]),'--remote',managed.endpoint]:[...argumentsFor(provider,resume),...extraArgs],{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});}
+    try{proc=pty.spawn(program,managed?['resume',...(managed.threadId?[managed.threadId]:[]),'--remote',managed.endpoint]:[...argumentsFor(provider,options.resumeId?false:resume),...extraArgs,...(provider==='claude'&&options.resumeId?['--resume',options.resumeId]:[]),...(provider==='claude'&&options.prompt?[options.prompt]:[])],{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});}
     catch(error){await this.closeActivity(id);await this.agents?.close(id);throw error;}
     const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',...(provider==='shell'?{}:{activity:'unknown' as const}),createdAt:new Date().toISOString(),cols:100,rows:30,...(managed?{agentId:managed.threadId,sessionId:managed.threadId}:{})};
     this.processes.set(id,proc);this.store.put('terminals',record);this.store.resize(id,record.cols,record.rows);

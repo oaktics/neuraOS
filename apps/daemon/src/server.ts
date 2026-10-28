@@ -275,6 +275,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     try {const value=await result;if(traced)diagnostics.record('operation.success',command.type,operationId,performance.now()-started);return value;}
     catch(error){diagnostics.record('operation.failure',command.type,operationId,performance.now()-started);throw error;}
   });
+  app.post('/v1/claude/:terminalId/channel',async req=>agents.channel(z.uuid().parse((req.params as {terminalId:string}).terminalId)));
   app.get('/v1/agents',async()=>({agents:agents.list(),revision:store.state().revision}));
   app.get('/v1/agents/:id',async req=>agents.read(z.uuid().parse((req.params as {id:string}).id),z.string().max(4096).optional().parse((req.query as {cursor?:string}).cursor)));
   app.get('/v1/terminals/:id/output',async req=>{

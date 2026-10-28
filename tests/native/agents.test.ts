@@ -312,3 +312,46 @@ test('manual report attribution uses the current terminal task, not an older thr
     assert.equal(f.agents.get(main).reports?.[0].sourceTaskId,currentId);
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+test('Claude and Codex supervise each other with exact reports, compact safety, recovery and no stale-session delivery',async()=>{
+  const f=fixture(),terminalId=randomUUID(),id=randomUUID(),path='/tmp/claude.jsonl';let interrupted=0;
+  const event=(hook_event_name:string,extra:Record<string,string>={})=>f.agents.claudeEvent(terminalId,{hook_event_name,session_id:id,transcript_path:path,...extra});
+  try{
+    f.agents.prepareClaude(f.workspace,terminalId,undefined,undefined,()=>interrupted++);
+    event('SessionStart',{source:'startup'});
+    const codex=(await f.open()).threadId!;
+    f.agents.watch(codex,[id]);await f.agents.send(id,'Claude work','queue');
+    assert.equal(f.agents.channel(terminalId).content,'Claude work');const first=f.agents.get(id).turnId;
+    await f.agents.send(id,'queued during compact','queue');event('SessionStart',{source:'compact'});
+    assert.equal(f.agents.get(id).turnId,first);assert.equal(f.agents.get(id).status,'working');assert.deepEqual(f.agents.channel(terminalId),{});
+    event('Stop',{last_assistant_message:'Claude completed'});await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    event('Stop');await tick();assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    assert.equal(f.agents.channel(terminalId).content,'queued during compact');event('StopFailure');
+    await f.agents.send(id,'retry failed','queue');assert.equal(f.agents.channel(terminalId).content,'retry failed');
+    await f.agents.interrupt(id,f.agents.get(id).turnId!);assert.equal(interrupted,1);
+    await f.agents.send(id,'retry interrupted','queue');assert.equal(f.agents.channel(terminalId).content,'retry interrupted');event('Stop');
+    f.agents.watch(id,[codex]);
+    const turn=f.agents.get(codex).turnId!;f.clients[0].emit({method:'turn/completed',params:{threadId:codex,turn:{id:turn,status:'completed'}}});await tick();
+    const notification=f.agents.channel(terminalId);assert.equal(notification.meta?.kind,'reports');const reports=f.agents.get(id).reports!;
+    assert.equal(reports.length,1);f.agents.ack(id,[reports[0].id]);event('Stop');assert.deepEqual(f.agents.channel(terminalId),{});
+    await f.agents.send(id,'must remain after end','queue');event('SessionEnd');assert.deepEqual(f.agents.channel(terminalId),{});
+    await assert.rejects(f.agents.send(id,'offline','queue'),/停止/);
+    const next=randomUUID();event('SessionStart',{session_id:next,source:'clear',transcript_path:'/tmp/next.jsonl'});
+    assert.deepEqual(f.agents.channel(terminalId),{});assert.equal(f.agents.get(id).pending.length,1);
+    await assert.rejects(f.agents.send(id,'old','queue'),/別の会話/);
+    await f.agents.close(terminalId);assert.throws(()=>f.agents.channel(terminalId),/停止/);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('Claude resume validates provider/workspace and never transfers a live identity to another terminal',async()=>{
+  const f=fixture(),t=randomUUID(),id=randomUUID();let rejected=0;
+  try{
+    f.agents.prepareClaude(f.workspace,t,undefined,undefined,()=>{});f.agents.claudeEvent(t,{hook_event_name:'SessionStart',session_id:id,source:'startup'});
+    assert.throws(()=>f.agents.prepareClaude(f.workspace,randomUUID(),id,undefined,()=>{}),/実行中/);
+    const other=randomUUID();f.agents.prepareClaude(f.workspace,other,undefined,undefined,()=>rejected++);
+    f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(rejected,1);assert.equal(f.agents.get(id).terminalId,t);
+    await f.agents.close(t);f.agents.prepareClaude(f.workspace,other,id,undefined,()=>{});
+    f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(f.agents.get(id).terminalId,other);
+  }finally{await f.agents.shutdown();f.store.close();}
+});

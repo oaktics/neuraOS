@@ -12,7 +12,7 @@ process.stdin.on('error', () => process.exit(0));
 process.stdin.on('end', () => {
   try {
     const payload = JSON.parse(input), event = {};
-    for (const key of ['hook_event_name', 'session_id', 'transcript_path', 'agent_id', 'turn_id', 'tool_name', 'tool_use_id', 'source', 'notification_type']) {
+    for (const key of ['last_assistant_message', 'hook_event_name', 'session_id', 'transcript_path', 'agent_id', 'turn_id', 'tool_name', 'tool_use_id', 'source', 'notification_type']) {
       if (typeof payload[key] === 'string' && payload[key].length <= 4096) event[key] = payload[key];
     }
     const path = process.env.NEURA_ACTIVITY_SOCKET;
