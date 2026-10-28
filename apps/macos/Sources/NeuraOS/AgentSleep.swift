@@ -23,6 +23,7 @@ enum AgentSleepPolicy {
     @Published private(set) var startFailed = false
     private var runnerActive = false
     @Published private(set) var approvalRequired = false
+    private var registrationError: Error?
     private let service = SMAppService.daemon(plistName: SleepService.plist)
     private var connection: NSXPCConnection?
     private var activationObserver: NSObjectProtocol?
@@ -64,7 +65,9 @@ enum AgentSleepPolicy {
     }
     func refreshApproval() {
         let wasRequired = approvalRequired
-        approvalRequired = service.status == .requiresApproval
+        let current = service.status
+        if current == .enabled {registrationError = nil}
+        approvalRequired = SleepServiceRegistration.needsApproval(status: current, error: registrationError)
         if !enabled && !runnerActive && approvalRequired {
             status = "システム設定でneuraOSのバックグラウンド実行を許可してください。"
         } else if wasRequired && service.status == .enabled && !enabled && !runnerActive {
@@ -93,9 +96,12 @@ enum AgentSleepPolicy {
                         ? "登録を更新しました。「この起動中は有効にする」で再度お試しください。"
                         : "サービスの登録を確認できません。アプリを再起動して再度お試しください。"
             } catch {
+                registrationError = error
                 refreshApproval()
-                let detail = error as NSError
-                status = "登録の修復に失敗しました: \(detail.localizedDescription)（\(detail.domain): \(detail.code)）"
+                if !approvalRequired {
+                    let detail = error as NSError
+                    status = "登録の修復に失敗しました: \(detail.localizedDescription)（\(detail.domain): \(detail.code)）"
+                }
             }
         }
     }
@@ -155,6 +161,7 @@ enum AgentSleepPolicy {
                 self.finish(id: id, message: "サービスを開始できませんでした。許可済みの場合は、設定の「サービス登録を修復」をお試しください。")
             }
         } catch {
+            registrationError = error
             disable(); refreshApproval()
             startFailed = !approvalRequired
             if !approvalRequired {
