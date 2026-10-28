@@ -228,6 +228,7 @@ struct WorkspaceView: View {
         }.frame(height: 32)
     }
     @ViewBuilder private var addTabButtons: some View {
+        Button {add(model.conversationProvider(for: workspace))} label: {Label("新しい会話", systemImage: "bubble.left")}
         Button {add("codex")} label: {Label("Codex", systemImage: "sparkle")}
         Button {add("claude")} label: {Label("Claude Code", systemImage: "asterisk")}
         Button {add("shell")} label: {Label("Terminal", systemImage: "terminal")}
@@ -268,7 +269,7 @@ struct WorkspaceView: View {
                     else if item.kind == "file", let path = item.filePath {
                         FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }
-                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $layout.tabValue(item.id, \.browserTitle), view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
+                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, projectId: workspace.projectId, visible: visible, title: $layout.tabValue(item.id, \.browserTitle), view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }

@@ -2,11 +2,26 @@
 // failure cooldown. Manual refresh bypasses freshness, never a failure cooldown.
 export class GitHubRefreshCache<T> {
   private entries=new Map<string,{result:Promise<T>;expires:number;pending:boolean;failed:boolean}>();
+  private followups=new Map<string,Promise<T>>();
   private active=0;
   private waiting:Array<()=>void>=[];
   constructor(private ttl:(value:T)=>number,private now=Date.now){}
   read(key:string,fetch:()=>Promise<T>,force=false):Promise<T>{
     const old=this.entries.get(key);
+    if(old?.pending&&force){
+      const queued=this.followups.get(key);if(queued)return queued;
+      // A force request must observe changes made after the in-flight read began.
+      // Coalesce clicks, and retain failure cooldown if that read fails.
+      const next=old.result.then(()=>{
+        // Invalidation may have installed another pending entry. Never return
+        // this promise from its own continuation when joining that new read.
+        if(this.followups.get(key)===next)this.followups.delete(key);
+        return this.read(key,fetch,true);
+      }).finally(()=>{
+        if(this.followups.get(key)===next)this.followups.delete(key);
+      });
+      this.followups.set(key,next);return next;
+    }
     if(old&&(old.pending||old.expires>this.now()&&(!force||old.failed)))return old.result;
     const entry:{result:Promise<T>;expires:number;pending:boolean;failed:boolean}={result:Promise.resolve(null as T),expires:Infinity,pending:true,failed:false};
     entry.result=this.limited(fetch).then(value=>{

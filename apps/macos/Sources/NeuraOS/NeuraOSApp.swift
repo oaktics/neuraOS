@@ -6,6 +6,12 @@ import ChromiumBridge
 @main enum NeuraOSMain {
     static func main() {
         NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--browser-fixture"), CommandLine.arguments.count > index + 1 {
+            BrowserFixture.run(CommandLine.arguments[index + 1]);return
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--download-smoke"), CommandLine.arguments.count > index + 2 {
+            exit(NCRunDownloadSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2], NSHostingView(rootView: BrowserDownloadsButton().padding(8))))
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
             exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
         }
@@ -331,6 +337,20 @@ struct Sidebar: View {
             .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
             Divider()
         }
+        Menu("既定のAI") {
+            Picker("会話", selection: Binding(get: {project.conversationProvider},
+                set: {provider in Task {await model.setDefaultProvider(project, provider: provider, delegation: false)}})) {
+                Text("Codex").tag("codex")
+                Text("Claude Code").tag("claude")
+            }
+            Picker("委任", selection: Binding(get: {project.delegationProvider},
+                set: {provider in Task {await model.setDefaultProvider(project, provider: provider, delegation: true)}})) {
+                Text("Codex").tag("codex")
+                Text("Claude Code").tag("claude")
+            }
+        }
+        .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.default-providers") != true)
+        Divider()
         Menu("Workspaceへ移動") {
             ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
                 Button(space.name) {model.moveProject(project.id, to: space.id)}

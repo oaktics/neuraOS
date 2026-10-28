@@ -11,7 +11,7 @@ import {Command,Fault} from '../../apps/daemon/src/contracts.ts';
 
 const head='a'.repeat(40),otherHead='b'.repeat(40),workspaceId=randomUUID();
 const target={workspaceId,repository:'owner/repo',branch:'feature/test',expectedHead:head};
-function fixture(gitOverride?:(root:string,args:string[])=>Promise<string>){
+function fixture(gitOverride?:(root:string,args:string[])=>Promise<string>,afterPulls?:()=>Promise<void>){
   const calls:{kind:string;args:string[]}[]=[];
   const state={branch:target.branch,head,remote:'https://github.com/owner/repo.git',pushRemote:'git@github.com:owner/repo.git',remoteHead:head,hasPR:true,pullBranch:target.branch,pullNumber:17,unresolved:false,merged:true,fail:false,
     pr:{number:17,title:'A PR',body:'Description',url:'https://github.com/owner/repo/pull/17',state:'OPEN',isDraft:false,headRefName:target.branch,headRefOid:head,baseRefName:'main',mergeStateStatus:'CLEAN',reviewDecision:'APPROVED',headRepository:{name:'repo'},headRepositoryOwner:{login:'owner'},author:{login:'alice'},additions:42,deletions:7,changedFiles:1,files:[{path:'src/main.ts',additions:42,deletions:7}],statusCheckRollup:[{name:'test',status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/owner/repo/actions/runs/1'}]}};
@@ -33,7 +33,7 @@ function fixture(gitOverride?:(root:string,args:string[])=>Promise<string>){
     if(endpoint==='repos/owner/repo')value={full_name:'owner/repo',default_branch:'main',allow_merge_commit:true,allow_squash_merge:true,allow_rebase_merge:false};
     else if(endpoint.startsWith('repos/owner/repo/pulls?')){
       assert.ok(args.includes('--paginate'));assert.ok(args.includes('--slurp'));
-      value=[[{number:99,state:'open',head:{ref:target.branch,repo:{full_name:'someone/repo'}}}],[...(state.hasPR?[{number:state.pullNumber,state:'open',head:{ref:state.pullBranch,repo:{full_name:'owner/repo'}}}]:[])]];
+      value=[[{number:99,state:'open',head:{ref:target.branch,repo:{full_name:'someone/repo'}}}],[...(state.hasPR?[{number:state.pullNumber,state:state.pr.state==='OPEN'?'open':'closed',head:{ref:state.pullBranch,repo:{full_name:'owner/repo'}}}]:[])]];
     } else if(endpoint.includes('/git/ref/'))value={object:{sha:state.remoteHead}};
     else if(endpoint==='repos/owner/repo/pulls'){
       value={html_url:'https://github.com/owner/repo/pull/18'};state.hasPR=true;state.pullBranch=state.branch;state.pullNumber=18;
@@ -45,7 +45,9 @@ function fixture(gitOverride?:(root:string,args:string[])=>Promise<string>){
     else if(endpoint.includes('/issues/'))value=[[{id:1,user:{login:'alice'},body:'first',html_url:'https://github.com/owner/repo/pull/17#comment-1',created_at:'2026-01-01'}],[{id:2,user:null,body:'next page',html_url:'https://github.com/owner/repo/pull/17#comment-2',created_at:'2026-01-04'}]];
     else if(endpoint.includes('/comments?'))value=[[{id:1,user:{login:'bob'},body:'inline',html_url:'https://github.com/owner/repo/pull/17#discussion-1',created_at:'2026-01-03',path:'src/main.ts',line:null,original_line:12}]];
     else throw new Error(`unexpected gh: ${args}`);
-    return JSON.stringify(value);
+    const response=JSON.stringify(value);
+    if(endpoint.startsWith('repos/owner/repo/pulls?'))await afterPulls?.();
+    return response;
   };
   return {service:new GitHub(run,gitOverride??git),state,calls};
 }
@@ -117,7 +119,7 @@ test('GitHub HTTP commands retain authentication, validation and durable operati
     for(const url of ['/v1/state','/v1/capabilities']){
       const response=await daemon.app.inject({url,headers});
       assert.equal(response.statusCode,200);assert.equal(response.json().protocolVersion,1);
-      assert.deepEqual(response.json().features,['agent.supervision','agent.reports','workspace.cleanup','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr']);
+      assert.deepEqual(response.json().features,['agent.supervision','agent.reports','workspace.cleanup','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr','project.default-providers','agent.claude-channels']);
     }
     assert.equal((await daemon.app.inject(`/v1/workspaces/${workspaceId}/github`)).statusCode,401);
     assert.equal((await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers})).statusCode,200);
@@ -276,4 +278,70 @@ test('real Git rebase and branch rename preserve the source PR after its origina
     assert.equal(status.pullRequest?.number,17);assert.equal(status.branch,'renamed');
     assert.notEqual(status.head,sourceHead);
   }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+for(const previous of ['MERGED','CLOSED'])test(`external next PR on same HEAD replaces ${previous} via manual and automatic refresh`,async t=>{
+  t.mock.timers.enable({apis:['Date'],now:1700000000000});
+  for(const manual of [true,false]){
+    const {service,state,calls}=fixture();state.pr.state=previous;
+    assert.equal((await service.status('/repo')).pullRequest?.number,17);
+    const originalHead=state.head;
+    state.pullNumber=18;state.pr={...state.pr,number:18,title:'External next PR',url:'https://github.com/owner/repo/pull/18',state:'OPEN'};
+    assert.equal((await service.status('/repo')).pullRequest?.number,17);
+    if(!manual)t.mock.timers.tick(60001);
+    const result=await service.status('/repo',manual);
+    assert.equal(result.head,originalHead);assert.equal(result.branch,target.branch);
+    assert.equal(result.pullRequest?.number,18);assert.equal(result.pullRequest?.title,'External next PR');
+    assert.equal(result.pullRequest?.url,'https://github.com/owner/repo/pull/18');assert.equal(result.pullRequest?.state,'OPEN');
+    await service.mutate('/repo',{...mergeCommand(),number:18});
+    assert.ok(calls.some(c=>c.args[3]==='repos/owner/repo/pulls/18/merge'));
+    assert.equal(calls.some(c=>c.kind==='git'&&c.args.includes('checkout')),false);
+  }
+});
+test('discovery polls terminal PRs without refetching unchanged details; manual refresh bypasses both caches',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:1700000000000});
+  const {service,state,calls}=fixture();state.pr.state='MERGED';
+  await service.status('/repo');calls.length=0;
+  t.mock.timers.tick(60001);await service.status('/repo');
+  assert.ok(calls.some(c=>c.args[3]?.startsWith('repos/owner/repo/pulls?')));
+  assert.equal(calls.some(c=>c.args[0]==='pr'),false);
+  await service.status('/repo',true);
+  assert.ok(calls.some(c=>c.args[0]==='pr'));
+});
+
+test('manual refresh overlapping discovery selects the externally-created next PR',async()=>{
+  let release!:()=>void,started!:()=>void,reads=0;
+  const began=new Promise<void>(resolve=>{started=resolve;});
+  const {service,state,calls}=fixture(undefined,async()=>{
+    if(++reads===1){started();await new Promise<void>(resolve=>{release=resolve;});}
+  });
+  const initial=service.status('/repo');await began;
+  state.pullNumber=18;state.pr={...state.pr,number:18,title:'New external PR',url:'https://github.com/owner/repo/pull/18'};
+  const manual=service.status('/repo',true);
+  // Let context resolution reach the pending cache before completing discovery.
+  await new Promise(resolve=>setImmediate(resolve));release();
+  await initial;const result=await manual;
+  assert.equal(reads,2);assert.equal(result.pullRequest?.number,18);
+  assert.equal(calls.filter(c=>c.args[0]==='pr').at(-1)?.args[2],'18');
+});
+
+test('reopening the same terminal PR bypasses its cached closed details',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:1700000000000});
+  const {service,state}=fixture();state.pr.state='CLOSED';
+  assert.equal((await service.status('/repo')).pullRequest?.state,'CLOSED');
+  state.pr.state='OPEN';t.mock.timers.tick(60001);
+  assert.equal((await service.status('/repo')).pullRequest?.state,'OPEN');
+});
+test('HTTP manual refresh follows actual checkout despite an old registered branch',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-pr-refresh-')),f=fixture();
+  const daemon=await createDaemon(dir,f.service);
+  daemon.store.put('workspaces',{id:workspaceId,projectId:randomUUID(),name:'Root',path:'/repo',branch:'old-registration',kind:'root',createdAt:new Date().toISOString()});
+  try{
+    const request=(query='')=>daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github${query}`,headers:{authorization:`Bearer ${daemon.token}`}});
+    assert.equal((await request()).json().pullRequest.number,17);
+    f.state.pullNumber=18;f.state.pr={...f.state.pr,number:18,title:'External PR'};
+    const response=await request('?refresh=true');assert.equal(response.statusCode,200);
+    assert.equal(response.json().pullRequest.number,18);assert.equal(response.json().branch,target.branch);
+    assert.equal(f.calls.some(c=>c.kind==='git'&&c.args.includes('checkout')),false);
+  }finally{await daemon.app.close();await rm(dir,{recursive:true,force:true});}
 });

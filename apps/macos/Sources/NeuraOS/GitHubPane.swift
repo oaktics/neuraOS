@@ -68,6 +68,7 @@ struct GitHubPane: View {
     let openTerminal: () -> Void
     @State private var snapshot: GitHubSnapshot?
     @State private var refreshing = false
+    @State private var refreshQueued = false
     @State private var nextRefresh = Date.distantPast
     @State private var failures = 0
     @State private var busy = false
@@ -90,8 +91,12 @@ struct GitHubPane: View {
                 }
                 Spacer()
                 if refreshing || busy {ProgressView().controlSize(.small)}
-                Button {Task {await refresh(force: true)}} label: {Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)}.buttonStyle(.plain).help("GitHubを更新").accessibilityLabel("GitHubを更新").disabled(refreshing || busy)
+                Button {Task {await refresh(force: true)}} label: {Image(systemName: "arrow.clockwise").frame(width: 24, height: 24)}.buttonStyle(.plain).help("GitHubを更新").accessibilityLabel("GitHubを更新").disabled(busy)
             }.padding(10)
+            if let snapshot, snapshot.branch != workspace.branch {
+                Text("登録: \(workspace.branch) · 現在の checkout: \(snapshot.branch.isEmpty ? "HEAD detached" : snapshot.branch)（PR の検索対象）")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled).padding(.horizontal, 10).padding(.bottom, 8)
+            }
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -159,7 +164,16 @@ struct GitHubPane: View {
         }.id("\(snapshot.repository)#\(pr.number)")
     }
     @MainActor private func refresh(force: Bool = false) async {
-        guard model.supportsGitHub, !refreshing else {return}; refreshing = true; defer {refreshing = false}
+        guard model.supportsGitHub else {return}
+        if refreshing {if force {refreshQueued = true}; return}
+        refreshing = true
+        defer {
+            refreshing = false
+            if refreshQueued {
+                refreshQueued = false
+                Task {await refresh(force: true)}
+            }
+        }
         do {
             let value: GitHubSnapshot = try await model.api.get("v1/workspaces/\(workspace.id)/github", query: force ? ["refresh": "true"] : [:])
             guard !Task.isCancelled else {return}

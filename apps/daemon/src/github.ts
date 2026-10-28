@@ -65,6 +65,10 @@ export function pullRequestNumber(input:string,repository:string){
 export class GitHub {
   private checksCache=new ChecksCache();
   private statusCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchStatus']>>>(()=>60000);
+  private detailCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchPullDetails']>>>(pr=>{
+    const terminal=new Set(['SUCCESS','NEUTRAL','SKIPPED','FAILURE','ERROR','TIMED_OUT','CANCELLED','ACTION_REQUIRED','STARTUP_FAILURE','STALE']);
+    return pr.state==='CLOSED'||pr.state==='MERGED'&&pr.checks.every(c=>terminal.has(c.state))?900000:60000;
+  });
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
   async verifyCleanup(path:string,number:number,expectedHead:string){
     const repository=githubRepository(await this.gitRun(path,['remote','get-url','origin']));
@@ -152,7 +156,7 @@ export class GitHub {
     const binding=this.source(context,source);
     if(!context.branch&&!binding)throw new Fault('github_detached','ブランチをチェックアウトしてから GitHub を利用してください。');
     const key=JSON.stringify([context.repository,context.branch,context.head,binding??null]);
-    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context,binding),force);
+    const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context,binding,force),force);
     const current=await this.context(root,true);
     if(JSON.stringify(current)!==JSON.stringify(context))throw new Fault('github_stale','ブランチまたはコミットが変更されました。更新してください。',409);
     return result;
@@ -160,25 +164,29 @@ export class GitHub {
   private async selectedPull(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
     const pulls=context.branch?await this.pulls(root,context):[];
     const local=pulls.find(pr=>pr.state==='open')??pulls[0];
-    return local?{number:local.number,isSource:false}:source?{number:source.number,isSource:true}:undefined;
+    return local?{number:local.number,state:local.state,isSource:false}:source?{number:source.number,state:'source',isSource:true}:undefined;
   }
-  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
+  private async fetchStatus(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource,force=false){
     const [repo,selected]=await Promise.all([this.repository(root,context.repository),this.selectedPull(root,context,source)]);
     const result={...context,sourcePullRequest:source&&selected?.isSource?{repository:source.repository,number:source.number}:null,defaultBranch:repo.default_branch,mergeMethods:[...(repo.allow_squash_merge?['squash']:[]),...(repo.allow_merge_commit?['merge']:[]),...(repo.allow_rebase_merge?['rebase']:[])],fetchedAt:new Date().toISOString()};
     if(!selected)return {...result,pullRequest:null};
-    const endpoint=`repos/${context.repository}`;
+    const pullRequest=await this.detailCache.read(`${context.repository}:${selected.number}:${selected.state}:${context.head}`,()=>this.fetchPullDetails(root,context.repository,selected.number),force);
+    return {...result,pullRequest};
+  }
+  private async fetchPullDetails(root:string,repository:string,number:number){
+    const endpoint=`repos/${repository}`;
     const [pr,issueComments,reviews,lineComments,unresolvedThreads]=await Promise.all([
-      this.detail(root,context.repository,selected.number),
-      this.pages(root,`${endpoint}/issues/${selected.number}/comments?per_page=100`),
-      this.pages(root,`${endpoint}/pulls/${selected.number}/reviews?per_page=100`),
-      this.pages(root,`${endpoint}/pulls/${selected.number}/comments?per_page=100`),
-      this.unresolved(root,context.repository,selected.number),
+      this.detail(root,repository,number),
+      this.pages(root,`${endpoint}/issues/${number}/comments?per_page=100`),
+      this.pages(root,`${endpoint}/pulls/${number}/reviews?per_page=100`),
+      this.pages(root,`${endpoint}/pulls/${number}/comments?per_page=100`),
+      this.unresolved(root,repository,number),
     ]);
     const comments=[...issueComments.map(c=>({kind:'comment',value:c})),...reviews.map(c=>({kind:'review',value:c})),...lineComments.map(c=>({kind:'line',value:c}))].map(({kind,value})=>{
       const c=commentSchema.parse(value);
       return {id:`${kind}-${c.id}`,kind,body:c.body??'',author:c.user?.login??'削除されたユーザー',url:c.html_url,createdAt:c.created_at??c.submitted_at??'',path:c.path??null,line:c.line??c.original_line??null,outdated:kind==='line'&&c.line===null,state:c.state??null};
     }).sort((a,b)=>a.createdAt.localeCompare(b.createdAt));
-    return {...result,pullRequest:{...pr,unresolvedThreads,comments,checks:(pr.statusCheckRollup??[]).map((c,i)=>({id:String(i),name:c.name??c.context??'チェック',state:c.conclusion||c.status||c.state||'UNKNOWN',url:c.detailsUrl||c.targetUrl||null}))}};
+    return {...pr,unresolvedThreads,comments,checks:(pr.statusCheckRollup??[]).map((c,i)=>({id:String(i),name:c.name??c.context??'チェック',state:c.conclusion||c.status||c.state||'UNKNOWN',url:c.detailsUrl||c.targetUrl||null}))};
   }
   private async target(root:string,c:Mutation){
     const context=await this.context(root);
@@ -190,8 +198,9 @@ export class GitHub {
     const prefix=JSON.stringify([c.repository]).slice(0,-1)+',';
     this.statusCache.invalidate(prefix);
     this.checksCache.invalidate(c.repository+':');
+    this.detailCache.invalidate(c.repository+':');
     try{return await this.performMutation(root,c,source);}
-    finally{this.statusCache.invalidate(prefix);this.checksCache.invalidate(c.repository+':');}
+    finally{this.statusCache.invalidate(prefix);this.checksCache.invalidate(c.repository+':');this.detailCache.invalidate(c.repository+':');}
   }
   private async performMutation(root:string,c:Mutation,source?:PullRequestSource){
     const context=await this.target(root,c);
