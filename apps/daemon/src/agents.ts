@@ -77,13 +77,14 @@ export class Agents {
     }
     if(live.sessionId!==id||!old||old.terminalId!==terminalId||old.transcriptPath!==event.transcript_path)return;
     const name=event.hook_event_name,observed=Number(event.observed_at);
-    if(Number.isFinite(observed))live.lastActivityAt=Math.max(live.lastActivityAt??0,observed);
     if(Number.isFinite(observed)&&observed<(live.interruptedAt??0))return;
     if(name!=='UserPromptSubmit'&&event.turn_id&&live.providerTurnId&&event.turn_id!==live.providerTurnId)return;
     if(name==='Stop'||name==='StopFailure'){
       const assistantTime=Date.parse(event.assistant_timestamp??'');
       if((Number.isFinite(observed)&&observed<(live.turnStartedAt??0))||(Number.isFinite(assistantTime)&&assistantTime<(live.turnStartedAt??0)))return;
     }
+    // Idle notifications and duplicate Stop hooks must not move the recovery boundary.
+    if(Number.isFinite(observed)&&['UserPromptSubmit','PreToolUse','PermissionRequest','PostToolUse','PostToolUseFailure','Elicitation','ElicitationResult','PreCompact'].includes(name??''))live.lastActivityAt=Math.max(live.lastActivityAt??0,observed);
     if(name==='UserPromptSubmit'){live.turnStartedAt=Number.isFinite(observed)?observed:Date.now();live.providerTurnId=event.turn_id;}
     if(old.status==='interrupted'&&!old.turnId&&name!=='UserPromptSubmit'&&name!=='SessionEnd')return;
     if(['UserPromptSubmit','PreToolUse'].includes(name??''))this.save({...old,status:'working',turnId:old.turnId??randomUUID()});

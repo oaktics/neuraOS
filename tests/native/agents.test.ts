@@ -470,6 +470,7 @@ test('lost Claude Stop hooks recover probe and work completion without replaying
     const probe=f.agents.channel(terminal),nonce=probe.content!.match(/nonce ([a-f0-9-]{36})/)![1];
     event('PreToolUse');f.agents.acknowledgeChannel(terminal,nonce);event('PostToolUse');
     await finish('Probe received');
+    event('Notification',{notification_type:'idle_prompt',observed_at:String(Date.now()+1000)});
     const recovered=await f.agents.claudeCompletion(terminal);assert.ok(recovered);f.agents.claudeEvent(terminal,recovered);
     assert.equal(f.agents.get(id).status,'idle');assert.equal(f.agents.get(id).lastTurnId,undefined);
     await new Promise(r=>setTimeout(r,5));
