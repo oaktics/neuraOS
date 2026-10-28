@@ -299,3 +299,16 @@ test('Codex name notifications update the exact tab and worktree but preserve ma
     assert.equal(f.agents.list().length,1);
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+
+test('manual report attribution uses the current terminal task, not an older thread sharing that terminal',async()=>{
+  const f=fixture();try{
+    const old=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');
+    const terminalId=f.agents.get(old).terminalId,currentId=randomUUID();
+    f.store.put('agents',{...f.agents.get(old),id:currentId});
+    f.store.put('terminals',{id:terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',agentId:currentId,sessionId:currentId,cols:80,rows:24,createdAt:''});
+    f.agents.report(main,'current task report',terminalId);
+    assert.equal(f.agents.get(main).reports?.[0].sourceTaskId,currentId);
+  }finally{await f.agents.shutdown();f.store.close();}
+});

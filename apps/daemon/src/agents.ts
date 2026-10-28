@@ -182,7 +182,9 @@ export class Agents {
     const a=this.migrateReports(this.get(id));
     if(text.length>16384||!text.trim())throw new Fault('invalid_report','報告は1〜16384文字で送信してください。');
     if(a.reports!.length>=REPORT_LIMIT)throw new Fault('agent_reports_full','報告受信箱がいっぱいです。監督がtask_read/task_waitで読みtask_ackした後、新しいoperationIdで再送してください。',409);
-    const source=sourceTerminalId?this.list().find(agent=>agent.terminalId===sourceTerminalId):undefined;
+    const sourceId=sourceTerminalId?this.store.get<TerminalRecord>('terminals',sourceTerminalId)?.agentId:undefined;
+    const candidate=sourceId?this.store.get<AgentRecord>('agents',sourceId):undefined;
+    const source=candidate?.terminalId===sourceTerminalId?candidate:undefined;
     const report:TaskReport={id:randomUUID(),kind:'manual',text,createdAt:new Date().toISOString(),sourceTerminalId,sourceTaskId:source?.id};
     this.save({...a,reports:[...a.reports!,report]});
     if(this.backends.has(a.terminalId))void this.serial(id,()=>this.flush(id)).catch(()=>{});
