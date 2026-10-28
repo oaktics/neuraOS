@@ -39,6 +39,9 @@ import ChromiumBridge
             }
         }
         self.view.onError = { [weak self] message in DispatchQueue.main.async {self?.message = message} }
+        self.view.onAutomationInvalidated = { [weak self] reason in
+            DispatchQueue.main.async {if let self {BrowserAutomation.shared.stop(self, reason: reason)}}
+        }
         // A popup already owns a Chromium navigation/opener. Do not reload it.
         if view == nil {navigate()}
         BrowserAutomation.shared.register(self)

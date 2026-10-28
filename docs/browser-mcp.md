@@ -19,6 +19,8 @@ cancels work and disables that tab; only the user can **MCP接続を再開**. Re
 keyboard or scroll input on an actively operated view also disconnects it before
 delivering the human input. One request owns a tab at a time, including reads.
 A competing CLI receives `browser_busy`, rather than interleaving input.
+Disconnect persists across app restart. A renderer crash also disconnects the tab;
+reload and explicitly resume access in the app to recover.
 
 ## Tools
 
@@ -61,7 +63,11 @@ remain quarantined until native completion/cancellation acknowledgment. Native
 also refuses new DevTools calls while a cancelled/timed-out call has an unknown
 renderer outcome. A timeout cannot undo an already executed click: inspect the
 page before deciding whether to issue a new action. Closing the tab resets its
-transport. Responses and page contents are not written to daemon diagnostics.
+transport. Responses and page contents are not written to daemon diagnostics. Native result
+batches cap the entire JSON envelope at 10 MiB (below the 12 MiB HTTP limit).
+Multiple images are split across acknowledgments; a single oversized image
+returns `browser_image_too_large`, allowing later results to proceed.
+Hidden views are rendered for capture and then restored without selecting a tab.
 
 ## Verification
 
@@ -78,3 +84,16 @@ Set `NEURA_BROWSER_REAL_CLI=1` to additionally run actual installed Codex and
 Claude CLIs against those same fixture tabs. The script records checks, PNGs and
 CLI evidence in that disposable data directory. This is distinct from unit-test
 success and never operates the user's real browsing data.
+
+## Recorded local validation (2026-10-28)
+
+The isolated package and real CEF completed the stdio fixture flow. Actual Codex
+0.165.0 (managed terminal launch) and Claude Code 2.1.312 (shared launch config in
+print mode) each filled the same existing tab, clicked Submit and reread their
+result. Both persisted conversation traces contain an actual screenshot tool
+call and image result; the fixture also asserts the resulting Hello text. This
+proves the installed CLI versions, not all historical versions.
+
+Local evidence is retained at `/tmp/neura-browser109-data/real-cli-evidence.json`,
+`codex-evidence.json`, and `claude-evidence.jsonl`; these contain only the local
+fixture. The final deterministic run records `evidence.json` separately.

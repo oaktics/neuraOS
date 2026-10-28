@@ -10,6 +10,7 @@ struct BrowserAutomationError: Error {let code: String}
     private var entries: [String: Entry] = [:]
     private var jobs: [String: Task<Void, Never>] = [:]
     private var owners: [String: String] = [:]
+    private var failures: [String: String] = [:]
     private var results: [[String: Any]] = []
     private let nativeId = UUID().uuidString.lowercased()
     private var loop: Task<Void, Never>?
@@ -37,26 +38,26 @@ struct BrowserAutomationError: Error {let code: String}
         }}
     }
     func unregister(_ view: NCChromiumView) {
-        for (key, entry) in entries where entry.model?.view === view {if let model = entry.model {stop(model)}; entries.removeValue(forKey: key)}
+        for (key, entry) in entries where entry.model?.view === view {if let model = entry.model {stop(model, reason:"browser_tab_closed")}; entries.removeValue(forKey: key)}
     }
-    func stop(_ model: BrowserModel) {
+    func stop(_ model: BrowserModel, reason: String = "browser_cancelled") {
         model.automationEnabled = false
-        for (id, key) in owners where key == model.storageId {jobs[id]?.cancel()}
+        for (id, key) in owners where key == model.storageId {failures[id] = reason; jobs[id]?.cancel()}
         model.view.cancelDevTools()
     }
     private func poll() async {
-        let tabs: [[String: Any]] = entries.values.compactMap {entry in
+        let tabs: [[String: Any]] = entries.values.prefix(500).compactMap {entry in
             guard let m = entry.model else {return nil}
-            return ["workspaceId":m.workspaceId,"tabId":m.tabId,"projectId":m.projectId,"url":String(m.address.prefix(8192)),"title":String(m.title.prefix(2048)),"selected":m.browserVisible,"loading":m.isLoading,"enabled":m.automationEnabled]
+            return ["workspaceId":m.workspaceId,"tabId":m.tabId,"projectId":m.projectId,"url":String(decoding:m.address.utf8.prefix(8192),as:UTF8.self),"title":String(decoding:m.title.utf8.prefix(2048),as:UTF8.self),"selected":m.browserVisible,"loading":m.isLoading,"enabled":m.automationEnabled]
         }
-        let sending = Array(results.prefix(32))
         do {
             var request = URLRequest(url: api.endpoint.appendingPathComponent("v1/browser/native/poll"))
             request.httpMethod = "POST"; request.timeoutInterval = 2
             let token = try String(contentsOf: api.dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["nativeId":nativeId,"tabs":tabs,"results":sending])
+            let batch = try BrowserResultBatch.make(nativeId:nativeId,tabs:tabs,results:results)
+            request.httpBody = batch.data
             let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {throw BrowserAutomationError(code: "browser_disconnected")}
             if let instance = body["instanceId"] as? String {
@@ -66,7 +67,7 @@ struct BrowserAutomationError: Error {let code: String}
                 }
                 daemonInstance = instance
             }
-            let sentIds = Set(sending.compactMap {$0["id"] as? String}); results.removeAll {sentIds.contains($0["id"] as? String ?? "")}
+            results.removeAll {batch.ids.contains($0["id"] as? String ?? "")}
             for id in body["cancelIds"] as? [String] ?? [] {
                 if let key = owners[id], let m = entries[key]?.model {jobs[id]?.cancel(); m.view.cancelDevTools()}
                 else {results.append(["id":id,"error":"browser_cancelled"])}
@@ -92,11 +93,11 @@ struct BrowserAutomationError: Error {let code: String}
         guard !owners.values.contains(key) else {results.append(["id":id,"error":"browser_busy"]);return}
         owners[id] = key; model.automationOwner = item["terminalId"] as? String ?? "CLI"
         jobs[id] = Task {
-            defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);model.automationOwner = ""}
+            defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = ""}
             do {
                 let result = try await Self.execute(c, view: model.view, deadline: deadline, allowed: {model.automationEnabled})
                 results.append(["id":id,"result":result])
-            } catch {results.append(["id":id,"error":(error as? BrowserAutomationError)?.code ?? "browser_cancelled"])}
+            } catch {results.append(["id":id,"error":failures[id] ?? (error as? BrowserAutomationError)?.code ?? "browser_cancelled"])}
         }
     }
     static func devTools(_ view: NCChromiumView, _ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {

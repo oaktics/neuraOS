@@ -230,6 +230,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             CallbackRef browserRef(browser);
             NCChromiumView *v = View(s);
             [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
+            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");
             if (v.onError && !v->_closed) v.onError(@"ページの表示プロセスが終了しました。再読み込みしてください。");
         };
         return &h->api;
@@ -346,7 +347,8 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             [v->_devCallbacks removeObjectForKey:@(messageId)];
             if (callback) callback(success ? ([[NSString alloc] initWithBytes:result length:size encoding:NSUTF8StringEncoding] ?: @"{}") : nil, success ? nil : @"browser_protocol_error");
         };
-        observer->api.on_dev_tools_agent_detached = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser) {CallbackRef ref(browser); NCChromiumView *v = View(s); [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();};
+        observer->api.on_dev_tools_agent_detached = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser) {CallbackRef ref(browser); NCChromiumView *v = View(s); [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
+            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");};
         // CEF consumes the observer reference across its C API boundary.
         _devRegistration = host->add_dev_tools_message_observer(host, &observer->api);
     }

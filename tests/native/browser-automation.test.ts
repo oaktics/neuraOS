@@ -93,3 +93,11 @@ test('disconnect quarantines dispatched work until reconnect acknowledges cancel
   const next=f.call({action:'snapshot',...f.target()}).then(r=>r);const [request]=await f.next();await f.poll([{id:request.id,result:{}}]);assert.equal((await next).statusCode,200);
  }finally{await f.close();}
 });
+test('oversized screenshot error acknowledges and releases the tab for subsequent reads',async()=>{
+ const f=await fixture();try{
+  const image=f.call({action:'screenshot',...f.target()}).then(r=>r);const [request]=await f.next();
+  await f.poll([{id:request.id,error:'browser_image_too_large'}]);assert.equal((await image).json().error,'browser_image_too_large');
+  const read=f.call({action:'snapshot',...f.target()}).then(r=>r);const [next]=await f.next();
+  await f.poll([{id:next.id,result:{text:'recovered'}}]);assert.equal((await read).json().result.text,'recovered');
+ }finally{await f.close();}
+});
