@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SidebarSpace: Codable, Identifiable, Equatable {
     var id = UUID().uuidString.lowercased()
@@ -11,9 +12,33 @@ struct SidebarSpace: Codable, Identifiable, Equatable {
 struct SidebarSpaces: Codable {
     var spaces = [SidebarSpace(name: "メイン")]
     var activeId: String?
+    var defaultSpaceId: String?
     var projectSpaces: [String: String] = [:]
+    // Optional for compatibility with layouts saved before project reordering.
+    var projectOrder: [String: [String]]?
+    func projects(in spaceId: String, from projects: [Project]) -> [Project] {
+        let members = projects.filter {owner(of: $0.id) == spaceId}
+        let order = projectOrder?[spaceId] ?? []
+        let ranks = Dictionary(order.enumerated().map {($0.element, $0.offset)}, uniquingKeysWith: {first, _ in first})
+        return members.enumerated().sorted {
+            let left = ranks[$0.element.id] ?? Int.max
+            let right = ranks[$1.element.id] ?? Int.max
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+    }
+    @discardableResult
+    mutating func reorderProject(_ id: String, onto targetId: String, in spaceId: String, projects: [Project]) -> Bool {
+        guard spaces.contains(where: {$0.id == spaceId}), id != targetId else {return false}
+        var ids = self.projects(in: spaceId, from: projects).map(\.id)
+        guard let source = ids.firstIndex(of: id), let target = ids.firstIndex(of: targetId) else {return false}
+        ids.remove(at: source)
+        ids.insert(id, at: target)
+        if projectOrder == nil {projectOrder = [:]}
+        projectOrder?[spaceId] = ids
+        return true
+    }
     var active: SidebarSpace {spaces.first {$0.id == activeId} ?? spaces[0]}
-    func owner(of projectId: String) -> String {projectSpaces[projectId] ?? spaces[0].id}
+    func owner(of projectId: String) -> String {projectSpaces[projectId] ?? defaultSpaceId ?? spaces[0].id}
     mutating func create(name: String) {
         let space = SidebarSpace(name: name)
         spaces.append(space)
@@ -23,9 +48,74 @@ struct SidebarSpaces: Codable {
         guard let index = spaces.firstIndex(where: {$0.id == active.id}), spaces.indices.contains(index + offset) else {return nil}
         return spaces[index + offset].id
     }
+    mutating func move(_ id: String, to targetId: String) {
+        guard let source = spaces.firstIndex(where: {$0.id == id}),
+              let target = spaces.firstIndex(where: {$0.id == targetId}), source != target else {return}
+        // Older layouts implicitly assign ungrouped projects to the first space.
+        defaultSpaceId = defaultSpaceId ?? spaces[0].id
+        activeId = active.id
+        let space = spaces.remove(at: source)
+        spaces.insert(space, at: target)
+    }
+    mutating func rename(_ id: String, name: String) {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let index = spaces.firstIndex(where: {$0.id == id}) else {return}
+        spaces[index].name = name
+    }
     mutating func remember(_ workspaceId: String?) {
         guard let index = spaces.firstIndex(where: {$0.id == active.id}) else {return}
         spaces[index].selectedWorkspaceId = workspaceId
+    }
+}
+
+private extension UTType {
+    static let sidebarSpace = UTType(exportedAs: "com.neuraos.sidebar-space")
+}
+
+struct SidebarSpaceDrag: Codable, Transferable {
+    let id: String
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .sidebarSpace)
+    }
+}
+
+struct SidebarSpaceName: View {
+    @Environment(AppModel.self) private var model
+    let space: SidebarSpace
+    @State private var draft = ""
+    @State private var editing = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField("Workspace名", text: $draft)
+                    .textFieldStyle(.plain)
+                    .focused($focused)
+                    .onSubmit {finish()}
+                    .onExitCommand {editing = false; focused = false}
+                    .onChange(of: focused) {_, value in if !value {finish()}}
+                    .onDisappear {finish()}
+            } else {
+                Button {
+                    draft = space.name
+                    editing = true
+                    focused = true
+                } label: {
+                    Text(space.name).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("クリックしてWorkspace名を編集")
+                .accessibilityLabel("Workspace名を編集: \(space.name)")
+            }
+        }.font(.system(size: 13, weight: .semibold)).lineLimit(1)
+    }
+
+    private func finish() {
+        guard editing else {return}
+        model.sidebarSpaces.rename(space.id, name: draft)
+        editing = false
+        focused = false
     }
 }
 
@@ -212,5 +302,22 @@ struct NewSidebarSpaceSheet: View {
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(24).frame(width: 380)
+    }
+}
+
+/// Private drag payload keeps project ordering separate from file and text drops.
+struct SidebarProjectDrag: Codable {
+    static let typeIdentifier = "com.neuraos.sidebar-project"
+    let projectId: String
+    let spaceId: String
+
+    var provider: NSItemProvider {
+        let provider = NSItemProvider()
+        let data = try? JSONEncoder().encode(self)
+        provider.registerDataRepresentation(forTypeIdentifier: Self.typeIdentifier, visibility: .ownProcess) {completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
 }

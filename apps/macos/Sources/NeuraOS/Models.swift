@@ -14,7 +14,7 @@ struct WorkspaceCommandRequest {
 
 struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
-struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil}
+struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
@@ -159,7 +159,7 @@ final class DaemonClient {
     }() {
         didSet {if let data = try? JSONEncoder().encode(sidebarSpaces) {UserDefaults.standard.set(data, forKey: "sidebarSpaces")}}
     }
-    var visibleProjects: [Project] {state.projects.filter {sidebarSpaces.owner(of: $0.id) == sidebarSpaces.active.id}}
+    var visibleProjects: [Project] {sidebarSpaces.projects(in: sidebarSpaces.active.id, from: state.projects)}
     var visibleWorkspaces: [Workspace] {state.workspaces.filter {sidebarSpaces.owner(of: $0.projectId) == sidebarSpaces.active.id}}
     func createSpace(name: String) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)

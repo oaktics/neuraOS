@@ -8,6 +8,7 @@ export class Store {
   constructor(path:string){
     this.db=new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS terminals(id TEXT PRIMARY KEY, data TEXT NOT NULL);
@@ -21,9 +22,9 @@ export class Store {
     if(!columns.some(c=>c.name==='cols'))this.db.exec('ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;');
     for(const t of this.list<TerminalRecord>('terminals'))if(t.status==='running')this.put('terminals',{...t,status:'interrupted'});
   }
-  list<T>(table:'projects'|'workspaces'|'terminals'):T[]{return this.db.prepare(`SELECT data FROM ${table} ORDER BY rowid`).all().map(r=>JSON.parse(r.data as string));}
-  get<T>(table:'projects'|'workspaces'|'terminals',id:string):T|undefined {const r=this.db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id);return r?JSON.parse(r.data as string):undefined;}
-  put<T extends {id:string}>(table:'projects'|'workspaces'|'terminals',value:T,notification?:AgentNotification){
+  list<T>(table:'projects'|'workspaces'|'terminals'|'agents'):T[]{return this.db.prepare(`SELECT data FROM ${table} ORDER BY rowid`).all().map(r=>JSON.parse(r.data as string));}
+  get<T>(table:'projects'|'workspaces'|'terminals'|'agents',id:string):T|undefined {const r=this.db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id);return r?JSON.parse(r.data as string):undefined;}
+  put<T extends {id:string}>(table:'projects'|'workspaces'|'terminals'|'agents',value:T,notification?:AgentNotification){
     this.db.exec('BEGIN IMMEDIATE');try{
       this.db.prepare(`INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`).run(value.id,JSON.stringify(value));
       const event=this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run(table,value.id,new Date().toISOString());
@@ -48,6 +49,7 @@ export class Store {
         this.db.prepare('DELETE FROM output WHERE terminalId=?').run(terminal.id);
         this.db.prepare('DELETE FROM terminals WHERE id=?').run(terminal.id);
       }
+      this.db.prepare("DELETE FROM agents WHERE json_extract(data,'$.workspaceId')=?").run(id);
       this.db.prepare('DELETE FROM workspaces WHERE id=?').run(id);
       this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run('workspaces',id,new Date().toISOString());
       this.db.exec('COMMIT');
@@ -62,7 +64,7 @@ export class Store {
         this.db.prepare('DELETE FROM output WHERE terminalId=?').run(terminal.id);
         this.db.prepare('DELETE FROM terminals WHERE id=?').run(terminal.id);
       }
-      for(const workspace of workspaces)this.db.prepare('DELETE FROM workspaces WHERE id=?').run(workspace.id);
+      for(const workspace of workspaces){this.db.prepare("DELETE FROM agents WHERE json_extract(data,'$.workspaceId')=?").run(workspace.id);this.db.prepare('DELETE FROM workspaces WHERE id=?').run(workspace.id);}
       this.db.prepare('DELETE FROM projects WHERE id=?').run(id);
       this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run('projects',id,new Date().toISOString());
       this.db.exec('COMMIT');

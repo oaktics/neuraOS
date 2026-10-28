@@ -42,6 +42,25 @@ struct DaemonCapabilitiesContractTest {
         precondition(created.startupErrors == ["CLI missing"])
         let oldCreated = try JSONDecoder().decode(CreatedWorkspace.self, from: Data(#"{"id":"workspace"}"#.utf8))
         precondition(oldCreated.startupErrors == nil)
+        // Old preferences must retain their spaces and selections when order is absent.
+        let oldLayout = #"{"spaces":[{"id":"main","name":"メイン","selectedWorkspaceId":"w1"},{"id":"work","name":"仕事"}],"activeId":"main","projectSpaces":{"other":"work"}}"#
+        var layout = try JSONDecoder().decode(SidebarSpaces.self, from: Data(oldLayout.utf8))
+        let projects = ["a", "b", "c", "other"].map {Project(id: $0, name: $0, path: "", isGit: false)}
+        precondition(layout.projects(in: "main", from: projects).map(\.id) == ["a", "b", "c"])
+        precondition(layout.reorderProject("a", onto: "c", in: "main", projects: projects))
+        precondition(layout.projects(in: "main", from: projects).map(\.id) == ["b", "c", "a"])
+        precondition(layout.reorderProject("a", onto: "b", in: "main", projects: projects))
+        precondition(layout.projects(in: "main", from: projects).map(\.id) == ["a", "b", "c"])
+        precondition(layout.reorderProject("c", onto: "a", in: "main", projects: projects))
+        precondition(!layout.reorderProject("other", onto: "a", in: "main", projects: projects))
+        precondition(!layout.reorderProject("a", onto: "a", in: "main", projects: projects))
+        precondition(!layout.reorderProject("deleted", onto: "a", in: "main", projects: projects))
+        let restoredLayout = try JSONDecoder().decode(SidebarSpaces.self, from: JSONEncoder().encode(layout))
+        precondition(restoredLayout.projects(in: "main", from: projects.reversed()).map(\.id) == ["c", "a", "b"])
+        precondition(restoredLayout.active.selectedWorkspaceId == "w1")
+        precondition(restoredLayout.projects(in: "work", from: projects).map(\.id) == ["other"])
+        let changedProjects = projects.filter {$0.id != "a"} + [Project(id: "new", name: "new", path: "", isGit: false)]
+        precondition(restoredLayout.projects(in: "main", from: changedProjects).map(\.id) == ["c", "b", "new"])
         print("Legacy and current daemon feature contracts passed")
     }
 }

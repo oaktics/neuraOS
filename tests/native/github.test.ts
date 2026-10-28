@@ -6,11 +6,12 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {GitHub,githubRepository} from '../../apps/daemon/src/github.ts';
 import {createDaemon} from '../../apps/daemon/src/server.ts';
+import {git as realGit} from '../../apps/daemon/src/workspace.ts';
 import {Command,Fault} from '../../apps/daemon/src/contracts.ts';
 
 const head='a'.repeat(40),otherHead='b'.repeat(40),workspaceId=randomUUID();
 const target={workspaceId,repository:'owner/repo',branch:'feature/test',expectedHead:head};
-function fixture(){
+function fixture(gitOverride?:(root:string,args:string[])=>Promise<string>){
   const calls:{kind:string;args:string[]}[]=[];
   const state={branch:target.branch,head,remote:'https://github.com/owner/repo.git',pushRemote:'git@github.com:owner/repo.git',remoteHead:head,hasPR:true,pullBranch:target.branch,pullNumber:17,unresolved:false,merged:true,fail:false,
     pr:{number:17,title:'A PR',body:'Description',url:'https://github.com/owner/repo/pull/17',state:'OPEN',isDraft:false,headRefName:target.branch,headRefOid:head,baseRefName:'main',mergeStateStatus:'CLEAN',reviewDecision:'APPROVED',headRepository:{name:'repo'},headRepositoryOwner:{login:'owner'},author:{login:'alice'},additions:42,deletions:7,changedFiles:1,files:[{path:'src/main.ts',additions:42,deletions:7}],statusCheckRollup:[{name:'test',status:'COMPLETED',conclusion:'SUCCESS',detailsUrl:'https://github.com/owner/repo/actions/runs/1'}]}};
@@ -46,7 +47,7 @@ function fixture(){
     else throw new Error(`unexpected gh: ${args}`);
     return JSON.stringify(value);
   };
-  return {service:new GitHub(run,git),state,calls};
+  return {service:new GitHub(run,gitOverride??git),state,calls};
 }
 const mergeCommand=()=>Command.parse({type:'github.merge',...target,number:17,method:'squash',expectedPRHead:head}) as Extract<Command,{type:'github.merge'}>;
 const createCommand=()=>Command.parse({type:'github.create',...target,title:'Title',body:'Description',base:'main',draft:true}) as Extract<Command,{type:'github.create'}>;
@@ -116,7 +117,7 @@ test('GitHub HTTP commands retain authentication, validation and durable operati
     for(const url of ['/v1/state','/v1/capabilities']){
       const response=await daemon.app.inject({url,headers});
       assert.equal(response.statusCode,200);assert.equal(response.json().protocolVersion,1);
-      assert.deepEqual(response.json().features,['project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.folderless','workspace.from-pr']);
+      assert.deepEqual(response.json().features,['agent.supervision','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.folderless','workspace.from-pr']);
     }
     assert.equal((await daemon.app.inject(`/v1/workspaces/${workspaceId}/github`)).statusCode,401);
     assert.equal((await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers})).statusCode,200);
@@ -176,17 +177,43 @@ test('explicit PR identity supports renamed local branches and forks without com
   await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch,number:18},source),{code:'github_pr_mismatch'});
   assert.deepEqual(mutations(calls),[]);
 });
-test('source identity partitions cache and invalidates on branch, repository or unrelated history changes',async()=>{
+test('source identity partitions cache and rejects different repositories or malformed provenance',async()=>{
   const {service,state}=fixture();state.branch=source.localBranch;state.hasPR=false;
   assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
   assert.equal((await service.status('/repo')).pullRequest,null);
-  for(const binding of [{...source,repository:'other/repo'},{...source,localBranch:'other'},{...source,number:0}]){
+  for(const binding of [{...source,repository:'other/repo'},{...source,number:0}]){
     assert.equal((await service.status('/repo',false,binding)).pullRequest,null);
   }
-  state.branch='other';assert.equal((await service.status('/repo',false,source)).pullRequest,null);
-  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:'other'},source),{code:'github_pr_mismatch'});
-  state.branch=source.localBranch;state.head=otherHead;
-  assert.equal((await service.status('/repo',false,source)).pullRequest,null);
+});
+test('renamed branches and rewritten history retain provenance without authorizing stale merges',async()=>{
+  const {service,state,calls}=fixture();state.branch=source.localBranch;state.hasPR=false;
+  assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
+  state.branch='renamed';state.head=otherHead;
+  const status=await service.status('/repo',false,source);
+  assert.equal(status.pullRequest?.number,17);
+  assert.equal(status.head,otherHead);
+  assert.equal(status.branch,'renamed');
+  await assert.rejects(service.mutate('/repo',{...mergeCommand(),branch:state.branch,expectedHead:otherHead},source),{code:'github_stale'});
+  assert.deepEqual(mutations(calls),[]);
+  state.pr.headRefOid=otherHead;
+  await service.mutate('/repo',{...mergeCommand(),branch:state.branch,expectedHead:otherHead,expectedPRHead:otherHead},source);
+  assert.ok(mutations(calls)[0].args.includes('repos/owner/repo/pulls/17/merge'));
+});
+test('source PR remains readable during detached rebase, but every mutation requires a branch',async()=>{
+  const {service,state,calls}=fixture();state.branch=source.localBranch;
+  await service.status('/repo',false,source);
+  state.branch='';state.head=otherHead;
+  const status=await service.status('/repo',false,source);
+  assert.equal(status.pullRequest?.number,17);assert.equal(status.branch,'');
+  for(const command of [mergeCommand(),createCommand(),{...target,type:'github.push' as const}]){
+    await assert.rejects(service.mutate('/repo',command,source),{code:'github_detached'});
+  }
+  assert.deepEqual(mutations(calls),[]);
+  await assert.rejects(service.status('/repo',false,{...source,repository:'other/repo'}),{code:'github_detached'});
+  state.branch=source.localBranch;
+  assert.equal((await service.status('/repo',false,source)).pullRequest?.number,17);
+  await service.mutate('/repo',{...target,type:'github.push',branch:state.branch,expectedHead:otherHead},source);
+  assert.deepEqual(mutations(calls)[0].args,['-c','remote.origin.mirror=false','push','--no-follow-tags',state.pushRemote,`${otherHead}:refs/heads/${state.branch}`]);
 });
 test('source PR metadata survives daemon restart and workspace reselection',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'neura-pr-restore-')),f=fixture();f.state.branch=source.localBranch;
@@ -196,7 +223,7 @@ test('source PR metadata survives daemon restart and workspace reselection',asyn
     for(let i=0;i<2;i++){
       const response=await daemon.app.inject({url:`/v1/workspaces/${workspaceId}/github`,headers:{authorization:`Bearer ${daemon.token}`}});
       assert.equal(response.statusCode,200,response.body);assert.equal(response.json().pullRequest.number,17);
-      if(i===0){await daemon.app.close();const next=fixture();next.state.branch=source.localBranch;daemon=await createDaemon(dir,next.service);}
+      if(i===0){await daemon.app.close();const next=fixture();next.state.branch='renamed-after-rebase';next.state.head=otherHead;daemon=await createDaemon(dir,next.service);}
     }
   }finally{await daemon.app.close();await rm(dir,{recursive:true,force:true});}
 });
@@ -223,4 +250,30 @@ for(const originalState of ['CLOSED','MERGED'])test(`new local PR supersedes ${o
   assert.deepEqual(mutations(calls),[]);
   await service.mutate('/repo',{...mergeCommand(),branch:state.branch,number:18},source);
   assert.ok(mutations(calls)[0].args.includes('repos/owner/repo/pulls/18/merge'));
+});
+
+test('real Git rebase and branch rename preserve the source PR after its original commit leaves ancestry',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'neura-pr-rebase-'));
+  try{
+    await realGit(dir,['init','-b','main']);
+    await realGit(dir,['config','user.name','Test']);
+    await realGit(dir,['config','user.email','test@example.com']);
+    await realGit(dir,['remote','add','origin','https://github.com/owner/repo.git']);
+    await realGit(dir,['commit','--allow-empty','-m','base']);
+    await realGit(dir,['checkout','-b',source.localBranch]);
+    await realGit(dir,['commit','--allow-empty','-m','PR change']);
+    const sourceHead=(await realGit(dir,['rev-parse','HEAD'])).trim();
+    const binding={...source,sourceHead};
+    const {service}=fixture(realGit);
+    assert.equal((await service.status(dir,false,binding)).pullRequest?.number,17);
+    await realGit(dir,['checkout','main']);
+    await realGit(dir,['commit','--allow-empty','-m','new base']);
+    await realGit(dir,['checkout',source.localBranch]);
+    await realGit(dir,['rebase','main']);
+    await realGit(dir,['branch','-m','renamed']);
+    await assert.rejects(realGit(dir,['merge-base','--is-ancestor',sourceHead,'HEAD']));
+    const status=await service.status(dir,false,binding);
+    assert.equal(status.pullRequest?.number,17);assert.equal(status.branch,'renamed');
+    assert.notEqual(status.head,sourceHead);
+  }finally{await rm(dir,{recursive:true,force:true});}
 });

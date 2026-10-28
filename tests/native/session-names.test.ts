@@ -24,8 +24,13 @@ test('Codex uses generated conversation names, scoped to the exact worktree and 
     assert.equal((await codexSessionName(path,home))?.name,'更新された会話名');
     insert.run('new',path,null,'Never use the first prompt','cli',0,5,null);
     assert.equal(await codexSessionName(path,home),undefined);
+    assert.equal((await codexSessionName(path,home,'main'))?.name,'更新された会話名');
+    assert.equal(await codexSessionName(path,home,'missing'),undefined);
     assert.equal(await codexSessionName('/unrelated',home),undefined);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM threads').get()?.n,5);
+    insert.run('managed',path,'監督された会話','Raw task','appServer',0,6,6000);
+    assert.equal(await codexSessionName(path,home),undefined);
+    assert.equal((await codexSessionName(path,home,'managed'))?.name,'監督された会話');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM threads').get()?.n,6);
   } finally {db.close();await rm(home,{recursive:true,force:true});}
 });
 
@@ -150,5 +155,34 @@ test('only running or newly stopped CLIs read history; stopped worktrees and dae
     await restarted.refresh();await restarted.refresh();assert.equal(claudeReads,6);
     assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,claudeTitle.name);
     await names.close();await restarted.close();
+  } finally {store.close();}
+});
+
+
+test('tab names follow exact sessions, including root folders, and preserve concurrent record updates',async()=>{
+  const store=new Store(':memory:');
+  const workspace:Workspace={id:'w',projectId:'p',name:'Root',path:'/repo',branch:'main',kind:'root',createdAt:''};
+  const terminal=(id:string):TerminalRecord=>({id,workspaceId:'w',provider:'codex',sessionId:id,status:'running',createdAt:'',cols:100,rows:30});
+  try {
+    store.put('workspaces',workspace);
+    store.put('terminals',terminal('first'));store.put('terminals',terminal('second'));
+    store.put('terminals',{...terminal('unbound'),sessionId:undefined});
+    const names=new SessionNames(store,{
+      codex:async(path,id)=>{
+        assert.equal(path,'/repo');
+        assert.ok(id);
+        const current=store.get<TerminalRecord>('terminals',id)!;
+        store.put('terminals',{...current,cols:120});
+        return {name:'作業 '+id,updatedAt:1};
+      },
+      claude:async()=>undefined,
+    },0);
+    await names.refresh();
+    assert.equal(store.get<TerminalRecord>('terminals','first')?.sessionName,'作業 first');
+    assert.equal(store.get<TerminalRecord>('terminals','second')?.sessionName,'作業 second');
+    assert.equal(store.get<TerminalRecord>('terminals','first')?.cols,120);
+    assert.equal(store.get<TerminalRecord>('terminals','unbound')?.sessionName,undefined);
+    assert.equal(store.get<Workspace>('workspaces','w')?.name,'Root');
+    await names.close();
   } finally {store.close();}
 });

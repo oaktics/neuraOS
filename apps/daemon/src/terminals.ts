@@ -8,6 +8,7 @@ import {homedir} from 'node:os';
 import {join,delimiter} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {Fault,requireValue,type Provider,type TerminalRecord,type Workspace} from './contracts.ts';
+import type {Agents} from './agents.ts';
 import type {Store} from './store.ts';
 import {ActivityTracker,activityArguments,activityBridge,supportsActivity,type ActivityBridge} from './agent-activity.ts';
 
@@ -59,18 +60,23 @@ export function argumentsFor(provider:Provider,resume:boolean){
 export function terminalEnvironment():Record<string,string>{
   return {HOME:homedir(),USER:process.env.USER??'',SHELL:'/bin/zsh',TERM:'xterm-256color',LANG:process.env.LANG??'en_US.UTF-8',PATH:[join(homedir(),'.local/bin'),'/opt/homebrew/bin','/usr/local/bin',process.env.PATH??'/usr/bin:/bin'].join(delimiter)};
 }
+const managedSupport=new Map<string,Promise<boolean>>();
+export function supportsManagedCodex(program:string){let result=managedSupport.get(program);if(!result){result=execFileAsync(program,['--help'],{timeout:3000,maxBuffer:256*1024}).then(({stdout})=>stdout.includes('--remote')&&stdout.includes('app-server')).catch(()=>false);managedSupport.set(program,result);}return result;}
 export class Terminals {
   private processes=new Map<string,pty.IPty>();
   private owners=new Map<string,{clientId:string;until:number}>();
   private closing=false;
   private stoppingGroups=new Map<string,Set<number>>();
   private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge}>();
-  constructor(readonly store:Store,private processTable=readProcessTable){}
-  async open(workspace:Workspace,provider:Provider,resume:boolean){
+  constructor(readonly store:Store,private processTable=readProcessTable,private agents?:Agents){}
+  async open(workspace:Workspace,provider:Provider,resume:boolean,options:{prompt?:string;resumeId?:string;parentTaskId?:string}={}){
     const program=await executable(provider),id=randomUUID();
     const env=terminalEnvironment();
     let extraArgs:string[]=[];
-    if(await supportsActivity(provider,program)){
+    let managed:{endpoint:string;threadId:string|undefined}|undefined;
+    if(provider==='codex'&&this.agents&&await supportsManagedCodex(program))managed=await this.agents.open(program,env,workspace,id,options.resumeId,options.parentTaskId,resume);
+    if((options.prompt||options.resumeId)&&!managed)throw new Fault('codex_supervision_unsupported','このCodex CLIは監督機能に対応していません。Codexを更新してください。',409);
+    if(!managed&&await supportsActivity(provider,program)){
       const tracker=new ActivityTracker();
       // Status integration is optional: a failed observer must not block the CLI.
       try{
@@ -80,7 +86,10 @@ export class Terminals {
           if(!current||current.status!=='running')return;
           const activity=tracker.accept(event);
           const notification=tracker.notification?{id:randomUUID(),terminalId:id,workspaceId:current.workspaceId,provider:current.provider,kind:tracker.notification,createdAt:new Date().toISOString()}:undefined;
-          if(current.activity!==activity||notification)this.store.put('terminals',{...current,activity},notification);
+          // Keep the last identity after SessionEnd for the final title read.
+          const sessionId=tracker.sessionId??current.sessionId;
+          const sessionName=sessionId===current.sessionId?current.sessionName:undefined;
+          if(current.activity!==activity||current.sessionId!==sessionId||notification)this.store.put('terminals',{...current,activity,sessionId,sessionName},notification);
         });
         this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
         extraArgs=activityArguments(provider);
@@ -88,12 +97,13 @@ export class Terminals {
     }
     // Interactive user CLIs retain normal login/config, with full access selected at launch.
     let proc:pty.IPty;
-    try{proc=pty.spawn(program,[...argumentsFor(provider,resume),...extraArgs],{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});}
-    catch(error){await this.closeActivity(id);throw error;}
-    const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',...(provider==='shell'?{}:{activity:'unknown' as const}),createdAt:new Date().toISOString(),cols:100,rows:30};
+    try{proc=pty.spawn(program,managed?['resume',...(managed.threadId?[managed.threadId]:[]),'--remote',managed.endpoint]:[...argumentsFor(provider,resume),...extraArgs],{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});}
+    catch(error){await this.closeActivity(id);await this.agents?.close(id);throw error;}
+    const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',...(provider==='shell'?{}:{activity:'unknown' as const}),createdAt:new Date().toISOString(),cols:100,rows:30,...(managed?{agentId:managed.threadId,sessionId:managed.threadId}:{})};
     this.processes.set(id,proc);this.store.put('terminals',record);this.store.resize(id,record.cols,record.rows);
     proc.onData(data=>{if(!this.closing)this.store.append(id,data);});
-    proc.onExit(({exitCode})=>{this.processes.delete(id);this.owners.delete(id);void this.closeActivity(id);if(!this.closing)this.store.put('terminals',{...requireValue(this.store.get<TerminalRecord>('terminals',id),'terminal_missing','ターミナルがありません。'),status:'exited',activity:undefined,exitCode});});
+    proc.onExit(({exitCode})=>{this.processes.delete(id);this.owners.delete(id);void this.closeActivity(id);void this.agents?.close(id).catch(()=>{});if(!this.closing)this.store.put('terminals',{...requireValue(this.store.get<TerminalRecord>('terminals',id),'terminal_missing','ターミナルがありません。'),status:'exited',activity:undefined,exitCode});});
+    if(options.prompt&&managed?.threadId)await this.agents!.send(managed.threadId,options.prompt,'queue');
     return record;
   }
   private async closeActivity(id:string){const entry=this.activity.get(id);this.activity.delete(id);await entry?.bridge.close().catch(()=>{});}
@@ -120,14 +130,15 @@ export class Terminals {
     // node-pty creates a separate session/process group. Stop that group, not the UI or daemon.
     try{process.kill(-proc.pid,signal);}catch(e){if((e as NodeJS.ErrnoException).code!=='ESRCH')proc.kill(signal);}
   }
-  stop(id:string){const proc=this.processes.get(id);if(proc){this.kill(proc,'SIGHUP');const timer=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);timer.unref();}return {ok:true};}
+  async stop(id:string){const proc=this.processes.get(id);if(proc){this.kill(proc,'SIGHUP');const timer=setTimeout(()=>this.kill(proc,'SIGKILL'),1500);timer.unref();}await this.agents?.close(id);return {ok:true};}
   async stopWorkspace(workspaceId:string){
-    const ids=this.store.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===workspaceId&&(t.status==='running'||this.stoppingGroups.has(t.id))).map(t=>t.id);
+    const ids=this.store.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===workspaceId&&(t.status==='running'||this.agents?.pid(t.id)||this.stoppingGroups.has(t.id))).map(t=>t.id);
     await Promise.all(ids.map(async id=>{
       const proc=this.processes.get(id);
       // Preserve tracked groups across leader exit and a timed-out deletion retry.
       const groups=this.stoppingGroups.get(id)??new Set<number>();
       if(proc&&proc.pid>0)groups.add(proc.pid);
+      const agentPid=this.agents?.pid(id);if(agentPid)groups.add(agentPid);
       if(!groups.size)throw new Fault('terminal_missing','ターミナルの停止状態を確認できません。',409);
       this.stoppingGroups.set(id,groups);
       const discoverGroups=async()=>{
@@ -171,12 +182,12 @@ export class Terminals {
         if(elapsed>=5000)throw new Fault('terminal_stop_timeout','ターミナルの終了を確認できません。もう一度削除してください。',409);
         await new Promise(resolve=>setTimeout(resolve,25));
       }
-      this.stoppingGroups.delete(id);
+      await this.agents?.close(id);this.stoppingGroups.delete(id);
     })).catch(error=>{
       if(error instanceof Fault)throw error;
       throw new Fault('terminal_stop_failed','ターミナルと子プロセスを停止できませんでした。作業フォルダは削除していません。ターミナルを停止してから、もう一度削除してください。',409);
     });
   }
 
-  async shutdown(){this.closing=true;const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
+  async shutdown(){this.closing=true;await this.agents?.shutdown();const processes=[...this.processes.values()];for(const proc of processes)this.kill(proc,'SIGHUP');if(processes.length)await new Promise(r=>setTimeout(r,250));for(const proc of processes)this.kill(proc,'SIGKILL');this.processes.clear();await Promise.all([...this.activity.keys()].map(id=>this.closeActivity(id)));}
 }

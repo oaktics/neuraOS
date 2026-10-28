@@ -1,3 +1,4 @@
+import {Agents} from './agents.ts';
 import {Diagnostics} from './diagnostics.ts';
 import Fastify from 'fastify';
 import {z} from 'zod';
@@ -17,11 +18,14 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   const tokenPath=join(dataDir,'daemon-token');
   try{await writeFile(tokenPath,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});}catch(e){if((e as NodeJS.ErrnoException).code!=='EEXIST')throw e;}
   await chmod(tokenPath,0o600);
-  const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite')),terminals=new Terminals(store);
+  const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite'));
+  let controlEndpoint=`http://127.0.0.1:${process.env.NEURA_DEV_PORT??4318}`;
+  const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents);
   const diagnostics=new Diagnostics(join(dataDir,'diagnostics'));
   diagnostics.record('daemon.start');
   const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
+  app.addHook('onListen',async()=>{const address=app.server.address();if(address&&typeof address!=='string')controlEndpoint=`http://127.0.0.1:${address.port}`;});
   let queue:Promise<unknown>=Promise.resolve();
   let workspaceNetworkQueue:Promise<unknown>=Promise.resolve();
   let githubQueue:Promise<unknown>=Promise.resolve();
@@ -106,7 +110,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         // Worktree creation is successful even if an optional CLI cannot start.
         // The operation's cached response prevents retries from opening duplicates.
         const startupErrors:string[]=[];
-        for(const provider of project.worktreeStartup??[]){
+        for(const provider of c.skipStartup?[]:project.worktreeStartup??[]){
           try{await terminals.open(record,provider,false);}
           catch(error){startupErrors.push(error instanceof Fault?error.message:`${provider}の自動起動に失敗しました。タブから再度起動してください。`);}
         }
@@ -140,7 +144,11 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         store.deleteWorkspace(record.id);
         return {ok:true};
       }
-      case 'terminal.open':return terminals.open(workspace(c.workspaceId),c.provider,c.resume);
+      case 'terminal.open':return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'agent.watch':return agents.watch(c.agentId,c.taskIds);
+      case 'agent.send':return agents.send(c.agentId,c.text,c.mode,c.expectedTurnId);
+      case 'agent.interrupt':return agents.interrupt(c.agentId,c.expectedTurnId);
+      case 'agent.respond':return agents.respond(c.agentId,c.requestId,c.result);
       case 'terminal.input':return terminals.input(c.terminalId,c.clientId,c.data);
       case 'terminal.resize':return terminals.resize(c.terminalId,c.clientId,c.cols,c.rows);
       case 'terminal.stop':return terminals.stop(c.terminalId);
@@ -211,6 +219,8 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     try {const value=await result;if(traced)diagnostics.record('operation.success',command.type,operationId,performance.now()-started);return value;}
     catch(error){diagnostics.record('operation.failure',command.type,operationId,performance.now()-started);throw error;}
   });
+  app.get('/v1/agents',async()=>({agents:agents.list(),revision:store.state().revision}));
+  app.get('/v1/agents/:id',async req=>agents.read(z.uuid().parse((req.params as {id:string}).id),z.string().max(4096).optional().parse((req.query as {cursor?:string}).cursor)));
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
     const record=requireValue(store.get<TerminalRecord>('terminals',id),'terminal_missing','ターミナルがありません。');return {...store.output(id,after),status:record.status,cols:record.cols,rows:record.rows};

@@ -19,6 +19,42 @@ final class SidebarSpacesTests: XCTestCase {
         XCTAssertEqual(restored.adjacent(-1), main)
         XCTAssertNil(restored.adjacent(1))
     }
+    func testReorderPreservesImplicitOwnershipSelectionAndPersists() throws {
+        // Decode a pre-reordering layout with no explicit default or active ID.
+        var layout = try JSONDecoder().decode(SidebarSpaces.self, from: Data("""
+        {"spaces":[{"id":"main","name":"メイン","selectedWorkspaceId":"w1"},
+                   {"id":"work","name":"仕事","selectedWorkspaceId":"w2"}],
+         "projectSpaces":{"assigned":"work"}}
+        """.utf8))
+        layout.move("work", to: "main")
+        let restored = try JSONDecoder().decode(SidebarSpaces.self, from: JSONEncoder().encode(layout))
+        XCTAssertEqual(restored.spaces.map(\.id), ["work", "main"])
+        XCTAssertEqual(restored.active.id, "main")
+        XCTAssertEqual(restored.active.selectedWorkspaceId, "w1")
+        XCTAssertEqual(restored.spaces[0].selectedWorkspaceId, "w2")
+        XCTAssertEqual(restored.owner(of: "unassigned"), "main")
+        XCTAssertEqual(restored.owner(of: "assigned"), "work")
+        XCTAssertEqual(restored.adjacent(-1), "work")
+        layout.move("work", to: "main")
+        XCTAssertEqual(layout.spaces.map(\.id), ["main", "work"])
+        layout.move("missing", to: "main")
+        layout.move("main", to: "missing")
+        layout.move("main", to: "main")
+        XCTAssertEqual(layout.spaces.map(\.id), ["main", "work"])
+    }
+    func testRenameTrimsAndRejectsEmptyNamesWithoutChangingIdentity() throws {
+        var layout = SidebarSpaces()
+        let main = layout.active.id
+        layout.remember("selected")
+        layout.rename(main, name: "  個人用  ")
+        layout.rename(main, name: " \n ")
+        layout.rename("missing", name: "unknown")
+        let restored = try JSONDecoder().decode(SidebarSpaces.self, from: JSONEncoder().encode(layout))
+        XCTAssertEqual(restored.active.name, "個人用")
+        XCTAssertEqual(restored.active.id, main)
+        XCTAssertEqual(restored.active.selectedWorkspaceId, "selected")
+        XCTAssertEqual(restored.owner(of: "project"), main)
+    }
     func testMovingProjectDoesNotMoveOtherProjects() {
         var layout = SidebarSpaces()
         let main = layout.active.id
