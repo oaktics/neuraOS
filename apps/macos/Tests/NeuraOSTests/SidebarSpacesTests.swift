@@ -29,6 +29,28 @@ final class SidebarSpacesTests: XCTestCase {
         layout.activeId = main
         XCTAssertNil(layout.adjacent(-1))
     }
+    func testActivityFollowsProjectOwnershipAndAttentionTakesPriority() {
+        var layout = SidebarSpaces()
+        let main = layout.active.id
+        layout.create(name: "仕事")
+        let work = layout.active.id
+        layout.projectSpaces["p2"] = work
+        let workspaces = [
+            Workspace(id: "w1", projectId: "p1", name: "one", path: "", branch: "", kind: "worktree"),
+            Workspace(id: "w2", projectId: "p2", name: "two", path: "", branch: "", kind: "worktree")
+        ]
+        let terminals = [
+            TerminalRecord(id: "t1", workspaceId: "w1", provider: "codex", status: "running", cols: 80, rows: 24, activity: "working"),
+            TerminalRecord(id: "t2", workspaceId: "w2", provider: "claude", status: "running", cols: 80, rows: 24, activity: "waiting"),
+            TerminalRecord(id: "orphan", workspaceId: "deleted", provider: "codex", status: "running", cols: 80, rows: 24, activity: "waiting")
+        ]
+        XCTAssertEqual(layout.activity(in: main, workspaces: workspaces, terminals: terminals, connected: true), .working)
+        XCTAssertEqual(layout.activity(in: work, workspaces: workspaces, terminals: terminals, connected: true), .waiting)
+        XCTAssertEqual(layout.activity(in: main, workspaces: workspaces, terminals: terminals, connected: false), .unknown)
+        layout.projectSpaces["p2"] = main
+        XCTAssertEqual(layout.activity(in: main, workspaces: workspaces, terminals: terminals, connected: true), .waiting)
+        XCTAssertNil(layout.activity(in: work, workspaces: workspaces, terminals: terminals, connected: true))
+    }
     func testSwipeFollowsFingersAndCommitsOnReleaseWithEitherScrollPreference() {
         for inverted in [false, true] {
             let sign: CGFloat = inverted ? -1 : 1

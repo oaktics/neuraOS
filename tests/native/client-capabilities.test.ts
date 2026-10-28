@@ -25,6 +25,7 @@ test('native client decodes legacy v1 and gates GitHub on advertised features',{
       resolve('apps/macos/Sources/NeuraOS/AgentSleep.swift'),
       resolve('apps/macos/Sources/NeuraOS/SleepServiceRegistration.swift'),
       resolve('apps/macos/Sources/NeuraOS/SidebarSpaces.swift'),
+      resolve('apps/macos/Sources/NeuraOS/AgentActivity.swift'),
       resolve('tests/native/fixtures/daemon-capabilities.swift'),'-o',binary],{timeout:180000});
     const {stdout}=await exec(binary,[],{timeout:10000});
     assert.match(stdout,/Legacy and current daemon feature contracts passed/);
