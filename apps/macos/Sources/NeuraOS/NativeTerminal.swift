@@ -88,6 +88,7 @@ class NativeTerminalView: TerminalView {
 
 /// Renderer only. The UI never owns a PTY or starts a subprocess.
 struct NativeTerminal: NSViewRepresentable {
+    @Environment(\.openURL) private var openURL
     let terminal: TerminalRecord
     let api: DaemonClient
     let visible: Bool
@@ -97,6 +98,7 @@ struct NativeTerminal: NSViewRepresentable {
         let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         view.provider = terminal.provider
         view.updateAppearanceColors()
+        context.coordinator.openLink = {openURL($0)}
         view.terminalDelegate = context.coordinator
         context.coordinator.view = view
         view.acceptsFileInput = { [weak coordinator = context.coordinator] in
@@ -109,12 +111,14 @@ struct NativeTerminal: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: TerminalView, context: Context) {
+        context.coordinator.openLink = {openURL($0)}
         context.coordinator.updateStatus(terminal.status)
         context.coordinator.setVisible(visible)
     }
     static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {coordinator.stop(); view.terminalDelegate = nil}
     @MainActor final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
         weak var view: TerminalView?
+        var openLink: (URL) -> Void = {_ in}
         let terminal: TerminalRecord; let api: DaemonClient; let onError: (Error) -> Void
         var polling: Task<Void, Never>?
         var delay: Task<Void, Never>?
@@ -152,8 +156,8 @@ struct NativeTerminal: NSViewRepresentable {
         func scrolled(source: TerminalView, position: Double) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
         func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
-            guard let url = URL(string: link), ["http", "https"].contains(url.scheme ?? "") else {return}
-            NSWorkspace.shared.open(url)
+            guard let url = URL(string: link), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return}
+            openLink(url)
         }
         func stop() {
             updateStatus("exited")

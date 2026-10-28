@@ -43,6 +43,11 @@ struct NewWorkspaceSheet: View {
                 Text("ブランチ・コミット").tag("ref")
             }.pickerStyle(.segmented).disabled(busy)
             sourceContent
+            if let script = model.state.projects.first(where: {$0.id == projectId})?.worktreeSetup {
+                Label("作成後に \(script) を実行", systemImage: "terminal").font(.caption)
+                Text("セットアップ完了後にエージェントを自動起動します。設定はプロジェクトのメニューから変更できます。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction)
                 Spacer()

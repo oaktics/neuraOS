@@ -1,3 +1,4 @@
+import {detectSetup,setupPath,runSetup} from './worktree-setup.ts';
 import {Agents} from './agents.ts';
 import {Diagnostics} from './diagnostics.ts';
 import Fastify from 'fastify';
@@ -36,6 +37,27 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   });
   app.setErrorHandler((error,req,reply)=>{const e=error instanceof Fault?error:error instanceof z.ZodError?new Fault('invalid_request','要求の形式が正しくありません。'):new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);reply.code(e.status).send({error:e.code,message:e.message});});
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
+  const setupJobs=new Map<string,{controller:AbortController; promise:Promise<void>}>();
+  for(const record of store.list<Workspace>('workspaces')){
+    if(record.setup?.status==='running')store.put('workspaces',{...record,setup:{...record.setup,status:'failed',error:'Daemonが終了したためセットアップを中断しました。再実行してください。'}});
+  }
+  function startSetup(record:Workspace,project:Project,providers:Project['worktreeStartup']){
+    const script=project.worktreeSetup!;
+    const controller=new AbortController();
+    const update=(setup:NonNullable<Workspace['setup']>)=>{const current=store.get<Workspace>('workspaces',record.id);if(current)store.put('workspaces',{...current,setup});};
+    let output='';
+    update({status:'running',script,output});
+    const promise=runSetup(record.path,script,project.path,controller.signal,value=>{output=value;update({status:'running',script,output});})
+      .then(async()=>{
+        for(const provider of providers??[]){
+          if(controller.signal.aborted)throw new Error('セットアップを中断しました。');
+          try{await terminals.open(record,provider,false);}catch{output+=`\n${provider}の自動起動に失敗しました。タブから起動してください。`;}
+        }
+        update({status:'succeeded',script,output});
+      }).catch(error=>update({status:'failed',script,output,error:error instanceof Error?error.message:'セットアップに失敗しました。'}))
+      .finally(()=>setupJobs.delete(record.id));
+    setupJobs.set(record.id,{controller,promise});
+  }
   async function execute(c:Command,operationId:string,fetchedTarget?:(Awaited<ReturnType<typeof work.fetchDefault>> & {pullRequestSource?:Omit<PullRequestSource,'localBranch'>})):Promise<unknown>{
     if(c.type==='workspace.create'&&c.baseRef&&c.pullRequest)throw new Fault('invalid_source','作成元は一つだけ指定してください。');
     if(!fetchedTarget && ((c.type==='workspace.create'&&!c.baseRef)||c.type==='workspace.sync-default')){
@@ -60,6 +82,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       case 'project.remove':{
         requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         const workspaces=store.list<Workspace>('workspaces').filter(w=>w.projectId===c.projectId);
+        if(workspaces.some(w=>setupJobs.has(w.id)))throw new Fault('setup_running','セットアップ完了後に削除してください。',409);
         // Stop owned processes before forgetting them; never remove folders or Git worktrees.
         for(const record of workspaces)await terminals.stopWorkspace(record.id);
         store.removeProject(c.projectId);
@@ -98,6 +121,21 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const updated={...project,worktreeStartup:c.providers};
         store.put('projects',updated);return updated;
       }
+      case 'project.set-worktree-setup':{
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        if(project.isGit===false)throw new Fault('git_required','Gitリポジトリを選択してください。');
+        if(c.script)await setupPath(project.path,c.script);
+        const updated={...project,worktreeSetup:c.script||undefined};store.put('projects',updated);return updated;
+      }
+      case 'workspace.setup':{
+        const record=workspace(c.workspaceId);
+        if(record.kind!=='worktree')throw new Fault('worktree_required','worktreeを選択してください。');
+        if(setupJobs.has(record.id))throw new Fault('setup_running','セットアップを実行中です。',409);
+        if(store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','ターミナルとエージェントを停止してから再実行してください。',409);
+        const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
+        if(!project.worktreeSetup)throw new Fault('setup_missing','プロジェクトでsetup scriptを設定してください。');
+        startSetup(record,project,[]);return {ok:true};
+      }
       case 'workspace.create':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','worktreeの作成にはGitリポジトリが必要です。通常のフォルダでは、そのまま作業を開始できます。');
@@ -106,10 +144,11 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const slug=(c.name??'worktree').normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu,'-').replace(/^-|-$/g,'').slice(0,40)||'work';
         const branch=`neura/${slug}-${operationId.slice(0,8)}`,path=join(dataDir,'worktrees',project.id,`${slug}-${operationId.slice(0,8)}`);await mkdir(join(dataDir,'worktrees',project.id),{recursive:true});
         await work.git(project.path,['worktree','add','-b',branch,path,commit]);
-        const record:Workspace={id:operationId,projectId:project.id,name,path,branch,kind:'worktree',createdAt:new Date().toISOString(),...(fetchedTarget?.pullRequestSource?{pullRequestSource:{...fetchedTarget.pullRequestSource,localBranch:branch}}:{})};store.put('workspaces',record);
+        const record:Workspace={id:operationId,projectId:project.id,name,nameSource:c.name?'manual':'session',path,branch,kind:'worktree',createdAt:new Date().toISOString(),...(fetchedTarget?.pullRequestSource?{pullRequestSource:{...fetchedTarget.pullRequestSource,localBranch:branch}}:{})};store.put('workspaces',record);
         // Worktree creation is successful even if an optional CLI cannot start.
         // The operation's cached response prevents retries from opening duplicates.
         const startupErrors:string[]=[];
+        if(project.worktreeSetup){startSetup(record,project,c.skipStartup?[]:project.worktreeStartup);return {...record,setup:{status:'running',script:project.worktreeSetup,output:''},startupErrors};}
         for(const provider of c.skipStartup?[]:project.worktreeStartup??[]){
           try{await terminals.open(record,provider,false);}
           catch(error){startupErrors.push(error instanceof Fault?error.message:`${provider}の自動起動に失敗しました。タブから再度起動してください。`);}
@@ -125,6 +164,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
       }
       case 'workspace.delete':{
         const record=workspace(c.workspaceId);
+        if(setupJobs.has(record.id))throw new Fault('setup_running','セットアップ完了後に削除してください。',409);
         if(record.kind!=='worktree')throw new Fault('worktree_required','削除できるのは追加したworktreeだけです。');
         if(!c.stopTerminals&&store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
         const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
@@ -134,6 +174,8 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
             if(c.cleanup.callerWorkspaceId===record.id)throw new Fault('workspace_self_cleanup','現在作業中のworktreeは自分自身から削除できません。',409);
             if(c.discardChanges||!c.stopTerminals)throw new Fault('workspace_cleanup_options','cleanupでは変更破棄は禁止で、停止確認が必要です。',409);
             const active=agents.list().filter(a=>a.workspaceId===record.id);
+            const unverifiedTerminal=store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'&&(t.provider==='codex'?!active.some(a=>a.terminalId===t.id):t.activity!=='idle'));
+            if(unverifiedTerminal)throw new Fault('workspace_task_unfinished','作業終了を確認できないターミナルがあります。確認して停止するまで保持します。',409);
             if(active.some(a=>a.turnId||a.status==='working'||a.status==='waiting'||a.status==='failed'||a.pending.length||(a.reports?.length??0)||(a.watching?.length??0)))throw new Fault('workspace_task_unfinished','未完了・未実行指示・未受領報告・監視のある作業は削除できません。',409);
             const head=(await work.git(record.path,['rev-parse','HEAD'])).trim();
             if(head!==c.cleanup.expectedHead)throw new Fault('workspace_head_changed','HEADが変わりました。削除せず作業内容を再確認してください。',409);
@@ -155,7 +197,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         store.deleteWorkspace(record.id);
         return {ok:true};
       }
-      case 'terminal.open':return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
       case 'agent.report':return agents.report(c.agentId,c.text,c.sourceTerminalId);
       case 'agent.ack':return agents.ack(c.agentId,c.reportIds);
       case 'agent.watch':return agents.watch(c.agentId,c.taskIds);
@@ -195,6 +237,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   }
   app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
   app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return (w.kind==='folder'||w.kind==='scratch')?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
+  app.get('/v1/projects/:id/setup-scripts',async req=>{const project=requireValue(store.get<Project>('projects',z.uuid().parse((req.params as {id:string}).id)),'project_missing','プロジェクトがありません。');return {scripts:await detectSetup(project.path)};});
   app.get('/v1/projects/:id/pull-requests',async req=>{
     const project=requireValue(store.get<Project>('projects',z.uuid().parse((req.params as {id:string}).id)),'project_missing','プロジェクトがありません。');
     if(project.isGit===false)throw new Fault('git_required','Gitリポジトリを選択してください。');
@@ -245,6 +288,6 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>{const w=gitWorkspace((req.params as {id:string}).id);return github.status(w.path,(req.query as {refresh?:string}).refresh==='true',w.pullRequestSource);});
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
+  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);for(const job of setupJobs.values())job.controller.abort();await Promise.all([...setupJobs.values()].map(job=>job.promise));await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
   return {app,store,token};
 }

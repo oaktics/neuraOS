@@ -1,3 +1,4 @@
+import {GitHub} from '../../apps/daemon/src/github.ts';
 import {claudeMCPArguments} from '../../apps/daemon/src/claude-mcp.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,7 +13,9 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
   const root=await mkdtemp('/tmp/neura-mcp-test-'),repo=root+'/repo';await mkdir(repo);
   await git(repo,['init','-b','main']);await git(repo,['config','user.name','Test']);await git(repo,['config','user.email','test@example.invalid']);await writeFile(repo+'/hello','hello');await git(repo,['add','.']);await git(repo,['commit','-m','initial']);
   const old=process.env.NEURA_CODEX_PATH;process.env.NEURA_CODEX_PATH=root+'/missing';
-  const d=await createDaemon(root+'/data');await d.app.listen({host:'127.0.0.1',port:0});
+  await git(repo,['remote','add','origin','https://github.com/owner/repo.git']);
+  const expectedHead=(await git(repo,['rev-parse','HEAD'])).trim();
+  const d=await createDaemon(root+'/data',new GitHub(async()=>JSON.stringify({state:'MERGED',headRefOid:expectedHead})));await d.app.listen({host:'127.0.0.1',port:0});
   const address=d.app.server.address();assert.ok(address&&typeof address!=='string');
   const headers={authorization:`Bearer ${d.token}`};
   const p=(await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.add',path:repo}}})).json();
@@ -43,6 +46,18 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     const first=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.ok(first.workspace.id);assert.match(first.startupError,/Codex/);
     const retry=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.equal(retry.workspace.id,first.workspace.id);
     assert.equal(d.store.state().workspaces.length,2);assert.equal(d.store.state().terminals.length,0);
+    await writeFile(repo+'/setup.sh','while [ ! -f "$NEURA_PROJECT_ROOT/release-setup" ]; do sleep 0.02; done; echo ready');
+    await git(repo,['add','.']);await git(repo,['commit','-m','setup']);
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.set-worktree-setup',projectId:p.id,script:'setup.sh'}}});
+    const setupArgs={...args,operationId:randomUUID()};
+    const preparing=JSON.parse((await tool('task_spawn',setupArgs)).content[0].text);
+    assert.equal(preparing.setupPending,true);assert.equal(preparing.startupError,undefined);
+    await writeFile(repo+'/release-setup','ready');
+    for(let i=0;i<100&&d.store.state().workspaces.find(w=>w.id===preparing.workspace.id)?.setup?.status==='running';i++)await new Promise(r=>setTimeout(r,20));
+    const prepared=JSON.parse((await tool('task_spawn',setupArgs)).content[0].text);
+    assert.equal(prepared.workspace.id,preparing.workspace.id);assert.equal(prepared.workspace.setup.status,'succeeded');
+    assert.match(prepared.startupError,/Codex/);assert.doesNotMatch(prepared.startupError,/setup_running/);
+    assert.equal(d.store.state().workspaces.length,3);
     assert.equal((await tool('unknown')).isError,true);
     const tasks=JSON.parse((await tool('task_wait',{after:0})).content[0].text);assert.ok(tasks.revision>0);assert.deepEqual(tasks.agents,[]);
     const mainId=randomUUID(),instructionId=randomUUID();
@@ -59,6 +74,14 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.deepEqual(after.reports,[]);assert.equal(after.pending[0].id,instructionId);
     const self=await tool('workspace_delete',{operationId:randomUUID(),workspaceId:workspace.id,expectedHead:'a'.repeat(40),mergedPR:1});
     assert.equal(self.isError,true);assert.match(self.content[0].text,/caller workspace/);
+    await writeFile(first.workspace.path+'/.env','keep secret');
+    const failedCleanup=await tool('workspace_delete',{operationId:randomUUID(),workspaceId:first.workspace.id,expectedHead,mergedPR:7});
+    assert.equal(failedCleanup.isError,true);assert.match(failedCleanup.content[0].text,/workspacePresent/);assert.match(failedCleanup.content[0].text,/workspace_dirty/);
+    await rm(first.workspace.path+'/.env');
+    const cleanupArgs={operationId:randomUUID(),workspaceId:first.workspace.id,expectedHead,mergedPR:7};
+    assert.equal(JSON.parse((await tool('workspace_delete',cleanupArgs)).content[0].text).verifiedAbsent,true);
+    assert.equal(JSON.parse((await tool('workspace_delete',cleanupArgs)).content[0].text).verifiedAbsent,true,'retry preserves idempotency after deletion');
+
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
   }finally{child.kill();lines.close();await d.app.close();if(old===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=old;await rm(root,{recursive:true,force:true});}
 });

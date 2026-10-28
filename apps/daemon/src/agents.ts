@@ -4,6 +4,8 @@ import {realpathSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
+import {CodexTitles} from './codex-titles.ts';
+import {displayName,followsSessionName} from './session-names.ts';
 import {CodexRPC,type RPCEvent} from './codex-rpc.ts';
 import {Fault,requireValue,type Workspace,type TerminalRecord} from './contracts.ts';
 import type {Store} from './store.ts';
@@ -25,6 +27,7 @@ export interface AgentRecord {
   pending:{id:string;text:string;report?:boolean}[];requests:{id:number|string;method:string;params:unknown}[];
 }
 export class Agents {
+  private titles=new Map<string,CodexTitles>();
   private backends=new Map<string,CodexRPC>();
   private observers=new Map<string,NodeJS.Timeout>();
   private locks=new Map<string,Promise<unknown>>();
@@ -42,6 +45,7 @@ export class Agents {
     const script=fileURLToPath(new URL('./supervision-mcp.mjs',import.meta.url));
     const config={command:process.execPath,args:[script],env:{NEURA_SUPERVISION_URL:this.endpoint(),NEURA_SUPERVISION_TOKEN_FILE:this.tokenPath,NEURA_SUPERVISION_WORKSPACE:workspace.id,NEURA_SUPERVISION_TERMINAL:terminalId}};
     const overrides:Record<string,unknown>={developer_instructions:codexSessionInstructions,'mcp_servers.neuraos.command':config.command,'mcp_servers.neuraos.args':config.args,...Object.fromEntries(Object.entries(config.env).map(([key,value])=>['mcp_servers.neuraos.env.'+key,value]))};
+    this.titles.set(terminalId,new CodexTitles());
     const rpc=await this.startRPC(program,env,Object.entries(overrides).flatMap(([key,value])=>['-c',key+'='+JSON.stringify(value)]),event=>this.event(terminalId,workspace,event));
     this.backends.set(terminalId,rpc);
     let observing=false;
@@ -69,7 +73,7 @@ export class Agents {
         if(this.list().some(a=>a.id===id&&a.terminalId===terminalId))continue;
         try {
           const {thread}=await rpc.call('thread/read',{threadId:id});
-          if(!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)continue;
+          if(!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId||thread.ephemeral)continue;
           const result=await rpc.call('thread/resume',{threadId:id,excludeTurns:true,developerInstructions:codexSessionInstructions});
           if(this.backends.get(terminalId)===rpc){
             if(!this.register(terminalId,workspace,result.thread))continue;
@@ -86,7 +90,7 @@ export class Agents {
     }while(cursor&&this.backends.get(terminalId)===rpc);
   }
   private register(terminalId:string,workspace:Workspace,thread:any,parentTaskId?:string){
-    if(typeof thread?.id!=='string'||!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)return false;
+    if(thread?.ephemeral||typeof thread?.id!=='string'||!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)return false;
     const existing=this.store.get<AgentRecord>('agents',thread.id);
     if(existing&&existing.terminalId!==terminalId&&this.backends.has(existing.terminalId)){
       // History selection happens inside the TUI, bypassing open(resumeId). Never
@@ -98,6 +102,7 @@ export class Agents {
     this.save({id:thread.id,terminalId,workspaceId:workspace.id,name:thread.name||existing?.name||workspace.name,status:thread.status?.type==='active'?'working':'idle',updatedAt:'',pending:existing?.pending??[],requests:[],parentTaskId:parentTaskId??existing?.parentTaskId,watching:existing?.watching,reports:existing?.reports,lastTurnId:existing?.lastTurnId,lastTurnStatus:existing?.lastTurnStatus,summary:existing?.summary});return true;
   }
   private event(terminalId:string,workspace:Workspace,event:RPCEvent){
+    if(this.titles.get(terminalId)?.event(event))return;
     if(!this.store.get<Workspace>('workspaces',workspace.id))return;
     if(event.method==='thread/started'){
       if(!this.register(terminalId,workspace,event.params?.thread))return;
@@ -115,10 +120,22 @@ export class Agents {
       if(event.method==='turn/started')this.save({...a,status:'working',turnId:p.turn.id,lastTurnStatus:undefined,summary:undefined});
       if(event.method==='serverRequest/resolved')this.save({...a,requests:a.requests.filter(r=>r.id!==p.requestId)});
       if(event.method==='item/completed'&&p.item?.type==='agentMessage')this.save({...a,summary:String(p.item.text??'').slice(-16000)});
-      if(event.method==='thread/name/updated'&&p.threadName)this.save({...a,name:p.threadName});
+      if(event.method==='thread/name/updated'){
+        const name=displayName(p.threadName),terminal=this.store.get<TerminalRecord>('terminals',terminalId);
+        if(name){
+          this.save({...a,name});
+          if(terminal?.sessionId===a.id){
+            this.store.put('terminals',{...terminal,sessionName:name});
+            const current=this.store.get<Workspace>('workspaces',workspace.id);
+            if(current?.kind==='worktree'&&followsSessionName(current))this.store.put('workspaces',{...current,name,sessionNameUpdatedAt:Date.now()});
+          }
+        }
+      }
       if(event.method==='turn/completed'){
         this.save({...a,status:p.turn.status==='completed'?'idle':p.turn.status==='failed'?'failed':'interrupted',lastTurnId:p.turn.id,lastTurnStatus:p.turn.status,turnId:undefined,requests:[]});
         this.deliverReports();
+        const rpc=this.backends.get(terminalId);
+        if(p.turn.status==='completed'&&rpc)void this.titles.get(terminalId)?.generate(rpc,a.id,workspace.path,()=>this.backends.get(terminalId)===rpc&&this.store.get<TerminalRecord>('terminals',terminalId)?.sessionId===a.id);
         if(p.turn.status==='completed')void this.serial(a.id,()=>this.flush(a.id)).catch(()=>{});
       }
       if(event.method==='thread/status/changed'){
@@ -230,6 +247,6 @@ export class Agents {
   respond(id:string,requestId:number|string,result:unknown){const a=this.get(id);if(!a.requests.some(r=>r.id===requestId))throw new Fault('agent_request_missing','この質問は既に終了しています。',409);this.rpc(id).reply(requestId,result);this.save({...a,requests:a.requests.filter(r=>r.id!==requestId),status:'working'});return {ok:true};}
   pid(terminalId:string){return this.backends.get(terminalId)?.pid;}
   signal(terminalId:string,signal:NodeJS.Signals){this.backends.get(terminalId)?.signal(signal);}
-  async close(terminalId:string){clearInterval(this.observers.get(terminalId));this.observers.delete(terminalId);const rpc=this.backends.get(terminalId);await rpc?.close();if(this.backends.get(terminalId)===rpc)this.backends.delete(terminalId);}
+  async close(terminalId:string){this.titles.get(terminalId)?.close();this.titles.delete(terminalId);clearInterval(this.observers.get(terminalId));this.observers.delete(terminalId);const rpc=this.backends.get(terminalId);await rpc?.close();if(this.backends.get(terminalId)===rpc)this.backends.delete(terminalId);}
   async shutdown(){await Promise.all([...this.backends.keys()].map(id=>this.close(id)));}
 }

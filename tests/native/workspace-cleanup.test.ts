@@ -37,6 +37,8 @@ test('safe cleanup preserves self, roots, unfinished work, dirty/ignored files a
     const task={id:randomUUID(),workspaceId:target.id,terminalId:randomUUID(),name:'worker',status:'working',turnId:randomUUID(),pending:[],requests:[],updatedAt:''};d.store.put('agents',task);
     await reject(deletion,'workspace_task_unfinished');d.store.put('agents',{...task,status:'idle',turnId:undefined,pending:[{id:randomUUID(),text:'unread instruction'}]});
     await reject(deletion,'workspace_task_unfinished');d.store.put('agents',{...task,status:'idle',turnId:undefined});
+    const terminal={id:randomUUID(),workspaceId:target.id,provider:'claude' as const,status:'running' as const,activity:'working' as const,cols:80,rows:24,createdAt:''};d.store.put('terminals',terminal);
+    await reject(deletion,'workspace_task_unfinished');d.store.put('terminals',{...terminal,status:'exited'});
     await writeFile(target.path+'/file','changed');await reject(deletion,'workspace_dirty');await git(target.path,['restore','file']);
     await writeFile(target.path+'/.env','secret');await reject(deletion,'workspace_ignored_files');await rm(target.path+'/.env');
     await mkdir(target.path+'/node_modules');await writeFile(target.path+'/node_modules/cache','generated');await reject(deletion,'workspace_ignored_files');await rm(target.path+'/node_modules',{recursive:true});

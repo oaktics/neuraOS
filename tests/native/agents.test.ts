@@ -207,6 +207,11 @@ test('active supervisor receives and acknowledges many reports without filling i
       assert.equal(f.agents.get(id).reports?.length,0);
     }
     assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    for(let i=1;i<32;i++)await f.agents.send(id,`instruction ${i}`,'queue');
+    await assert.rejects(f.agents.send(id,'overflow instruction','queue'),{code:'agent_queue_full'});
+    const {reportId}=f.agents.report(id,'report still accepted with 32 queued instructions');
+    f.agents.ack(id,[reportId]);assert.equal(f.agents.get(id).pending.length,32);
+    assert.throws(()=>f.agents.report(id,'x'.repeat(16385)),{code:'invalid_report'});
   }finally{await f.agents.shutdown();f.store.close();}
 });
 
@@ -271,5 +276,23 @@ test('legacy watch reports migrate in bounded batches while old send instruction
     recovered.ack(id,[instruction.id,...legacy.map(r=>r.id)]);
     assert.equal(recovered.get(id).reports?.length,0);assert.deepEqual(recovered.get(id).pending,[instruction]);
     await recovered.shutdown();
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('Codex name notifications update the exact tab and worktree but preserve manual worktree names',async()=>{
+  const f=fixture();try{
+    const {threadId:id}=await f.open(),agent=f.agents.get(id!);
+    f.store.put('terminals',{id:agent.terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',sessionId:id,cols:80,rows:24,createdAt:''});
+    const rename=(name:string)=>f.clients[0].emit({method:'thread/name/updated',params:{threadId:id,threadName:name}});
+    rename('生成されたタイトル');
+    assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'生成されたタイトル');
+    assert.equal(f.store.get<any>('terminals',agent.terminalId)?.sessionName,'生成されたタイトル');
+    f.store.put('workspaces',{...f.workspace,name:'Manual',nameSource:'manual'});
+    rename('更新されたタイトル');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'Manual');
+    f.store.put('workspaces',f.workspace);
+    f.store.put('terminals',{...f.store.get<any>('terminals',agent.terminalId),sessionId:'another'});
+    rename('古いセッション');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,f.workspace.name);
+    f.clients[0].emit({method:'thread/started',params:{thread:{id:'temporary',cwd:f.workspace.path,ephemeral:true}}});
+    assert.equal(f.agents.list().length,1);
   }finally{await f.agents.shutdown();f.store.close();}
 });
