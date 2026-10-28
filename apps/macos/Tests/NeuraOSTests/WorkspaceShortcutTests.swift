@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import NeuraOS
 
 private final class ShortcutTestWindow: NSWindow {
@@ -73,6 +74,64 @@ final class WorkspaceShortcutTests: XCTestCase {
         XCTAssertEqual(layout.tabs.count, 2)
         layout.moveSelection(by: 1)
         XCTAssertEqual(layout.selectedId, work.id)
+    }
+
+    @MainActor func testDelayedLaunchSurvivesEarlierTabRemovalAndReordering() async {
+        let first = WorkspaceTab(kind: "shell", terminalId: "first")
+        let target = WorkspaceTab(kind: "codex")
+        let last = WorkspaceTab(kind: "shell", terminalId: "last")
+        var layout = WorkspaceTabState(tabs: [first, target, last], selectedId: target.id)
+        let state = Binding(get: {layout}, set: {layout = $0})
+        let binding = state.tabValue(target.id, \.terminalId)
+        let complete = Task { @MainActor in
+            await Task.yield()
+            await TerminalLaunchCompletion.attach(self.terminal("launched"), to: binding) {_ in
+                XCTFail("A surviving owner must retain its terminal")
+            }
+        }
+        layout.tabs.removeFirst()
+        layout.tabs.reverse()
+        await complete.value
+        XCTAssertEqual(layout.tabs.first(where: {$0.id == target.id})?.terminalId, "launched")
+        XCTAssertEqual(layout.tabs.first(where: {$0.id == last.id})?.terminalId, "last")
+        XCTAssertEqual(layout.selectedId, target.id)
+    }
+
+    @MainActor func testDelayedLaunchAfterOwnerRemovalStopsOnlyItsTerminal() async {
+        let target = WorkspaceTab(kind: "codex")
+        let survivor = WorkspaceTab(kind: "codex", terminalId: "surviving")
+        var layout = WorkspaceTabState(tabs: [target, survivor])
+        let state = Binding(get: {layout}, set: {layout = $0})
+        let binding = state.tabValue(target.id, \.terminalId)
+        var stopped: [String] = []
+        let complete = Task { @MainActor in
+            await Task.yield()
+            await TerminalLaunchCompletion.attach(self.terminal("orphan"), to: binding) {
+                stopped.append($0.id)
+            }
+        }
+        layout.tabs.removeFirst()
+        await complete.value
+        XCTAssertNil(binding.wrappedValue)
+        XCTAssertEqual(stopped, ["orphan"])
+        XCTAssertEqual(layout.tabs, [survivor])
+    }
+
+    @MainActor func testLateBindingsAreSafeAfterAllTabsCloseAndReplacementOpens() {
+        let old = WorkspaceTab(kind: "browser", browserTitle: "Old")
+        var layout = WorkspaceTabState(tabs: [old])
+        let state = Binding(get: {layout}, set: {layout = $0})
+        let title = state.tabValue(old.id, \.browserTitle)
+        let terminal = state.tabValue(old.id, \.terminalId)
+        layout.tabs.removeAll()
+        XCTAssertNil(title.wrappedValue)
+        terminal.wrappedValue = "late"
+        title.wrappedValue = "late title"
+        XCTAssertTrue(layout.tabs.isEmpty)
+        let replacement = WorkspaceTab(kind: "browser", browserTitle: "New")
+        layout.tabs.append(replacement)
+        title.wrappedValue = "stale callback"
+        XCTAssertEqual(layout.tabs, [replacement])
     }
 
     func testManualLaunchBindingWinsBeforeLateSessionsAreReconciled() {

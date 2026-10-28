@@ -57,6 +57,30 @@ struct WorkspaceTabState: Codable {
     }
 }
 
+extension Binding where Value == WorkspaceTabState {
+    // Never retain an array-element binding across an async launch or browser callback.
+    // Resolve the stable tab ID on every access; a removed tab becomes a no-op.
+    func tabValue(_ id: String, _ keyPath: WritableKeyPath<WorkspaceTab, String?>) -> Binding<String?> {
+        Binding<String?>(
+            get: {wrappedValue.tabs.first(where: {$0.id == id})?[keyPath: keyPath]},
+            set: {value in
+                guard let index = wrappedValue.tabs.firstIndex(where: {$0.id == id}) else {return}
+                wrappedValue.tabs[index][keyPath: keyPath] = value
+            }
+        )
+    }
+}
+
+enum TerminalLaunchCompletion {
+    @MainActor static func attach(_ terminal: TerminalRecord, to binding: Binding<String?>,
+                                  stop: (TerminalRecord) async -> Void) async {
+        binding.wrappedValue = terminal.id
+        // The owner may have disappeared while terminal.open was suspended.
+        // Do not leave an unowned process running or assign it to a different tab.
+        if binding.wrappedValue != terminal.id {await stop(terminal)}
+    }
+}
+
 struct WorkspaceView: View {
     @Environment(AppModel.self) private var model
     let workspace: Workspace
@@ -220,15 +244,15 @@ struct WorkspaceView: View {
                 .opacity(layout.selectedId == nil ? 1 : 0)
                 .allowsHitTesting(layout.selectedId == nil && model.selectedId == workspace.id)
                 .accessibilityHidden(layout.selectedId != nil || model.selectedId != workspace.id)
-            ForEach($layout.tabs) {$item in
+            ForEach(layout.tabs) {item in
                 let active = layout.selectedId == item.id
                 let visible = active && model.selectedId == workspace.id
                 Group {
-                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
                         FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }
-                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $item.browserTitle, view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
+                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, visible: visible, title: $layout.tabValue(item.id, \.browserTitle), view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
 
                 }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
             }
@@ -472,7 +496,11 @@ struct TerminalPane: View {
             // Contention is not a real attempt; keep automatic retry eligible.
             guard !model.isBusy(workspace.id) else {return}
             attemptedAutoStart = true
-            if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {terminalId = terminal.id}
+            if let terminal = await model.openTerminal(workspace, provider: provider, resume: resume) {
+                await TerminalLaunchCompletion.attach(terminal, to: $terminalId) {terminal in
+                    await model.stopTerminal(terminal)
+                }
+            }
         }
     }
 }
