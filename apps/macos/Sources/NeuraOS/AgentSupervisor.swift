@@ -125,6 +125,10 @@ struct AgentSupervisor: View {
                     }
                     if !agent.pending.isEmpty {Text("送信待ちの指示: \(agent.pending.count)件").font(.caption).foregroundStyle(.secondary)}
                     Divider()
+                    if agent.provider == "claude" && agent.status == "waiting" {
+                        Text("ターミナルで質問を取り消しても「回答待ち」が残る場合は、「中断」してから指示を送り直してください。中断すると送信待ちの指示と監視は解除されます。再開する監視も登録し直してください。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 16) {
                             if history.nextCursor != nil {Button("以前の会話を読み込む") {Task {await loadOlder()}}}
