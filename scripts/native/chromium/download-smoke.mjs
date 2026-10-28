@@ -10,11 +10,13 @@ import assert from 'node:assert/strict';
 const data = await mkdtemp(join(tmpdir(), 'neura-download-smoke-'));
 const bytes = Buffer.from(Array.from({length: 65536}, (_, i) => i % 251));
 const server = createServer((request, response) => {
+  console.log('HTTP', request.method, request.url);
+  if (request.url.startsWith('/trace-click')) {response.writeHead(204); response.end(); return;}
   if (request.url === '/favicon.ico') {response.writeHead(204); response.end(); return;}
   if (request.url.startsWith('/page/')) {
     const route = request.url.slice(6);
     response.setHeader('Content-Type', 'text/html');
-    response.end(`<title>download-fixture-${route}</title><a href="/${route}" style="position:absolute;left:0;top:0;width:200px;height:60px">Download</a>`);
+    response.end(`<title>download-fixture-${route}</title><script>document.addEventListener("click",e=>navigator.sendBeacon("/trace-click?route=${route}&trusted="+e.isTrusted))</script><a href="/${route}" style="position:absolute;left:0;top:0;width:200px;height:60px">Download</a>`);
     return;
   }
   response.writeHead(200, {'Content-Type': 'application/octet-stream', 'Content-Disposition': 'attachment; filename="fixture.bin"', 'Content-Length': request.url === '/complete' ? bytes.length : 1000000000});

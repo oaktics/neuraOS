@@ -23,6 +23,12 @@ int NCRunDownloadSmoke(NSString *url, NSString *dataDirectory, NSView *accessory
         NCShutdownChromium(^{[NSApp stop:nil]; [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];});
     };
     NSArray *routes = @[@"complete", @"cancel", @"failed", @"dismiss"];
+    NSMutableDictionary<NSNumber *, NSNumber *> *beforeCounts = [NSMutableDictionary dictionary];
+    downloadSmokeTrace = ^(NSString *event, NCDownload *item) {
+        NSNumber *key = @(item.identifier);
+        if ([event isEqualToString:@"before"]) beforeCounts[key] = @([beforeCounts[key] intValue] + 1);
+        fprintf(stdout, "TRACE event=%s id=%lu browser=%d status=%s before=%d stage=%d route=%s bytes=%lld\n", event.UTF8String, item.identifier, item->_browserID, item.status.UTF8String, [beforeCounts[key] intValue], stage, stage < routes.count ? [routes[stage] UTF8String] : "done", item.received); fflush(stdout);
+    };
     BOOL manual = getenv("NEURA_DOWNLOAD_SMOKE_MANUAL") != nullptr;
     downloadSmokeChoose = ^(NSSavePanel *panel, NSWindow *owner, void (^selected)(NSURL *)) {
         NSURL *target = [NSURL fileURLWithPath:[destination stringByAppendingPathComponent:[routes[stage] stringByAppendingString:@".bin"]]];
@@ -31,6 +37,7 @@ int NCRunDownloadSmoke(NSString *url, NSString *dataDirectory, NSView *accessory
         panel.nameFieldStringValue = target.lastPathComponent;
         fprintf(stdout, "SAVE PANEL: %s (use Save; dismiss stage uses Cancel)\n", [routes[stage] UTF8String]); fflush(stdout);
         [panel beginSheetModalForWindow:owner completionHandler:^(NSModalResponse response) {
+            fprintf(stdout, "TRACE panel-response=%ld stage=%d url=%s\n", response, stage, panel.URL.path.UTF8String); fflush(stdout);
             selected(response == NSModalResponseOK ? panel.URL : nil);
         }];
     };
@@ -42,6 +49,7 @@ int NCRunDownloadSmoke(NSString *url, NSString *dataDirectory, NSView *accessory
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
             NCChromiumView *current = weakDownloadView;
             if (!current || !current->_browser || finished) return;
+            fprintf(stdout, "TRACE synthetic-click stage=%d browser=%d\n", stage, current->_browser->get_identifier(current->_browser)); fflush(stdout);
             auto host = current->_browser->get_host(current->_browser);
             cef_mouse_event_t event = {}; event.x = 50; event.y = 30;
             host->send_mouse_click_event(host, &event, MBT_LEFT, 0, 1);
@@ -73,5 +81,5 @@ int NCRunDownloadSmoke(NSString *url, NSString *dataDirectory, NSView *accessory
         }
     }];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (manual ? 600 : 60) * NSEC_PER_SEC), dispatch_get_main_queue(), ^{finish(1);});
-    [NSApp run]; downloadSmokeChoose = nil; view.onState = nil; [window orderOut:nil]; return result;
+    [NSApp run]; downloadSmokeTrace = nil; downloadSmokeChoose = nil; view.onState = nil; [window orderOut:nil]; return result;
 }

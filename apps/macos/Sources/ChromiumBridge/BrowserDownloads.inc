@@ -3,6 +3,7 @@
 #include "include/capi/cef_download_handler_capi.h"
 NSNotificationName const NCBrowserDownloadsChanged = @"NCBrowserDownloadsChanged";
 static NSMutableArray<NCDownload *> *downloadHistory;
+static void (^downloadSmokeTrace)(NSString *, NCDownload *);
 // Configured only by the isolated loopback smoke entry point. Production always presents NSSavePanel.
 static void (^downloadSmokeChoose)(NSSavePanel *, NSWindow *, void (^)(NSURL *));
 @interface NCDownload () {
@@ -12,6 +13,7 @@ static void (^downloadSmokeChoose)(NSSavePanel *, NSWindow *, void (^)(NSURL *))
     int _browserID;
     BOOL _cancelRequested;
     NSUInteger _selectionGeneration;
+    NSString *_destinationPath;
     NSSavePanel *_panel;
 }
 @property(nonatomic) NSUInteger identifier;
@@ -63,9 +65,11 @@ static NSString *DownloadString(cef_string_userfree_t value) {
 // retained continuation and generation; terminal records can never be revived.
 static void SelectDownloadDestination(NCDownload *download, cef_before_download_callback_t *expected,
                                       NSUInteger generation, NCChromiumView *owner, NSURL *url) {
+    if (downloadSmokeTrace) downloadSmokeTrace(url ? @"selected-save" : @"selected-cancel", download);
     if (!expected || DownloadTerminal(download) || download->_before != expected || download->_selectionGeneration != generation) return;
     download->_panel = nil;
     if (!url || download->_cancelRequested || !owner || owner->_closed) {[download cancel]; return;}
+    download->_destinationPath = url.path;
     download.path = url.path; download.name = url.lastPathComponent;
     download.status = @"running"; download.detail = @"ダウンロード中";
     auto continuation = download->_before; download->_before = nullptr;
@@ -79,7 +83,17 @@ static cef_download_handler_t *MakeDownloadHandler(NCChromiumView *view) {
         CallbackRef browserRef(browser); CallbackRef itemRef(item);
         if (!item->is_valid(item)) {Release(callback); return 1;}
         NCDownload *download = Download(item->get_id(item), browser->get_identifier(browser));
-        if (DownloadTerminal(download) || download->_cancelRequested || download->_before) {Release(callback); return 1;}
+        if (downloadSmokeTrace) downloadSmokeTrace(@"before", download);
+        if (DownloadTerminal(download) || download->_cancelRequested) {Release(callback); return 1;}
+        // CEF may retry the same ID before reporting an interruption. The user
+        // already approved this destination; do not open another save panel or
+        // reuse get_full_path(), which may refer to an intermediate file.
+        if ([download.status isEqualToString:@"running"] && download->_destinationPath.length) {
+            NCString destination(download->_destinationPath);
+            callback->cont(callback, &destination.value, 0); Release(callback);
+            return 1;
+        }
+        if (download->_before) {Release(callback); return 1;}
         download->_before = callback; // Adopt until the asynchronous save panel finishes.
         NSUInteger generation = ++download->_selectionGeneration;
         NSString *name = String(suggested).lastPathComponent;
@@ -90,6 +104,7 @@ static cef_download_handler_t *MakeDownloadHandler(NCChromiumView *view) {
             if (DownloadTerminal(download) || download->_before != callback || download->_selectionGeneration != generation || download->_cancelRequested) return;
             NCChromiumView *owner = weakView;
             if (!owner || owner->_closed || !owner.window) {[download cancel]; return;}
+            if (downloadSmokeTrace) downloadSmokeTrace(@"panel-present", download);
             NSSavePanel *panel = [NSSavePanel savePanel]; download->_panel = panel;
             panel.title = @"ダウンロードを保存"; panel.nameFieldStringValue = download.name;
             panel.canCreateDirectories = YES;
@@ -124,8 +139,10 @@ static cef_download_handler_t *MakeDownloadHandler(NCChromiumView *view) {
         if (![@[@"choosing", @"running"] containsObject:download.status]) {
             auto control = download->_control; download->_control = nullptr; Release(control);
             auto before = download->_before; download->_before = nullptr; Release(before);
+            if (downloadSmokeTrace) downloadSmokeTrace(@"terminal-cleanup", download);
             NSSavePanel *panel = download->_panel; download->_panel = nil; [panel cancel:nil];
         }
+        if (downloadSmokeTrace) downloadSmokeTrace(@"updated", download);
         DownloadsChanged();
     };
     return &h->api;
