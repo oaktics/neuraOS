@@ -34,7 +34,7 @@ final class WorkspaceShortcutTests: XCTestCase {
         layout.reconcileTerminals([], seen: &seen, startingTabs: [])
         layout.reconcileTerminals([terminal("late")], seen: &seen, startingTabs: [])
         XCTAssertEqual(layout.tabs.map(\.terminalId), ["late"])
-        XCTAssertEqual(layout.selectedId, layout.tabs.first?.id)
+        XCTAssertNil(layout.selectedId)
         let selected = layout.selectedId
         // Even a CLI which exits before the next poll must remain accessible.
         let records = [terminal("late"), terminal("quick-exit", status: "exited")]
@@ -46,6 +46,33 @@ final class WorkspaceShortcutTests: XCTestCase {
         layout.tabs.removeLast()
         layout.reconcileTerminals(records, seen: &seen, startingTabs: [])
         XCTAssertEqual(layout.tabs.count, 1)
+    }
+
+    func testLegacyAgentTabsMigrateToHomeWithoutClosingWork() throws {
+        let work = WorkspaceTab(kind: "codex", terminalId: "running")
+        let agents = WorkspaceTab(kind: "agents")
+        var layout = WorkspaceTabState(tabs: [work, agents], selectedId: agents.id)
+        layout.migrateAgentTabs()
+        XCTAssertEqual(layout.tabs, [work])
+        XCTAssertNil(layout.selectedId)
+        let restored = try JSONDecoder().decode(WorkspaceTabState.self, from: JSONEncoder().encode(layout))
+        XCTAssertNil(restored.selectedId)
+        XCTAssertEqual(restored.tabs, [work])
+
+        layout = WorkspaceTabState(tabs: [work, agents], selectedId: work.id)
+        layout.migrateAgentTabs()
+        XCTAssertEqual(layout.selectedId, work.id)
+    }
+
+    func testHomeRemainsSelectedWhenBackgroundTerminalArrives() {
+        let work = WorkspaceTab(kind: "codex", terminalId: "existing")
+        var layout = WorkspaceTabState(tabs: [work])
+        var seen: Set<String> = ["existing"]
+        layout.reconcileTerminals([terminal("existing"), terminal("new")], seen: &seen, startingTabs: [])
+        XCTAssertNil(layout.selectedId)
+        XCTAssertEqual(layout.tabs.count, 2)
+        layout.moveSelection(by: 1)
+        XCTAssertEqual(layout.selectedId, work.id)
     }
 
     func testManualLaunchBindingWinsBeforeLateSessionsAreReconciled() {

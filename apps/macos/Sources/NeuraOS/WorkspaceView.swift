@@ -12,20 +12,26 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var title: String {
         if kind == "file", let filePath {return (filePath as NSString).lastPathComponent}
         if kind == "browser", let browserTitle, !browserTitle.isEmpty {return browserTitle}
-        let name = kind == "agents" ? "作業一覧" : kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
-        return ["files", "diff", "github", "agents"].contains(kind) ? name : "\(name) \(number)"
+        let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
+        return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
     }
     func displayTitle(terminal: TerminalRecord?) -> String {
         if ["codex", "claude"].contains(kind), terminal?.id == terminalId,
            let name = terminal?.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {return name}
         return title
     }
-    var icon: String {kind == "agents" ? "person.3" : kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
+    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
 struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
+
+    // A nil selection is the permanent home surface, not a missing tab.
+    mutating func migrateAgentTabs() {
+        if tabs.contains(where: {$0.kind == "agents" && $0.id == selectedId}) {selectedId = nil}
+        tabs.removeAll {$0.kind == "agents"}
+    }
 
     mutating func openFile(_ path: String) {
         if let existing = tabs.first(where: {$0.kind == "file" && $0.filePath == path}) {
@@ -47,7 +53,7 @@ struct WorkspaceTabState: Codable {
             }
         }
         seen.formUnion(terminals.map(\.id))
-        if !tabs.contains(where: {$0.id == selectedId}) {selectedId = tabs.first?.id}
+        if let selectedId, !tabs.contains(where: {$0.id == selectedId}) {self.selectedId = nil}
     }
 }
 
@@ -144,6 +150,14 @@ struct WorkspaceView: View {
     }
     private var tabBar: some View {
         HStack(spacing: 0) {
+            Button {layout.selectedId = nil} label: {
+                Image(systemName: "house").frame(width: 36, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(layout.selectedId == nil ? Color.accentColor : Color.secondary)
+            .background(layout.selectedId == nil ? Color.primary.opacity(0.055) : .clear)
+            .accessibilityLabel("ホーム").help("ホームに戻る")
+            Divider().frame(height: 18)
             ScrollViewReader {proxy in
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
@@ -177,26 +191,40 @@ struct WorkspaceView: View {
         Button {add("codex")} label: {Label("Codex", systemImage: "sparkle")}
         Button {add("claude")} label: {Label("Claude Code", systemImage: "asterisk")}
         Button {add("shell")} label: {Label("Terminal", systemImage: "terminal")}
-        if model.state.features?.contains("agent.supervision") == true {Button {showUtility("agents")} label: {Label("Codexの作業一覧", systemImage: "person.3")}}
         Button {add("browser")} label: {Label("Browser", systemImage: "globe")}
 
     }
+    // Keep the home mounted so switching tabs preserves the selected task and unsent instructions.
+    private var home: some View {
+    VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("ホーム", systemImage: "house").font(.title2.weight(.semibold))
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {addTabButtons}
+                VStack(alignment: .leading, spacing: 8) {addTabButtons}
+            }.controlSize(.large)
+        }.padding(20)
+        Divider()
+        if model.state.features?.contains("agent.supervision") == true {
+            AgentSupervisor(workspace: workspace, visible: layout.selectedId == nil && model.selectedId == workspace.id)
+        } else {
+            Text("新しい作業を始めましょう。")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
     private var contents: some View {
         ZStack {
-            if layout.tabs.isEmpty {
-                VStack(spacing: 16) {
-                    Image(systemName: "plus.square.on.square").font(.system(size: 28, weight: .ultraLight)).foregroundStyle(.secondary)
-                    Text("タブを追加して作業を始める").font(.system(size: 18, weight: .medium))
-                    HStack(spacing: 12) {addTabButtons}.controlSize(.large)
-                    Text("同じ種類のタブも、複数開けます。").font(.system(size: 12)).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            home
+                .opacity(layout.selectedId == nil ? 1 : 0)
+                .allowsHitTesting(layout.selectedId == nil && model.selectedId == workspace.id)
+                .accessibilityHidden(layout.selectedId != nil || model.selectedId != workspace.id)
             ForEach($layout.tabs) {$item in
                 let active = layout.selectedId == item.id
                 let visible = active && model.selectedId == workspace.id
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
-                    else if item.kind == "agents" {AgentSupervisor(workspace: workspace, visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
                         FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }
@@ -259,7 +287,7 @@ struct WorkspaceView: View {
             } else if document.dirty {updated[path] = document}
         }
         documents = updated
-        if !layout.tabs.contains(where: {$0.id == layout.selectedId}) {layout.selectedId = layout.tabs.first?.id}
+        if let selectedId = layout.selectedId, !layout.tabs.contains(where: {$0.id == selectedId}) {layout.selectedId = nil}
         persist()
     }
     private var gitPane: some View {
@@ -329,6 +357,7 @@ struct WorkspaceView: View {
         guard !restored else {return}; restored = true
         let saved = UserDefaults.standard.data(forKey: storageKey).flatMap {try? JSONDecoder().decode(WorkspaceTabState.self, from: $0)}
         layout = saved ?? WorkspaceTabState()
+        layout.migrateAgentTabs()
         inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
         if layout.tabs.contains(where: {$0.kind == "github" && $0.id == layout.selectedId}) {
             inspector = "github"; model.showInspector = true
@@ -338,7 +367,7 @@ struct WorkspaceView: View {
         layout.tabs.removeAll {$0.kind == "github" || $0.kind == "files"}
         let previousSelection = layout.selectedId
         for path in documents.keys.sorted() where documents[path]?.dirty == true {layout.openFile(path)}
-        if !wasFiles, layout.tabs.contains(where: {$0.id == previousSelection}) {layout.selectedId = previousSelection}
+        if !wasFiles, previousSelection == nil || layout.tabs.contains(where: {$0.id == previousSelection}) {layout.selectedId = previousSelection}
         // Recover running sessions, including sessions opened while this UI was disconnected.
         let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
         seenTerminalIds = Set(terminals.map(\.id))
@@ -348,7 +377,7 @@ struct WorkspaceView: View {
                 layout.tabs.append(WorkspaceTab(kind: terminal.provider, number: number, terminalId: terminal.id))
             }
         }
-        if !layout.tabs.contains(where: {$0.id == layout.selectedId}) {layout.selectedId = layout.tabs.first?.id}
+        if let selectedId = layout.selectedId, !layout.tabs.contains(where: {$0.id == selectedId}) {layout.selectedId = nil}
         persist()
     }
     private func reconcileTerminals() {
