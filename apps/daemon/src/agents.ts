@@ -1,3 +1,4 @@
+import {browserCredential} from './browser-credentials.ts';
 import {codexSessionInstructions} from './session-instructions.ts';
 import {executable,terminalEnvironment} from './terminals.ts';
 import {realpathSync} from 'node:fs';
@@ -43,7 +44,7 @@ export class Agents {
     if(parentTaskId)this.get(parentTaskId);
     if(resumeId){const previous=this.get(resumeId);if(previous.workspaceId!==workspace.id)throw new Fault('agent_workspace_mismatch','別の作業フォルダの会話は再開できません。',409);if(this.backends.has(previous.terminalId))throw new Fault('agent_already_running','このCodexは実行中です。一覧から指示を送ってください。',409);}
     const script=fileURLToPath(new URL('./supervision-mcp.mjs',import.meta.url));
-    const config={command:process.execPath,args:[script],env:{NEURA_SUPERVISION_URL:this.endpoint(),NEURA_SUPERVISION_TOKEN_FILE:this.tokenPath,NEURA_SUPERVISION_WORKSPACE:workspace.id,NEURA_SUPERVISION_TERMINAL:terminalId}};
+    const config={command:process.execPath,args:[script],env:{NEURA_SUPERVISION_URL:this.endpoint(),NEURA_SUPERVISION_TOKEN_FILE:this.tokenPath,NEURA_SUPERVISION_WORKSPACE:workspace.id,NEURA_SUPERVISION_TERMINAL:terminalId,NEURA_BROWSER_TOKEN:await browserCredential(this.tokenPath,terminalId)}};
     const overrides:Record<string,unknown>={developer_instructions:codexSessionInstructions,'mcp_servers.neuraos.command':config.command,'mcp_servers.neuraos.args':config.args,...Object.fromEntries(Object.entries(config.env).map(([key,value])=>['mcp_servers.neuraos.env.'+key,value]))};
     this.titles.set(terminalId,new CodexTitles());
     const rpc=await this.startRPC(program,env,Object.entries(overrides).flatMap(([key,value])=>['-c',key+'='+JSON.stringify(value)]),event=>this.event(terminalId,workspace,event));

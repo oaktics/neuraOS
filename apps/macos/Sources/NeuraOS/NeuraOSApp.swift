@@ -6,6 +6,9 @@ import ChromiumBridge
 @main enum NeuraOSMain {
     static func main() {
         NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--browser-fixture"), CommandLine.arguments.count > index + 1 {
+            BrowserFixture.run(CommandLine.arguments[index + 1]);return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
             exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
         }
