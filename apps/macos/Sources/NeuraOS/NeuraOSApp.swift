@@ -112,7 +112,6 @@ struct RootView: View {
                     }
                     ProgressView().controlSize(.small)
                 }
-                Button {DiagnosticReport.save()} label: {Image(systemName: "ladybug")}.help("今おかしかった：診断情報を保存").accessibilityLabel("診断情報を保存")
                 Circle().fill(model.connected ? Color.green.opacity(0.8) : Color.orange).frame(width: 6, height: 6)
                 Text(model.connected ? "このMac" : "接続待ち").font(.system(size: 11)).foregroundStyle(.secondary)
                 if model.selected?.hasFolder == true {
