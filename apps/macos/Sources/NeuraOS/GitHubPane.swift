@@ -6,7 +6,8 @@ struct GitHubSnapshot: Decodable {
     let repository: String; let branch: String; let head: String; let defaultBranch: String
     let mergeMethods: [String]; let fetchedAt: String; let pullRequest: GitHubPR?
     let sourcePullRequest: GitHubPRSource?
-    var canCreatePullRequest: Bool {sourcePullRequest != nil || pullRequest?.state != "OPEN"}
+    var canMutate: Bool {!branch.isEmpty}
+    var canCreatePullRequest: Bool {canMutate && (sourcePullRequest != nil || pullRequest?.state != "OPEN")}
     func target(workspaceId: String, type: String) -> [String: Any] {
         ["type": type, "workspaceId": workspaceId, "repository": repository, "branch": branch, "expectedHead": head]
     }
@@ -79,13 +80,13 @@ struct GitHubPane: View {
     @State private var pending: [String: Any]?
     @State private var method = "squash"
     private var refreshEnabled: Bool {visible && scenePhase == .active && model.connected && model.supportsGitHub}
-    private var disabled: Bool {busy || refreshing || !model.connected || error != nil}
+    private var disabled: Bool {busy || refreshing || !model.connected || error != nil || snapshot?.canMutate == false}
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(snapshot?.repository ?? "GitHub").font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle).help(snapshot?.repository ?? "GitHub")
-                    Text(snapshot.map {"\($0.branch) · \($0.head.prefix(7))"} ?? "作業ブランチの PR とレビュー").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    Text(snapshot.map {"\($0.branch.isEmpty ? "HEAD detached" : $0.branch) · \($0.head.prefix(7))"} ?? "作業ブランチの PR とレビュー").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer()
                 if refreshing || busy {ProgressView().controlSize(.small)}
@@ -111,6 +112,9 @@ struct GitHubPane: View {
                                 Button("Push…") {confirmPush(snapshot)}.disabled(disabled)
                                 if snapshot.canCreatePullRequest {Button("PR を作成…") {createSnapshot = snapshot; showCreate = true}.disabled(disabled)}
                             }.controlSize(.small)
+                        }
+                        if !snapshot.canMutate {
+                            Text("ブランチに戻るまで閲覧のみ利用できます。rebase 中の場合は、完了または中止すると操作を再開できます。").font(.system(size: 11)).foregroundStyle(.secondary)
                         }
                         Text(snapshot.sourcePullRequest == nil ? "Push・PR に含まれるのはコミット済みの変更です。" : "作成元の PR を表示しています。Push はローカルブランチへ送信し、元の PR は更新しません。").font(.system(size: 11)).foregroundStyle(.secondary)
                         if let pr = snapshot.pullRequest {pullRequest(pr, snapshot: snapshot)}

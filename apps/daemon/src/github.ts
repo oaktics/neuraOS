@@ -95,10 +95,10 @@ export class GitHub {
     const head=(await this.gitRun(root,['rev-parse','--verify','HEAD'])).trim();
     return {repository,head};
   }
-  private async context(root:string){
+  private async context(root:string,allowDetached=false){
     const context=await this.commitContext(root);
     const branch=(await this.gitRun(root,['branch','--show-current'])).trim();
-    if(!branch)throw new Fault('github_detached','ブランチをチェックアウトしてから GitHub を利用してください。');
+    if(!branch&&!allowDetached)throw new Fault('github_detached','ブランチをチェックアウトしてから GitHub を利用してください。');
     return {...context,branch};
   }
   private async repository(root:string,repository:string){return repositorySchema.parse(await this.api(root,`repos/${repository}`));}
@@ -131,26 +131,28 @@ export class GitHub {
     catch{return {state:'unavailable',checks:[],fetchedAt:new Date().toISOString()};}
     return result;
   }
-  private async source(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
+  private source(context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
     const parsed=z.object({repository:repoName,number:z.number().int().positive().safe(),localBranch:z.string().min(1),sourceHead:z.string().regex(/^[a-f0-9]{40,64}$/)}).safeParse(source);
     if(!parsed.success)return undefined;
     const value=parsed.data;
-    if(value.repository.toLowerCase()!==context.repository.toLowerCase()||value.localBranch!==context.branch)return undefined;
-    // Commits made on this worktree retain its explicit identity. An unrelated reset does not.
-    try{await this.gitRun(root,['merge-base','--is-ancestor',value.sourceHead,context.head]);}catch{return undefined;}
+    // Workspace provenance is stable across rename, rebase, amend and reset.
+    // localBranch/sourceHead record creation history, not current validity.
+    // Mutations independently validate the live branch, repository and PR head.
+    if(value.repository.toLowerCase()!==context.repository.toLowerCase())return undefined;
     return value;
   }
   async status(root:string,force=false,source?:PullRequestSource){
-    const context=await this.context(root);
-    const binding=await this.source(root,context,source);
+    const context=await this.context(root,true);
+    const binding=this.source(context,source);
+    if(!context.branch&&!binding)throw new Fault('github_detached','ブランチをチェックアウトしてから GitHub を利用してください。');
     const key=JSON.stringify([context.repository,context.branch,context.head,binding??null]);
     const result=await this.statusCache.read(key,()=>this.fetchStatus(root,context,binding),force);
-    const current=await this.context(root);
+    const current=await this.context(root,true);
     if(JSON.stringify(current)!==JSON.stringify(context))throw new Fault('github_stale','ブランチまたはコミットが変更されました。更新してください。',409);
     return result;
   }
   private async selectedPull(root:string,context:Awaited<ReturnType<GitHub['context']>>,source?:PullRequestSource){
-    const pulls=await this.pulls(root,context);
+    const pulls=context.branch?await this.pulls(root,context):[];
     const local=pulls.find(pr=>pr.state==='open')??pulls[0];
     return local?{number:local.number,isSource:false}:source?{number:source.number,isSource:true}:undefined;
   }
@@ -205,7 +207,7 @@ export class GitHub {
       return {ok:true,message:'PR を作成しました。',url:pr.html_url};
     }
     const [pr,unresolved,repo]=await Promise.all([this.detail(root,context.repository,c.number),this.unresolved(root,context.repository,c.number),this.repository(root,context.repository)]);
-    const binding=await this.source(root,context,source);
+    const binding=this.source(context,source);
     const selected=binding?await this.selectedPull(root,context,binding):undefined;
     const matches=binding ? selected?.number===c.number : pr.headRefName===context.branch&&`${pr.headRepositoryOwner?.login}/${pr.headRepository?.name}`.toLowerCase()===context.repository.toLowerCase();
     if(!matches)throw new Fault('github_pr_mismatch','この作業ブランチの PR ではありません。',409);

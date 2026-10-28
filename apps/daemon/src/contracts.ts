@@ -8,6 +8,7 @@ const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.
 export const Provider = z.enum(['codex', 'claude', 'shell']);
 export type Provider = z.infer<typeof Provider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; createdAt:string}
+// Immutable workspace provenance. localBranch/sourceHead describe creation, not live Git state.
 export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
 export interface Workspace {id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource}
 export type AgentActivity = 'working'|'waiting'|'idle'|'unknown';
