@@ -118,6 +118,7 @@ export class Terminals {
   }
   input(id:string,clientId:string,data:string){const proc=requireValue(this.processes.get(id),'terminal_stopped','ターミナルは停止しています。');this.claim(id,clientId);proc.write(data);
     if(data==='\x03'||data==='\x1b'){
+      this.agents?.claudeInterrupted(id,data==='\x03');
       const entry=this.activity.get(id),record=this.store.get<TerminalRecord>('terminals',id);
       if(entry&&record){entry.tracker.interrupt();if(record.activity!=='unknown')this.store.put('terminals',{...record,activity:'unknown'});}
     }

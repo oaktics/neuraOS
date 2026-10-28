@@ -61,6 +61,7 @@ test('Claude registration retains terminal identity; channel credentials reject 
 import {createConnection} from 'node:net';
 if(process.argv.includes('--help')){console.log('--mcp-config --append-system-prompt --settings');process.exit(0);}
 if(process.argv.includes('--version')){console.log('2.1.312');process.exit(0);}
+process.on('SIGINT',()=>{});
 const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);
 socket.on('error',()=>{});socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name:'SessionStart',source:'startup',session_id:${JSON.stringify(sessionId)}})+'\\n'));
 process.stdin.on('data',()=>{const s=createConnection(process.env.NEURA_ACTIVITY_SOCKET);s.on('error',()=>{});s.on('connect',()=>s.end(JSON.stringify({hook_event_name:'Stop',session_id:${JSON.stringify(sessionId)}})+'\\n'));});
@@ -84,10 +85,16 @@ setInterval(()=>{},1000);
     const before=d.store.list<any>('agents').find(a=>a.id===sessionId);assert.equal(before.status,'idle');assert.equal(before.pending[0].text,'first instruction');
     const nonce=probe.json().content.match(/nonce ([a-f0-9-]{36})/)[1];
     const receipt=await d.app.inject({method:'POST',url:`/v1/claude/${terminal.id}/channel-ack`,headers:{...headers,'x-neura-channel-token':self},payload:{nonce}});assert.equal(receipt.statusCode,200);
-    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:randomUUID(),data:'stop\r'}}});
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:'12777777-2222-4333-8444-555555555551',data:'stop\r'}}});
     await new Promise(r=>setTimeout(r,100));
     const delivery=await poll(self);assert.equal(delivery.statusCode,200);assert.equal(delivery.json().content,'first instruction');
     assert.deepEqual((await poll(self)).json(),{});
+    for(const key of ['\x1b','\x03']){
+      await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:'12777777-2222-4333-8444-555555555551',data:key}}});
+      assert.equal(d.store.get<any>('agents',sessionId).status,'interrupted');assert.equal(d.store.get<any>('agents',sessionId).turnId,undefined);
+      await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.send',agentId:sessionId,text:'recover native interrupt'}}});
+      assert.equal((await poll(self)).json().content,'recover native interrupt');
+    }
     const recipient=randomUUID();d.store.put('agents',{id:recipient,terminalId:randomUUID(),workspaceId:workspace.id,name:'recipient',status:'interrupted',pending:[],requests:[],updatedAt:''});
     const report=await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.report',agentId:recipient,text:'proof',sourceTerminalId:terminal.id}}});
     assert.equal(report.statusCode,200);assert.equal((d.store.list('agents').find((a:any)=>a.id===recipient) as any).reports[0].sourceTaskId,sessionId);

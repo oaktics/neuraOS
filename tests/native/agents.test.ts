@@ -397,3 +397,38 @@ test('MCP polling without a Channels listener leaves instructions queued and tim
     assert.equal(f.agents.get(id).channelState,'unavailable');assert.equal(f.agents.get(id).pending.length,1);assert.equal(f.agents.get(id).turnId,undefined);
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+test('manual Claude interruption only affects active work and stale Stop cannot finish the next turn',async()=>{
+  const f=fixture(),terminal=randomUUID(),id=randomUUID();
+  const event=(name:string,extra={})=>f.agents.claudeEvent(terminal,{hook_event_name:name,session_id:id,...extra});
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{});event('SessionStart');confirmClaudeChannel(f.agents,terminal);
+    f.agents.claudeInterrupted(terminal);assert.equal(f.agents.get(id).status,'idle','Esc in menus is not an interrupt');
+    await f.agents.send(id,'first','queue');f.agents.channel(terminal);f.agents.claudeInterrupted(terminal);
+    assert.equal(f.agents.get(id).status,'interrupted');assert.equal(f.agents.get(id).turnId,undefined);
+    event('PostToolUse');assert.equal(f.agents.get(id).status,'interrupted');
+    await f.agents.send(id,'second','queue');assert.equal(f.agents.channel(terminal).content,'second');const second=f.agents.get(id).turnId;
+    event('Stop',{observed_at:String(Date.now()-10000)});assert.equal(f.agents.get(id).turnId,second);
+    event('Stop',{assistant_timestamp:new Date(0).toISOString()});assert.equal(f.agents.get(id).turnId,second);
+    event('Stop');assert.equal(f.agents.get(id).lastTurnId,second);
+    await f.agents.send(id,'permission','queue');f.agents.channel(terminal);event('PermissionRequest');
+    f.agents.claudeInterrupted(terminal);assert.equal(f.agents.get(id).status,'waiting','Esc may only dismiss a menu');
+    f.agents.claudeInterrupted(terminal,true);assert.equal(f.agents.get(id).status,'interrupted','Ctrl-C cancels a waiting turn');
+    await f.agents.send(id,'recover waiting','queue');assert.equal(f.agents.channel(terminal).content,'recover waiting');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('clear/resume resets an unacknowledged probe without replaying old session instructions',async()=>{
+  const f=fixture(),terminal=randomUUID(),old=randomUUID(),next=randomUUID();
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{},'old instruction');
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',session_id:old});
+    const first=f.agents.channel(terminal),firstNonce=first.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',source:'clear',session_id:next});
+    const second=f.agents.channel(terminal),secondNonce=second.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    assert.notEqual(secondNonce,firstNonce);assert.throws(()=>f.agents.acknowledgeChannel(terminal,firstNonce),/一致/);
+    assert.equal(f.agents.get(old).pending[0].text,'old instruction');assert.deepEqual(f.agents.get(next).pending,[]);
+    f.agents.claudeEvent(terminal,{hook_event_name:'UserPromptSubmit',session_id:next});f.agents.acknowledgeChannel(terminal,secondNonce);
+    f.agents.claudeInterrupted(terminal);await f.agents.send(next,'new instruction','queue');assert.equal(f.agents.channel(terminal).content,'new instruction','interruption after ack clears probe Stop barrier');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
