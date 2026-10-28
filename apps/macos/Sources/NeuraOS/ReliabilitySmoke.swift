@@ -12,6 +12,7 @@ import ChromiumBridge
             exit(2)
         }
         if CommandLine.arguments.contains("--with-chromium") {
+            UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":report.deletingLastPathComponent().path], forName:"NeuraChromiumSmoke")
             if let error = NCInitializeChromium() {FileHandle.standardError.write(Data(error.utf8)); exit(1)}
         }
         Diagnostics.shared.start()

@@ -1,6 +1,6 @@
-# Codexの作業をまとめて監督する
+# Codex・Claudeの作業をまとめて監督する
 
-neuraOSから起動したCodexは、他のCodexや「Codexの作業一覧」から会話を確認し、指示を送れます。先にworktreeで作業を始め、後からメインでCodexを起動しても同じ一覧を使えます。親から起動されたセッションだけを対象にする仕組みではありません。
+neuraOSから起動したCodexは、他のCodexや「エージェントの作業一覧」から会話を確認し、指示を送れます。先にworktreeで作業を始め、後からメインでCodexを起動しても同じ一覧を使えます。親から起動されたセッションだけを対象にする仕組みではありません。
 
 ## 使い方
 
@@ -8,7 +8,7 @@ neuraOSから起動したCodexは、他のCodexや「Codexの作業一覧」か�
 2. メインでもCodexを開き、「他のworktreeのCodexを確認して、必要な修正を指示して」と依頼します。
 3. CodexにはneuraOSのMCPが自動で渡されます。作業一覧を取得し、会話を読み、追加の指示や方向修正を送れます。
 4. 新しい分担は「別worktreeでこの作業を進めて」と依頼します。worktree作成、Codex起動、最初の指示まで実行できます。
-5. ホームの「Codexの作業一覧」から、人間も同じ会話を確認できます。通常の指示は作業終了後に順番に送り、「実行中の作業へすぐ反映」は現在のターンに追加します。
+5. ホームの「エージェントの作業一覧」から、人間も同じ会話を確認できます。通常の指示は作業終了後に順番に送り、「実行中の作業へすぐ反映」は現在のターンに追加します。
 
 監督するCodexが `task_watch` を登録すると、対象の次のターン終了時に報告を受け取り、待機中でも自動で再開します。監督側が作業中なら報告は順番待ちになります。監視は一回限りで、継続するときは再登録します。`task_wait` は変化を最大25秒待つための読み取りツールです。
 
@@ -35,7 +35,8 @@ Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・termin
 | `workspace_list` | プロジェクト・worktree・呼び出し元の作業領域 |
 | `task_list` | 起動順に依存しない全セッションの一覧 |
 | `task_read` | 会話のページ取得、状態、質問、送信待ちの確認 |
-| `task_spawn` | worktree作成とCodex起動・初期指示 |
+| `workspace_create` | agentを起動せず登録worktreeを作成 |
+| `task_spawn` | worktree作成とproviderを選んだagent起動・初期指示 |
 | `task_start` | 既存worktreeで起動、停止済みの会話を再開 |
 | `task_send` | 実行指示の順番待ち／実行中への方向修正（進捗報告には使わない） |
 | `task_report` | 進捗・完了を報告専用受信箱へ送信 |
@@ -73,31 +74,23 @@ NEURA_LIVE_CODEX_TEST=1 node --import tsx scripts/native/supervision-smoke.ts
 
 仕様参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
-## Claude Codeからの利用と共通ルール
+## Claude Codeと相互委任する
 
-neuraOSから新規起動・履歴再開したClaude Codeにも、`--mcp-config` のインラインJSONで `neuraos` MCPを自動接続します。`--append-system-prompt` で使い方と共通作業ルールを渡します。CLIのhelpで両フラグを確認し、非対応なら更新を案内します。設定はその起動だけに適用され、`~/.claude.json`、ユーザー／プロジェクト設定、グローバルMCP登録は変更しません。他のMCP設定や既存の状態通知フックも維持します。組織のMCP制限は引き続き適用されます。既に起動中のClaudeへの後付け注入は行いません。
+Claude Codeは従来の対話ターミナル画面を維持し、SessionStart/StopフックでCodexと同じ作業一覧に登録されます。`task_spawn`/`task_start`の`provider`に`codex`または`claude`を指定できます。省略時はプロジェクトの既定委任providerを使い、再開時は元のproviderを優先します。呼び出し元の現在のtaskを監督として記録し、初回指示の実行前に子のwatchを追加します。既存のwatchは維持します。
 
-共通ルールは `session-instructions.ts` に集約し、専用Codex App Serverにも `-c developer_instructions=…` を渡してCLI内の新規会話を含めます。Codexの開始・再開・履歴選択後の発見と、Claudeの起動・再開に渡します。
+プロジェクトの「既定のAI」で会話と委任のproviderを別々に設定できます。未設定時は既存の自動起動設定に含まれるagentが1種類なら継承します。shellは除外し、両agentまたは未設定ならCodexです。既存プロジェクトの設定データを一括変更しません。
 
-- 作業開始時に `task_list` で既存作業を確認し、重複を避けて関連セッションを再利用します。
-- 独立した変更はworktreeに隔離します。質問・単純調査に不要なworktreeは作らず、割り当て済みの作業領域は理由なく移動しません。
-- 独立して並行できる作業は、委任が許され有用な場合に別セッションへ依頼します。親は `task_read`、`task_wait` と、利用可能なら `task_watch` を使い、差分・テスト・統合競合まで確認します。
-- ユーザーの明示指示と上位制約を優先し、マージ・releaseは依頼された範囲だけ実施します。これはモデルへの作業方針であり、操作権限を拡張するものではありません。
+Claudeにはセッション限定のMCP、共有指示、フック、`--dangerously-load-development-channels server:neuraos`を渡します。Claude標準の起動確認は維持し、他のMCPとユーザー設定を変更しません。Channelsはresearch previewです。CLI・ログインアカウント・組織設定の対応が必要で、非対応CLIは更新理由を表示します。作業一覧では接続待ちと端末を確認でき、CLIが出すアカウント・組織制限の理由もターミナルに残ります。MCP接続だけでは実指示を配送しません。nonce付きprobeをClaudeが専用channel_ackツールで返すまで指示を保持します。60秒で未確認なら利用不可として表示します。確認probeの完了は子の作業完了として報告しません。
 
-ClaudeはMCPの呼び出し側として、既存のCodexを `task_list`／`task_read`／`task_send` などで操作できます。`task_spawn` と `task_start` が起動するのはCodexです。呼び出し元はworkspace IDとterminal IDで識別し、daemonの権限0600のトークンファイルから取得したBearerで認証します。トークン値を起動引数に含めません。認証は既存Codexと同じローカルdaemon単位であり、セッション別のアクセス制限ではありません。呼び出し元にCodex task IDが存在することは要求しません。
+Claudeへの指示はChannelsで現在の応答完了後に配送します。実行中へのsteerは非対応でUIも無効化します。質問・承認はClaudeのターミナルから回答します。待機中のキー操作だけでは取消完了と見なさず指示を保持します（Claudeの質問画面はCtrl-Cだけでは終了しない場合があり、画面の取消操作が必要です）。実際のライフサイクル通知後に次の指示を配送します。Claudeが取消後の通知を送らず「回答待ち」が残る場合は、作業一覧の「中断」または現在のturn IDを指定した`task_interrupt`で回復し、その後`task_send(mode: queue)`で必要な指示を送り直してください。明示中断は未送信指示と監視を解除するので、必要な`task_watch`も登録し直します。キー入力だけでは取消完了を推測しません。報告は`kind=reports`の通知であり、実行指示へ変換しません。送信前に通知済みを記録し、不明な送信結果を自動再送しません。報告は`task_ack`まで保持します。Channelsのpollは通常のdaemon認証に加え、daemon内でのみ発行する端末別のランダム資格を要求し、他端末の資格やmaster bearerだけでは通知を消費できません。
 
-Claude自身は `agents` に登録されず、「Codexの作業一覧」や `task_read`／`task_send` の対象にはなりません。terminal IDをtask IDとして使わないでください。`parentTaskId` を指定する場合は登録済みCodexのIDが必要です。`task_watch` の報告先も登録済みCodexに限られ、Claudeのターン終了後の自動再開は未対応です。Claudeが監督する間は `task_read`／`task_wait` を利用します。
+compactは実行中ターンを保持します。clear/resumeは現在の会話を切り替え、旧会話の指示を新会話へ配送しません。同じ会話の重複起動、異なるworkspace/providerでの再開を拒否します。停止した会話は中断として保存され、停止後の自動配送は行いません。Claude履歴はbyteカーソルで最大2MBずつ非同期取得し、tool call/resultを含む実行証跡を表示します。巨大な単一記録は省略を明記し、原本のtranscriptは保持します。
 
-2026-10-28にClaude Code 2.1.312の `--help` と公式docsで互換性を確認しました。現行CLIには `-p` とstream-jsonによるプログラム制御、backgroundセッションの `--bg`／`agents`／`attach`／`logs`／`stop` もあります。ただし現在のneuraOSは対話PTYでClaudeを起動しており、これらを既存CodexRPCの代替として接続する実装はありません。Claude自身の双方向監督には別の制御アダプターと会話・ターン・承認・再開の対応付けが必要です。
+共通ルールは`session-instructions.ts`で管理します。独立実装はneuraOS MCPで登録された別worktree/agentへ自律委任し、親はwatch/read/ack、差分・テストの確認、統合、許可されたrelease、safe cleanupまで継続します。小調査に不要なworktreeや委任は作りません。ユーザー指示・上位制約を優先し、権限を拡張しません。自分だけの隔離作業には`workspace_create`を使えます。
 
-回帰テストは実daemonのClaude起動引数（新規／再開、MCP、フック、共有指示、動的ポート、呼び出し元ID、トークン非露出）、非対応CLIの更新案内、Codexへの共有指示注入、およびstdio MCPの認証・操作を検証します。偽CLIによる引数検証と実モデルの接続確認は別の検証です。
+2026-10-28にClaude Code 2.1.312と実Codexを、別ポート・別dataのneuraOS daemonから起動して検証しました。Claude監督→Codex子完了→ChannelsでClaude再開→ack、およびCodex監督→Claude子完了→tool outputでCodex再開→ackを確認しています。通常のdaemonとインストール済みアプリは変更・停止していません。
 
-仕様参照: [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)、[MCP](https://code.claude.com/docs/en/mcp)、[プログラムからの実行](https://code.claude.com/docs/en/headless)
-
-実Claude Code 2.1.312でも、隔離した一時daemonへ同じ起動引数を渡し、`task_list` と `workspace_list` の成功、および一致するworkspace／terminal IDを確認しました（2026-10-28、printモードでの実モデル検証）。対話画面での `/mcp` 操作やClaudeからの変更系操作の実モデル検証は含みません。
-
-Codex設定仕様: [Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) の `developer_instructions`（セッション追加指示）。
-
+仕様参照: [Channels reference](https://code.claude.com/docs/en/channels-reference)、[Hooks](https://code.claude.com/docs/en/hooks)。
 
 ## 報告と実行指示の分離
 

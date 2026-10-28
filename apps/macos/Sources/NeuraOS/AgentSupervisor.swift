@@ -6,6 +6,11 @@ struct ManagedAgent: Decodable, Identifiable {
     let workspaceId: String
     let name: String
     let status: String
+    var provider: String? = nil
+    var parentTaskId: String? = nil
+    var channelState: String? = nil
+    var watching: [Watch]? = nil
+    struct Watch: Decodable {let taskId: String}
     let updatedAt: String
     let turnId: String?
     let lastTurnStatus: String?
@@ -46,7 +51,7 @@ struct AgentConversation: Decodable {
         let id: String; let type: String; let text: String?; let command: String?; let aggregatedOutput: String?; let content: [Input]?
         struct Input: Decodable {let type: String; let text: String?}
         var display: String {text ?? command.map { $0 + (aggregatedOutput.map {"\n" + $0} ?? "") } ?? content?.compactMap(\.text).joined(separator: "\n") ?? ""}
-        var label: String {type == "userMessage" ? "指示" : type == "agentMessage" ? "Codex" : type == "commandExecution" ? "コマンド" : type}
+        var label: String {type == "userMessage" ? "指示" : type == "agentMessage" ? "応答" : type == "commandExecution" ? "コマンド" : type}
     }
 }
 
@@ -97,16 +102,17 @@ struct AgentSupervisor: View {
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 0) {
-                Text("Codexの作業一覧").font(.headline).padding()
+                Text("エージェントの作業一覧").font(.headline).padding()
                 Toggle("停止した作業も表示", isOn: $includeStopped)
                     .toggleStyle(.checkbox).font(.callout).padding(.horizontal).padding(.bottom, 8)
                 List(visibleAgents, selection: $selected) {agent in
                     VStack(alignment: .leading, spacing: 5) {
                         Text(agent.name).lineLimit(1)
+                        Text("\(agent.provider == "claude" ? "Claude" : "Codex") · \((agent.watching?.isEmpty == false) ? "監督" : agent.parentTaskId != nil ? "委任先" : "独立")").font(.caption2).foregroundStyle(.secondary)
                         HStack {Text(workspaceName(agent)); Spacer(); Text(agent.statusLabel)}.font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 4).tag(agent.id)
                 }
-                if visibleAgents.isEmpty {Text(includeStopped ? "このプロジェクトの作業はありません。" : "起動中のCodexはありません。停止した作業は「停止した作業も表示」から確認・再開できます。").font(.callout).foregroundStyle(.secondary).padding()}
+                if visibleAgents.isEmpty {Text(includeStopped ? "このプロジェクトの作業はありません。" : "起動中のエージェントはありません。停止した作業は「停止した作業も表示」から確認・再開できます。").font(.callout).foregroundStyle(.secondary).padding()}
             }.frame(minWidth: 200, idealWidth: 250, maxWidth: 340)
             VStack(alignment: .leading, spacing: 12) {
                 if let agent = current {
@@ -115,10 +121,14 @@ struct AgentSupervisor: View {
                         Spacer()
                         Button("作業を開く") {model.select(agent.workspaceId); model.requestedTerminalId = agent.terminalId}
                         if let turn = agent.turnId {Button("中断", role: .destructive) {run(["type": "agent.interrupt", "agentId": agent.id, "expectedTurnId": turn])}.disabled(busy)}
-                        if model.terminal(id: agent.terminalId)?.status != "running" {Button("再開") {run(["type": "terminal.open", "workspaceId": agent.workspaceId, "provider": "codex", "resumeId": agent.id])}.disabled(busy)}
+                        if model.terminal(id: agent.terminalId)?.status != "running" {Button("再開") {run(["type": "terminal.open", "workspaceId": agent.workspaceId, "provider": agent.provider ?? "codex", "resumeId": agent.id])}.disabled(busy)}
                     }
                     if !agent.pending.isEmpty {Text("送信待ちの指示: \(agent.pending.count)件").font(.caption).foregroundStyle(.secondary)}
                     Divider()
+                    if agent.provider == "claude" && agent.status == "waiting" {
+                        Text("ターミナルで質問を取り消しても「回答待ち」が残る場合は、「中断」してから指示を送り直してください。中断すると送信待ちの指示と監視は解除されます。再開する監視も登録し直してください。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 16) {
                             if history.nextCursor != nil {Button("以前の会話を読み込む") {Task {await loadOlder()}}}
@@ -148,18 +158,19 @@ struct AgentSupervisor: View {
                                 let result = Dictionary(uniqueKeysWithValues: questions.map {($0.id, ["answers": [answers[$0.id] ?? ""]])})
                                 run(["type": "agent.respond", "agentId": agent.id, "requestId": request.id.value, "result": ["answers": result]])
                             }.disabled(busy || questions.contains {(answers[$0.id] ?? "").isEmpty})
-                        } else {Text("Codexが操作の確認を待っています。「作業を開く」から確認してください。").font(.callout)}
+                        } else {Text("エージェントが操作の確認を待っています。「作業を開く」から確認してください。").font(.callout)}
                     }
                     Divider()
-                    TextField("このCodexへの指示", text: $text, axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(2...6)
+                    if agent.provider == "claude" {Text(agent.channelState == "connected" ? "Channels受信確認済み。指示は現在の応答後に届きます。" : "Channels受信未確認。指示は保持されています。ターミナルの標準確認、Claudeの対応バージョン・アカウント・組織設定を確認してください。").font(.caption).foregroundStyle(.secondary)}
+                    TextField("このエージェントへの指示", text: $text, axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(2...6)
                     HStack {
-                        Toggle("実行中の作業へすぐ反映", isOn: $steer).disabled(agent.turnId == nil)
+                        Toggle("実行中の作業へすぐ反映", isOn: $steer).disabled(agent.turnId == nil || agent.provider == "claude")
                         Spacer()
-                        Button(steer && agent.turnId != nil ? "方向修正を送信" : "指示を送信") {send(agent)}
+                        Button(steer && agent.turnId != nil && agent.provider != "claude" ? "方向修正を送信" : "指示を送信") {send(agent)}
                             .disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.terminal(id: agent.terminalId)?.status != "running")
                     }
                     Text("応答の終了は、依頼やテストの完了を保証するものではありません。").font(.caption).foregroundStyle(.secondary)
-                } else {ContentUnavailableView("Codexを選択", systemImage: "person.3", description: Text("会話を確認し、追加の指示を送れます。"))}
+                } else {ContentUnavailableView("エージェントを選択", systemImage: "person.3", description: Text("会話を確認し、追加の指示を送れます。"))}
                 if let error {Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)}
             }.padding().frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -195,8 +206,8 @@ struct AgentSupervisor: View {
         catch {self.error = error.localizedDescription}
     }
     private func send(_ agent: ManagedAgent) {
-        var command: [String: Any] = ["type": "agent.send", "agentId": agent.id, "text": text, "mode": steer && agent.turnId != nil ? "steer" : "queue"]
-        if steer, let turn = agent.turnId {command["expectedTurnId"] = turn}
+        var command: [String: Any] = ["type": "agent.send", "agentId": agent.id, "text": text, "mode": steer && agent.turnId != nil && agent.provider != "claude" ? "steer" : "queue"]
+        if steer, agent.provider != "claude", let turn = agent.turnId {command["expectedTurnId"] = turn}
         run(command, clearText: true)
     }
     private func run(_ command: [String: Any], clearText: Bool = false) {

@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import type {AgentActivity,Provider} from './contracts.ts';
 
 export interface ActivityEvent {
-  hook_event_name?:string; session_id?:string; transcript_path?:string; agent_id?:string;
+  observed_at?:string; assistant_timestamp?:string; last_assistant_message?:string; hook_event_name?:string; session_id?:string; transcript_path?:string; agent_id?:string;
   turn_id?:string; tool_name?:string; tool_use_id?:string; source?:string; notification_type?:string;
 }
 
@@ -20,15 +20,20 @@ export class ActivityTracker {
   private transcript?:string;
   private turn?:string;
   private waiting=new Set<string>();
-  interrupt(){this.waiting.clear();this.activity='unknown';}
+  private turnStartedAt=0;
+  private interruptedAt=0;
+  interrupt(){this.waiting.clear();this.activity='unknown';this.interruptedAt=Date.now();}
   accept(event:ActivityEvent):AgentActivity {
     this.notification=undefined;
     if(event.agent_id)return this.activity;
-    const name=event.hook_event_name;
+    const name=event.hook_event_name,observed=Number(event.observed_at);
+    if(name!=='SessionStart'&&Number.isFinite(observed)&&observed<this.interruptedAt)return this.activity;
+    if(name==='Stop'||name==='StopFailure'){const assistantTime=Date.parse(event.assistant_timestamp??'');if((Number.isFinite(observed)&&observed<this.turnStartedAt)||(Number.isFinite(assistantTime)&&assistantTime<this.turnStartedAt))return this.activity;}
     if(name==='SessionStart'){
       if(this.session&&event.source==='startup'&&this.activity!=='idle'&&this.activity!=='unknown')return this.activity;
       // Subagent transcripts must not change the parent terminal's indicator.
       if(this.transcript&&event.transcript_path!==this.transcript&&!['clear','resume','fork'].includes(event.source??''))return this.activity;
+      if(event.source!=='compact'){this.turnStartedAt=0;this.interruptedAt=0;}
       this.session=event.session_id;this.transcript=event.transcript_path;this.waiting.clear();
       this.activity=event.source==='compact'?'working':'idle';return this.activity;
     }
@@ -38,7 +43,7 @@ export class ActivityTracker {
     const previous=this.activity;
     const key=event.tool_use_id??event.tool_name??'permission';
     switch(name){
-      case 'UserPromptSubmit':this.turn=event.turn_id;this.waiting.clear();this.activity='working';break;
+      case 'UserPromptSubmit':this.turnStartedAt=Number.isFinite(observed)?observed:Date.now();this.turn=event.turn_id;this.waiting.clear();this.activity='working';break;
       case 'PreCompact':case 'PostCompact':this.activity=this.waiting.size?'waiting':'working';break;
       case 'PreToolUse':
         if(['AskUserQuestion','request_user_input','ExitPlanMode'].includes(event.tool_name?.split('.').at(-1)??''))this.waiting.add(key);
