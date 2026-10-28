@@ -64,7 +64,7 @@ if(process.argv.includes('--version')){console.log('2.1.312');process.exit(0);}
 process.on('SIGINT',()=>{});
 const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);
 socket.on('error',()=>{});socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name:'SessionStart',source:'startup',session_id:${JSON.stringify(sessionId)}})+'\\n'));
-process.stdin.on('data',()=>{const s=createConnection(process.env.NEURA_ACTIVITY_SOCKET);s.on('error',()=>{});s.on('connect',()=>s.end(JSON.stringify({hook_event_name:'Stop',session_id:${JSON.stringify(sessionId)}})+'\\n'));});
+process.stdin.on('data',data=>{const s=createConnection(process.env.NEURA_ACTIVITY_SOCKET);s.on('error',()=>{});s.on('connect',()=>s.end(JSON.stringify({hook_event_name:data.toString().includes('wait')?'PermissionRequest':'Stop',session_id:${JSON.stringify(sessionId)}})+'\\n'));});
 setInterval(()=>{},1000);
 `,{mode:0o700});
   const old=process.env.NEURA_CLAUDE_PATH;process.env.NEURA_CLAUDE_PATH=program;
@@ -95,6 +95,12 @@ setInterval(()=>{},1000);
       await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.send',agentId:sessionId,text:'recover native interrupt'}}});
       assert.equal((await poll(self)).json().content,'recover native interrupt');
     }
+    const input=(data:string)=>d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:'12777777-2222-4333-8444-555555555551',data}}});
+    await input('wait\r');await new Promise(r=>setTimeout(r,100));assert.equal(d.store.get<any>('agents',sessionId).status,'waiting');
+    await input('\x03');assert.equal(d.store.get<any>('agents',sessionId).status,'waiting','a waiting dialog is not cancelled merely by Ctrl-C');
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.send',agentId:sessionId,text:'after actual dialog cancellation'}}});
+    assert.deepEqual((await poll(self)).json(),{});assert.equal(d.store.get<any>('agents',sessionId).pending.length,1);
+    await input('stop\r');await new Promise(r=>setTimeout(r,100));assert.equal((await poll(self)).json().content,'after actual dialog cancellation');
     const recipient=randomUUID();d.store.put('agents',{id:recipient,terminalId:randomUUID(),workspaceId:workspace.id,name:'recipient',status:'interrupted',pending:[],requests:[],updatedAt:''});
     const report=await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.report',agentId:recipient,text:'proof',sourceTerminalId:terminal.id}}});
     assert.equal(report.statusCode,200);assert.equal((d.store.list('agents').find((a:any)=>a.id===recipient) as any).reports[0].sourceTaskId,sessionId);

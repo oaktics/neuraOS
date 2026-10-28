@@ -77,7 +77,7 @@ export class Terminals {
     let managed:{endpoint:string;threadId:string|undefined}|undefined;
     if(provider==='codex'&&this.agents&&await supportsManagedCodex(program))managed=await this.agents.open(program,env,workspace,id,options.resumeId,options.parentTaskId,resume);
     if(provider==='codex'&&(options.prompt||options.resumeId)&&!managed)throw new Fault('codex_supervision_unsupported','このCodex CLIは監督機能に対応していません。Codexを更新してください。',409);
-    if(provider==='claude'&&this.claudeMCP){extraArgs=await claudeMCPArguments(program,this.claudeMCP,workspace.id,id);this.agents?.prepareClaude(workspace,id,options.resumeId,options.parentTaskId,()=>this.processes.get(id)?.write('\x03'),options.prompt);}
+    if(provider==='claude'&&this.claudeMCP){extraArgs=await claudeMCPArguments(program,this.claudeMCP,workspace.id,id);this.agents?.prepareClaude(workspace,id,options.resumeId,options.parentTaskId,waiting=>this.processes.get(id)?.write(waiting?'\x1b':'\x03'),options.prompt);}
     if(!managed&&await supportsActivity(provider,program)){
       const tracker=new ActivityTracker();
       // Status integration is optional: a failed observer must not block the CLI.
@@ -118,9 +118,9 @@ export class Terminals {
   }
   input(id:string,clientId:string,data:string){const proc=requireValue(this.processes.get(id),'terminal_stopped','ターミナルは停止しています。');this.claim(id,clientId);proc.write(data);
     if(data==='\x03'||data==='\x1b'){
-      this.agents?.claudeInterrupted(id,data==='\x03');
+      this.agents?.claudeInterrupted(id);
       const entry=this.activity.get(id),record=this.store.get<TerminalRecord>('terminals',id);
-      if(entry&&record){entry.tracker.interrupt();if(record.activity!=='unknown')this.store.put('terminals',{...record,activity:'unknown'});}
+      if(entry&&record&&!(record.provider==='claude'&&record.activity==='waiting')){entry.tracker.interrupt();if(record.activity!=='unknown')this.store.put('terminals',{...record,activity:'unknown'});}
     }
     return {ok:true};}
   resize(id:string,clientId:string,cols:number,rows:number){
