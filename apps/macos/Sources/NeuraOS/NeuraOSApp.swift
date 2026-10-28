@@ -131,7 +131,7 @@ struct RootView: View {
             }.padding(.horizontal, 10).frame(height: 38)
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
-                if model.showSidebar {Sidebar().frame(minWidth: 176, idealWidth: 200, maxWidth: 280)}
+                if model.showSidebar {Sidebar().frame(minWidth: 190, idealWidth: 220, maxWidth: 250)}
                 ZStack {
                     if model.selected == nil {WelcomeView()}
                     // Keep each workspace mounted: its terminal, editor draft and browser remain intact.
@@ -186,7 +186,8 @@ struct Sidebar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(model.sidebarSpaces.active.name).font(.system(size: 15, weight: .semibold)).lineLimit(1)
+                Image(systemName: "square.stack").foregroundStyle(.secondary)
+                Text(model.sidebarSpaces.active.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Spacer()
                 Menu {
                     ForEach(model.sidebarSpaces.spaces) {space in
@@ -196,9 +197,11 @@ struct Sidebar: View {
                     Button("新しいWorkspace…") {model.showNewSpace = true}
                 } label: {Image(systemName: "chevron.down")}
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Workspaceを切り替える").accessibilityLabel("Workspaceを切り替える")
-            }.padding(12)
-            HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.tertiary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
-                .font(.system(size: 12)).padding(7).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5)).padding(8)
+            }.padding(.horizontal, 14).padding(.top, 16).padding(.bottom, 12)
+            HStack(spacing: 7) {Image(systemName: "magnifyingglass").foregroundStyle(.secondary); TextField("作業を検索", text: $query).textFieldStyle(.plain)}
+                .font(.system(size: 12)).padding(.horizontal, 9).padding(.vertical, 7)
+                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 7))
+                .padding(.horizontal, 12).padding(.bottom, 8)
             GeometryReader {geometry in
                 ZStack {
                     ForEach(pagerSpaces) {space in
@@ -219,8 +222,8 @@ struct Sidebar: View {
                 Button("フォルダを開く…") {model.addProject()}
             } label: {
                 Label("プロジェクトを追加", systemImage: "folder.badge.plus")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
+                    .font(.system(size: 12)).foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 10)
             }.menuStyle(.borderlessButton).menuIndicator(.hidden).padding(.horizontal, 16)
             Spacer(minLength: 0)
             Divider()
@@ -240,7 +243,7 @@ struct Sidebar: View {
                     .disabled(model.sidebarSpaces.adjacent(1) == nil).help("次のWorkspace")
                 Button {model.showNewSpace = true} label: {Image(systemName: "plus").frame(width: 24, height: 28)}.help("新しいWorkspace")
             }.buttonStyle(.plain).padding(8)
-        }.background(Color(nsColor: .windowBackgroundColor)).clipped()
+        }.background(Palette.surface).clipped()
         .background(SidebarSwipeArea(canBegin: {!settling}, onProgress: {translation in
             guard !settling else {return}
             let offset = translation < 0 ? 1 : -1
@@ -339,12 +342,17 @@ struct Sidebar: View {
                     if !collapsed.contains(project.id) {
                         ForEach(model.state.workspaces.filter {$0.projectId == project.id && (searchQuery.isEmpty || $0.name.localizedCaseInsensitiveContains(searchQuery) || project.name.localizedCaseInsensitiveContains(searchQuery))}) {workspace in
                             HStack(spacing: 8) {
-                                Label(workspace.name, systemImage: workspace.kind == "worktree" ? "arrow.triangle.branch" : "folder")
-                                    .lineLimit(1)
+                                Image(systemName: workspace.kind == "worktree" ? "arrow.triangle.branch" : "folder")
+                                    .font(.system(size: 13)).foregroundStyle(Color.accentColor).frame(width: 18)
+                                Text(workspace.name)
+                                    .font(.system(size: 13, weight: model.selectedId == workspace.id ? .medium : .regular))
+                                    .foregroundStyle(.primary).lineLimit(1)
                                 Spacer(minLength: 0)
                                 WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
                                 WorkspaceActivityStatus(workspaceId: workspace.id)
                             }
+                            .padding(.vertical, 4)
+                            .listItemTint(.accentColor)
                             .tag(workspace.id)
                             .contextMenu {
                                 if workspace.kind == "root" {
@@ -385,11 +393,11 @@ struct Sidebar: View {
                                 }
                                 model.showNewWorkspace = true
                             } label: {
-                                Label("worktree", systemImage: "plus")
-                                    .font(.caption).fixedSize()
+                                Image(systemName: "plus")
+                                    .font(.system(size: 12, weight: .medium)).frame(width: 24, height: 24).contentShape(Rectangle())
                             }.buttonStyle(.borderless).controlSize(.small).help("新しいworktree").accessibilityLabel("新しいworktree")
                         }
-                    }.padding(.horizontal, 4).padding(.vertical, 4)
+                    }.padding(.horizontal, 2).padding(.top, 6).padding(.bottom, 2)
                     .contextMenu {projectActions(project, space: space)}
                 }
             }
@@ -402,6 +410,7 @@ struct Sidebar: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
     }
     private func finishSwipe(_ offset: Int?) {
         guard !settling else {return}

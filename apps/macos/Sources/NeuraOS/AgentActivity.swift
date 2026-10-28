@@ -47,11 +47,12 @@ struct WorkspaceActivity {
 struct WorkspaceActivityIndicator: View {
     let terminals: [TerminalRecord]
     let connected: Bool
+    var showsStopped = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var summary: WorkspaceActivity {WorkspaceActivity(terminals: terminals, connected: connected)}
 
     var body: some View {
-        if let activity = summary.activity {
+        if let activity = summary.activity, showsStopped || activity != .stopped {
             Group {
                 switch activity {
                 case .working:
@@ -92,6 +93,6 @@ struct WorkspaceActivityStatus: View {
 
     var body: some View {
         WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspaceId},
-                                   connected: model.connected)
+                                   connected: model.connected, showsStopped: false)
     }
 }
