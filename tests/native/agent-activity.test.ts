@@ -97,7 +97,7 @@ import {createConnection} from 'node:net';
 import {createInterface} from 'node:readline';
 if(process.argv.includes('--help')){console.log('--settings');process.exit(0);}
 if(process.argv.includes('--version')){console.log('2.1.307');process.exit(0);}
-const emit=event=>new Promise(resolve=>{const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);socket.on('error',resolve);socket.on('connect',()=>socket.end(JSON.stringify(event)+'\\n'));socket.on('close',resolve);});
+const emit=event=>new Promise(resolve=>{const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);socket.on('error',resolve);socket.on('connect',()=>socket.end(JSON.stringify({...event,session_id:String(process.pid)})+'\\n'));socket.on('close',resolve);});
 await emit({hook_event_name:'SessionStart'});
 for await(const line of createInterface({input:process.stdin})){
   if(line==='exit')process.exit(0);
@@ -113,6 +113,8 @@ for await(const line of createInterface({input:process.stdin})){
     const first=await terminals.open(workspace,'claude',false),second=await terminals.open(workspace,'claude',false);
     const record=(id:string)=>store.get<import('../../apps/daemon/src/contracts.ts').TerminalRecord>('terminals',id)!;
     await waitFor(()=>record(first.id).activity==='idle'&&record(second.id).activity==='idle');
+    assert.ok(record(first.id).sessionId);
+    assert.notEqual(record(first.id).sessionId,record(second.id).sessionId);
     const revision=store.state().revision;
     terminals.input(first.id,'client','ask\r');await waitFor(()=>record(first.id).activity==='waiting');
     assert.ok(store.state().revision>revision);assert.equal(record(second.id).activity,'idle');
