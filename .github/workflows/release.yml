@@ -74,6 +74,17 @@ jobs:
           NEURA_APP_ID: com.neuraos.browser-smoke.ci
           NEURA_DEV_DATA_DIR: /tmp/neura-browser-ci
           NEURA_DEV_PORT: '44319'
+      - name: Retain browser fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-fixture-evidence
+          path: |
+            /tmp/neura-browser-ci/evidence.json
+            /tmp/neura-browser-ci/app.log
+            /tmp/neura-browser-ci/*.png
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Retain crash symbols
         uses: actions/upload-artifact@v4
         with:
