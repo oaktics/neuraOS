@@ -30,6 +30,18 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     const first=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.ok(first.workspace.id);assert.match(first.startupError,/Codex/);
     const retry=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.equal(retry.workspace.id,first.workspace.id);
     assert.equal(d.store.state().workspaces.length,2);assert.equal(d.store.state().terminals.length,0);
+    await writeFile(repo+'/setup.sh','while [ ! -f "$NEURA_PROJECT_ROOT/release-setup" ]; do sleep 0.02; done; echo ready');
+    await git(repo,['add','.']);await git(repo,['commit','-m','setup']);
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.set-worktree-setup',projectId:p.id,script:'setup.sh'}}});
+    const setupArgs={...args,operationId:randomUUID()};
+    const preparing=JSON.parse((await tool('task_spawn',setupArgs)).content[0].text);
+    assert.equal(preparing.setupPending,true);assert.equal(preparing.startupError,undefined);
+    await writeFile(repo+'/release-setup','ready');
+    for(let i=0;i<100&&d.store.state().workspaces.find(w=>w.id===preparing.workspace.id)?.setup?.status==='running';i++)await new Promise(r=>setTimeout(r,20));
+    const prepared=JSON.parse((await tool('task_spawn',setupArgs)).content[0].text);
+    assert.equal(prepared.workspace.id,preparing.workspace.id);assert.equal(prepared.workspace.setup.status,'succeeded');
+    assert.match(prepared.startupError,/Codex/);assert.doesNotMatch(prepared.startupError,/setup_running/);
+    assert.equal(d.store.state().workspaces.length,3);
     assert.equal((await tool('unknown')).isError,true);
     const tasks=JSON.parse((await tool('task_wait',{after:0})).content[0].text);assert.ok(tasks.revision>0);assert.deepEqual(tasks.agents,[]);
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
