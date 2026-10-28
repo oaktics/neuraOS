@@ -27,6 +27,17 @@ struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
 
+    @discardableResult
+    @MainActor mutating func openBrowser(_ url: URL, workspaceId: String, defaults: UserDefaults = .standard) -> Bool {
+        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              BrowserModel.navigationURL(url.absoluteString) != nil else {return false}
+        let tab = WorkspaceTab(kind: "browser", number: (tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
+        // Seed the URL before SwiftUI constructs the browser and starts navigation.
+        defaults.set(url.absoluteString, forKey: "browser.\(workspaceId).\(tab.id)")
+        tabs.append(tab); selectedId = tab.id
+        return true
+    }
+
     mutating func openFile(_ path: String) {
         if let existing = tabs.first(where: {$0.kind == "file" && $0.filePath == path}) {
             selectedId = existing.id
@@ -101,6 +112,10 @@ struct WorkspaceView: View {
                 ProviderUsageFooter()
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
+        .environment(\.openURL, OpenURLAction {url in
+            guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
+            return layout.openBrowser(url, workspaceId: workspace.id) ? .handled : .discarded
+        })
         .onAppear {restore(); openRequestedTerminal()}
         .onChange(of: model.state.terminalMembership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
