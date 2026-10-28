@@ -3,6 +3,7 @@
 BOOL NCVerifyDownloadTerminalStates(void) {
     static int terminalKind, continuations, cancellations;
     static uint32_t identifier;
+    static NSString *retriedPath;
     continuations = 0; cancellations = 0;
     auto browser = []() {
         auto h = new Handler<cef_browser_t>(nil);
@@ -65,6 +66,18 @@ BOOL NCVerifyDownloadTerminalStates(void) {
     NCChromiumView *owner = [[NCChromiumView alloc] initWithFrame:NSZeroRect];
     SelectDownloadDestination(pending, &before->api, 1, owner, [NSURL fileURLWithPath:@"/tmp/never-written"]);
     passed &= continuations == 1 && pending->_before == nullptr && pending->_control == nullptr;
+    // Chromium retries may repeat BeforeDownload while the same ID is running.
+    // Keep the approved destination even if its current path is an intermediate file.
+    pending.path = @"/tmp/intermediate.crdownload";
+    auto retry = new Handler<cef_before_download_callback_t>(nil);
+    retry->api.cont = [](cef_before_download_callback_t *, const cef_string_t *path, int showDialog) {
+        continuations++; retriedPath = showDialog ? @"unexpected-dialog" : String(path);
+    };
+    retry->api.base.add_ref(&retry->api.base);
+    handler->on_before_download(handler, browser(), item(), nullptr, &retry->api);
+    passed &= continuations == 2 && [retriedPath isEqualToString:@"/tmp/never-written"] && retry->refs == 1;
+    passed &= pending->_before == nullptr && pending->_panel == nil && pending->_selectionGeneration == 1;
+    Release(&retry->api);
     [pending cancel];
     auto lateControl = new Handler<cef_download_item_callback_t>(nil);
     lateControl->api.cancel = [](cef_download_item_callback_t *) {cancellations++;};
