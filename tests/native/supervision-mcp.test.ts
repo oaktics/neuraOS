@@ -1,10 +1,10 @@
+import {claudeMCPArguments} from '../../apps/daemon/src/claude-mcp.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
-import {fileURLToPath} from 'node:url';
 import {createDaemon} from '../../apps/daemon/src/server.ts';
 import {git} from '../../apps/daemon/src/workspace.ts';
 
@@ -17,7 +17,11 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
   const headers={authorization:`Bearer ${d.token}`};
   const p=(await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.add',path:repo}}})).json();
   const workspace=d.store.state().workspaces[0];
-  const child=spawn(process.execPath,[fileURLToPath(new URL('../../apps/daemon/src/supervision-mcp.mjs',import.meta.url))],{env:{...process.env,NEURA_SUPERVISION_URL:`http://127.0.0.1:${address.port}`,NEURA_SUPERVISION_TOKEN_FILE:root+'/data/daemon-token',NEURA_SUPERVISION_WORKSPACE:workspace.id},stdio:'pipe'});
+  const probe=root+'/claude';await writeFile(probe,'#!/bin/sh\necho --mcp-config --append-system-prompt\n',{mode:0o700});
+  const terminalId=randomUUID();
+  const launchArgs=await claudeMCPArguments(probe,{endpoint:()=>`http://127.0.0.1:${address.port}`,tokenPath:root+'/data/daemon-token'},workspace.id,terminalId);
+  const config=JSON.parse(launchArgs[1]).mcpServers.neuraos;
+  const child=spawn(config.command,config.args,{env:{...process.env,...config.env},stdio:'pipe'});
   child.stderr.resume();let sequence=0;const pending=new Map<number,(value:any)=>void>();
   const lines=createInterface({input:child.stdout});lines.on('line',line=>{const m=JSON.parse(line);pending.get(m.id)?.(m);pending.delete(m.id);});
   const rpc=(method:string,params:unknown={})=>new Promise<any>((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>reject(new Error('MCP timeout')),10000);pending.set(id,m=>{clearTimeout(timer);resolve(m.result);});child.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
@@ -26,6 +30,14 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.equal((await rpc('initialize')).serverInfo.name,'neuraos');
     const inventory=await rpc('tools/list');assert.ok(inventory.tools.some((t:any)=>t.name==='task_watch'));
     const listed=JSON.parse((await tool('workspace_list')).content[0].text);assert.equal(listed.currentWorkspaceId,workspace.id);assert.equal(listed.projects[0].id,p.id);
+    const caller=JSON.parse((await tool('task_list')).content[0].text);
+    assert.equal(caller.currentWorkspaceId,workspace.id);assert.equal(caller.currentTerminalId,terminalId);
+    assert.deepEqual(caller.agents,[],'Claude caller need not have a registered Codex task');
+    // Authenticated calls reach task validation even without a caller task ID.
+    for(const name of ['task_read','task_send']){
+      const result=await tool(name,{taskId:randomUUID(),operationId:randomUUID(),text:'hello'});
+      assert.equal(result.isError,true);assert.match(result.content[0].text,/agent_missing/);
+    }
     const args={operationId:randomUUID(),projectId:p.id,prompt:'work',baseRef:'HEAD'};
     const first=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.ok(first.workspace.id);assert.match(first.startupError,/Codex/);
     const retry=JSON.parse((await tool('task_spawn',args)).content[0].text);assert.equal(retry.workspace.id,first.workspace.id);

@@ -1,4 +1,4 @@
-// stdio MCP adapter, launched only for neuraOS-managed Codex sessions.
+// stdio MCP adapter for neuraOS-launched Codex and Claude Code clients.
 import {createInterface} from 'node:readline';
 import {readFile} from 'node:fs/promises';
 import {createHash} from 'node:crypto';

@@ -69,3 +69,28 @@ NEURA_LIVE_CODEX_TEST=1 node --import tsx scripts/native/supervision-smoke.ts
 この検証は、先に起動したworktreeのCodexを後から起動したメインがMCPで発見すること、指示の重複排除、子の応答終了後に待機中のメインがtool outputで自動再開すること、Daemon再起動後の履歴読み取りと同一会話の再開を実際のCodexで確認します。モデルの会話履歴はCodex側に保存されます。
 
 仕様参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+
+## Claude Codeからの利用と共通ルール
+
+neuraOSから新規起動・履歴再開したClaude Codeにも、`--mcp-config` のインラインJSONで `neuraos` MCPを自動接続します。`--append-system-prompt` で使い方と共通作業ルールを渡します。CLIのhelpで両フラグを確認し、非対応なら更新を案内します。設定はその起動だけに適用され、`~/.claude.json`、ユーザー／プロジェクト設定、グローバルMCP登録は変更しません。他のMCP設定や既存の状態通知フックも維持します。組織のMCP制限は引き続き適用されます。既に起動中のClaudeへの後付け注入は行いません。
+
+共通ルールは `session-instructions.ts` に集約し、専用Codex App Serverにも `-c developer_instructions=…` を渡してCLI内の新規会話を含めます。Codexの開始・再開・履歴選択後の発見と、Claudeの起動・再開に渡します。
+
+- 作業開始時に `task_list` で既存作業を確認し、重複を避けて関連セッションを再利用します。
+- 独立した変更はworktreeに隔離します。質問・単純調査に不要なworktreeは作らず、割り当て済みの作業領域は理由なく移動しません。
+- 独立して並行できる作業は、委任が許され有用な場合に別セッションへ依頼します。親は `task_read`、`task_wait` と、利用可能なら `task_watch` を使い、差分・テスト・統合競合まで確認します。
+- ユーザーの明示指示と上位制約を優先し、マージ・releaseは依頼された範囲だけ実施します。これはモデルへの作業方針であり、操作権限を拡張するものではありません。
+
+ClaudeはMCPの呼び出し側として、既存のCodexを `task_list`／`task_read`／`task_send` などで操作できます。`task_spawn` と `task_start` が起動するのはCodexです。呼び出し元はworkspace IDとterminal IDで識別し、daemonの権限0600のトークンファイルから取得したBearerで認証します。トークン値を起動引数に含めません。認証は既存Codexと同じローカルdaemon単位であり、セッション別のアクセス制限ではありません。呼び出し元にCodex task IDが存在することは要求しません。
+
+Claude自身は `agents` に登録されず、「Codexの作業一覧」や `task_read`／`task_send` の対象にはなりません。terminal IDをtask IDとして使わないでください。`parentTaskId` を指定する場合は登録済みCodexのIDが必要です。`task_watch` の報告先も登録済みCodexに限られ、Claudeのターン終了後の自動再開は未対応です。Claudeが監督する間は `task_read`／`task_wait` を利用します。
+
+2026-10-28にClaude Code 2.1.312の `--help` と公式docsで互換性を確認しました。現行CLIには `-p` とstream-jsonによるプログラム制御、backgroundセッションの `--bg`／`agents`／`attach`／`logs`／`stop` もあります。ただし現在のneuraOSは対話PTYでClaudeを起動しており、これらを既存CodexRPCの代替として接続する実装はありません。Claude自身の双方向監督には別の制御アダプターと会話・ターン・承認・再開の対応付けが必要です。
+
+回帰テストは実daemonのClaude起動引数（新規／再開、MCP、フック、共有指示、動的ポート、呼び出し元ID、トークン非露出）、非対応CLIの更新案内、Codexへの共有指示注入、およびstdio MCPの認証・操作を検証します。偽CLIによる引数検証と実モデルの接続確認は別の検証です。
+
+仕様参照: [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)、[MCP](https://code.claude.com/docs/en/mcp)、[プログラムからの実行](https://code.claude.com/docs/en/headless)
+
+実Claude Code 2.1.312でも、隔離した一時daemonへ同じ起動引数を渡し、`task_list` と `workspace_list` の成功、および一致するworkspace／terminal IDを確認しました（2026-10-28、printモードでの実モデル検証）。対話画面での `/mcp` 操作やClaudeからの変更系操作の実モデル検証は含みません。
+
+Codex設定仕様: [Configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference) の `developer_instructions`（セッション追加指示）。

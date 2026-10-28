@@ -20,7 +20,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   await chmod(tokenPath,0o600);
   const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite'));
   let controlEndpoint=`http://127.0.0.1:${process.env.NEURA_DEV_PORT??4318}`;
-  const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents);
+  const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents,{endpoint:()=>controlEndpoint,tokenPath});
   const diagnostics=new Diagnostics(join(dataDir,'diagnostics'));
   diagnostics.record('daemon.start');
   const sessionNames=new SessionNames(store);

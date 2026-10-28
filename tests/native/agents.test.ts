@@ -1,3 +1,4 @@
+import {codexSessionInstructions} from '../../apps/daemon/src/session-instructions.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,symlink,rm,realpath} from 'node:fs/promises';
@@ -7,16 +8,17 @@ import {Agents} from '../../apps/daemon/src/agents.ts';
 import {CodexRPC,type RPCEvent} from '../../apps/daemon/src/codex-rpc.ts';
 import type {Workspace} from '../../apps/daemon/src/contracts.ts';
 
-function fixture(reportedCwd?:string){
+function fixture(reportedCwd?:string,loadedId?:string){
   const store=new Store(':memory:');
   const workspace:Workspace={id:randomUUID(),projectId:randomUUID(),name:'worker',path:'/tmp/worker',branch:'test',kind:'worktree',createdAt:''};store.put('workspaces',workspace);
-  const clients:{emit:(e:RPCEvent)=>void;calls:{method:string;params:any}[];replies:any[];failStart:boolean}[]=[];
+  const clients:{emit:(e:RPCEvent)=>void;calls:{method:string;params:any}[];replies:any[];failStart:boolean;args:string[]}[]=[];
   const factory:typeof CodexRPC.start=async(_program,_env,_args,emit)=>{
-    const client={emit,calls:[] as {method:string;params:any}[],replies:[] as any[],failStart:false};clients.push(client);
+    const client={emit,calls:[] as {method:string;params:any}[],replies:[] as any[],failStart:false,args:_args};clients.push(client);
     return {endpoint:'unix:///tmp/fake',pid:999999,
       async call(method:string,params:any){client.calls.push({method,params});
         if(method==='thread/start'||method==='thread/resume')return {thread:{id:params.threadId??randomUUID(),cwd:reportedCwd??workspace.path,status:{type:'idle'}}};
-        if(method==='thread/loaded/list')return {data:[],nextCursor:null};
+        if(method==='thread/loaded/list')return {data:loadedId?[loadedId]:[],nextCursor:null};
+        if(method==='thread/read')return {thread:{id:params.threadId,cwd:reportedCwd??workspace.path,status:{type:'idle'}}};
         if(method==='thread/turns/list')return {data:[{id:'history',items:[{type:'agentMessage',text:'result'}]}],nextCursor:null};
         if(method==='turn/start'){
           if(client.failStart)throw new Error('timeout');
@@ -162,5 +164,31 @@ test('history selection in another terminal cannot take over a live session',asy
     f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:owner.turnId,status:'completed'}}});
     assert.equal(f.agents.get(worker).lastTurnStatus,'completed');
     assert.equal(f.agents.get(worker).status,'idle');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+for(const resume of [false,true])test(`shared workflow instructions reach Codex ${resume?'resume':'start'}`,async()=>{
+  const f=fixture();try{
+    const first=await f.open();
+    if(resume){await f.agents.shutdown();await f.agents.open('fake',{},f.workspace,randomUUID(),first.threadId);}
+    const call=f.clients.at(-1)!.calls.find(c=>c.method===(resume?'thread/resume':'thread/start'))!;
+    assert.equal(call.params.developerInstructions,codexSessionInstructions);
+    assert.ok(f.clients.at(-1)!.args.includes('developer_instructions='+JSON.stringify(codexSessionInstructions)));
+    assert.match(call.params.developerInstructions,/Respect explicit user instructions/);
+    assert.match(call.params.developerInstructions,/task_list/);
+    assert.match(call.params.developerInstructions,/Isolate independent code changes in a worktree/);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('history chooser discovery also installs shared workflow instructions',async()=>{
+  const id=randomUUID(),f=fixture(undefined,id);
+  try{
+    const opened=await f.agents.open('fake',{},f.workspace,randomUUID(),undefined,undefined,true);
+    assert.equal(opened.threadId,undefined);
+    assert.ok(f.clients[0].args.includes('developer_instructions='+JSON.stringify(codexSessionInstructions)),'server config covers TUI-created threads before discovery');
+    for(let i=0;i<150&&!f.agents.list().length;i++)await new Promise(r=>setTimeout(r,25));
+    assert.equal(f.agents.get(id).id,id);
+    const resume=f.clients[0].calls.find(c=>c.method==='thread/resume');
+    assert.equal(resume?.params.developerInstructions,codexSessionInstructions);
   }finally{await f.agents.shutdown();f.store.close();}
 });
