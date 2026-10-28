@@ -33,6 +33,13 @@ function fixture(reportedCwd?:string,loadedId?:string){
   return {store,workspace,agents,clients,open,factory};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
+function confirmClaudeChannel(agents:Agents,terminalId:string){
+  const probe=agents.channel(terminalId);assert.equal(probe.meta?.kind,'probe');
+  const nonce=probe.content!.match(/nonce ([a-f0-9-]{36})/)![1];agents.acknowledgeChannel(terminalId,nonce);
+  const a=agents.list().find(a=>a.terminalId===terminalId&&a.provider==='claude')!;
+  agents.claudeEvent(terminalId,{hook_event_name:'Stop',session_id:a.id,transcript_path:a.transcriptPath});
+}
+
 
 test('a later supervisor discovers existing independent sessions and reads the exact conversation',async()=>{
   const f=fixture();try{
@@ -310,5 +317,118 @@ test('manual report attribution uses the current terminal task, not an older thr
     f.store.put('terminals',{id:terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',agentId:currentId,sessionId:currentId,cols:80,rows:24,createdAt:''});
     f.agents.report(main,'current task report',terminalId);
     assert.equal(f.agents.get(main).reports?.[0].sourceTaskId,currentId);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('Claude and Codex supervise each other with exact reports, compact safety, recovery and no stale-session delivery',async()=>{
+  const f=fixture(),terminalId=randomUUID(),id=randomUUID(),path='/tmp/claude.jsonl';let interrupted=0;
+  const event=(hook_event_name:string,extra:Record<string,string>={})=>f.agents.claudeEvent(terminalId,{hook_event_name,session_id:id,transcript_path:path,...extra});
+  try{
+    f.agents.prepareClaude(f.workspace,terminalId,undefined,undefined,()=>interrupted++);
+    event('SessionStart',{source:'startup'});confirmClaudeChannel(f.agents,terminalId);
+    const codex=(await f.open()).threadId!;
+    f.agents.watch(codex,[id]);await f.agents.send(id,'Claude work','queue');
+    assert.equal(f.agents.channel(terminalId).content,'Claude work');const first=f.agents.get(id).turnId;
+    await f.agents.send(id,'queued during compact','queue');event('SessionStart',{source:'compact'});
+    assert.equal(f.agents.get(id).turnId,first);assert.equal(f.agents.get(id).status,'working');assert.deepEqual(f.agents.channel(terminalId),{});
+    event('Stop',{last_assistant_message:'Claude completed'});await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    event('Stop');await tick();assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    assert.equal(f.agents.channel(terminalId).content,'queued during compact');event('StopFailure');
+    await f.agents.send(id,'retry failed','queue');assert.equal(f.agents.channel(terminalId).content,'retry failed');
+    await f.agents.interrupt(id,f.agents.get(id).turnId!);assert.equal(interrupted,1);
+    await f.agents.send(id,'retry interrupted','queue');assert.equal(f.agents.channel(terminalId).content,'retry interrupted');event('Stop');
+    f.agents.watch(id,[codex]);
+    const turn=f.agents.get(codex).turnId!;f.clients[0].emit({method:'turn/completed',params:{threadId:codex,turn:{id:turn,status:'completed'}}});await tick();
+    const notification=f.agents.channel(terminalId);assert.equal(notification.meta?.kind,'reports');const reports=f.agents.get(id).reports!;
+    assert.equal(reports.length,1);f.agents.ack(id,[reports[0].id]);event('Stop');assert.deepEqual(f.agents.channel(terminalId),{});
+    await f.agents.send(id,'must remain after end','queue');event('SessionEnd');assert.deepEqual(f.agents.channel(terminalId),{});
+    await assert.rejects(f.agents.send(id,'offline','queue'),/停止/);
+    const next=randomUUID();event('SessionStart',{session_id:next,source:'clear',transcript_path:'/tmp/next.jsonl'});
+    assert.deepEqual(f.agents.channel(terminalId),{});assert.equal(f.agents.get(id).pending.length,1);
+    await assert.rejects(f.agents.send(id,'old','queue'),/別の会話/);
+    await f.agents.close(terminalId);assert.throws(()=>f.agents.channel(terminalId),/停止/);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('Claude resume validates provider/workspace and never transfers a live identity to another terminal',async()=>{
+  const f=fixture(),t=randomUUID(),id=randomUUID();let rejected=0;
+  try{
+    f.agents.prepareClaude(f.workspace,t,undefined,undefined,()=>{});f.agents.claudeEvent(t,{hook_event_name:'SessionStart',session_id:id,source:'startup'});
+    assert.throws(()=>f.agents.prepareClaude(f.workspace,randomUUID(),id,undefined,()=>{}),/実行中/);
+    const other=randomUUID();f.agents.prepareClaude(f.workspace,other,undefined,undefined,()=>rejected++);
+    f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(rejected,1);assert.equal(f.agents.get(id).terminalId,t);
+    await f.agents.close(t);f.agents.prepareClaude(f.workspace,other,id,undefined,()=>{});
+    f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(f.agents.get(id).terminalId,other);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('delegated Codex and Claude attach watches before first inference without replacing existing watches',async()=>{
+  const f=fixture();
+  try{
+    const parent=(await f.open()).threadId!,existing=(await f.open()).threadId!;
+    f.agents.watch(parent,[existing]);
+    const codex=await f.agents.open('fake',{},f.workspace,randomUUID(),undefined,parent);
+    assert.deepEqual(f.agents.get(parent).watching?.map(w=>w.taskId),[existing,codex.threadId]);
+    await f.agents.send(codex.threadId!,'fast completion','queue');const turn=f.agents.get(codex.threadId!).turnId;
+    f.clients[2].emit({method:'turn/completed',params:{threadId:codex.threadId,turn:{id:turn,status:'completed'}}});await tick();
+    assert.equal(f.agents.get(parent).reports?.[0].sourceTaskId,codex.threadId);
+    const terminal=randomUUID(),claude=randomUUID();
+    f.agents.prepareClaude(f.workspace,terminal,undefined,parent,()=>{},'initial Claude instruction');
+    assert.deepEqual(f.agents.channel(terminal),{});
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',session_id:claude,source:'startup'});
+    assert.deepEqual(f.agents.get(parent).watching?.map(w=>w.taskId),[existing,claude]);
+    confirmClaudeChannel(f.agents,terminal);assert.equal(f.agents.get(claude).lastTurnId,undefined,'probe is not worker completion');
+    assert.equal(f.agents.channel(terminal).content,'initial Claude instruction');
+    f.agents.claudeEvent(terminal,{hook_event_name:'Stop',session_id:claude});
+    assert.ok(f.agents.get(parent).reports?.some(r=>r.sourceTaskId===claude));
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('MCP polling without a Channels listener leaves instructions queued and times out without claiming connected',async()=>{
+  const f=fixture(),terminal=randomUUID(),id=randomUUID();
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{},'keep queued');
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',source:'startup',session_id:id});
+    const probe=f.agents.channel(terminal);assert.equal(probe.meta?.kind,'probe');
+    assert.throws(()=>f.agents.acknowledgeChannel(terminal,randomUUID()),/一致/);
+    assert.deepEqual(f.agents.channel(terminal),{});assert.equal(f.agents.get(id).pending[0].text,'keep queued');assert.equal(f.agents.get(id).status,'idle');
+    const now=Date.now;try{Date.now=()=>now()+61000;assert.deepEqual(f.agents.channel(terminal),{});}finally{Date.now=now;}
+    assert.equal(f.agents.get(id).channelState,'unavailable');assert.equal(f.agents.get(id).pending.length,1);assert.equal(f.agents.get(id).turnId,undefined);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('manual Claude interruption only affects active work and stale Stop cannot finish the next turn',async()=>{
+  const f=fixture(),terminal=randomUUID(),id=randomUUID();
+  const event=(name:string,extra={})=>f.agents.claudeEvent(terminal,{hook_event_name:name,session_id:id,...extra});
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{});event('SessionStart');confirmClaudeChannel(f.agents,terminal);
+    f.agents.claudeInterrupted(terminal);assert.equal(f.agents.get(id).status,'idle','Esc in menus is not an interrupt');
+    await f.agents.send(id,'first','queue');f.agents.channel(terminal);f.agents.claudeInterrupted(terminal);
+    assert.equal(f.agents.get(id).status,'interrupted');assert.equal(f.agents.get(id).turnId,undefined);
+    event('PostToolUse');assert.equal(f.agents.get(id).status,'interrupted');
+    await f.agents.send(id,'second','queue');assert.equal(f.agents.channel(terminal).content,'second');const second=f.agents.get(id).turnId;
+    event('Stop',{observed_at:String(Date.now()-10000)});assert.equal(f.agents.get(id).turnId,second);
+    event('Stop',{assistant_timestamp:new Date(0).toISOString()});assert.equal(f.agents.get(id).turnId,second);
+    event('Stop');assert.equal(f.agents.get(id).lastTurnId,second);
+    await f.agents.send(id,'permission','queue');f.agents.channel(terminal);event('PermissionRequest');
+    f.agents.claudeInterrupted(terminal);assert.equal(f.agents.get(id).status,'waiting','Esc may only dismiss a menu');
+    f.agents.claudeInterrupted(terminal,true);assert.equal(f.agents.get(id).status,'interrupted','Ctrl-C cancels a waiting turn');
+    await f.agents.send(id,'recover waiting','queue');assert.equal(f.agents.channel(terminal).content,'recover waiting');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('clear/resume resets an unacknowledged probe without replaying old session instructions',async()=>{
+  const f=fixture(),terminal=randomUUID(),old=randomUUID(),next=randomUUID();
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{},'old instruction');
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',session_id:old});
+    const first=f.agents.channel(terminal),firstNonce=first.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',source:'clear',session_id:next});
+    const second=f.agents.channel(terminal),secondNonce=second.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    assert.notEqual(secondNonce,firstNonce);assert.throws(()=>f.agents.acknowledgeChannel(terminal,firstNonce),/一致/);
+    assert.equal(f.agents.get(old).pending[0].text,'old instruction');assert.deepEqual(f.agents.get(next).pending,[]);
+    f.agents.claudeEvent(terminal,{hook_event_name:'UserPromptSubmit',session_id:next});f.agents.acknowledgeChannel(terminal,secondNonce);
+    f.agents.claudeInterrupted(terminal);await f.agents.send(next,'new instruction','queue');assert.equal(f.agents.channel(terminal).content,'new instruction','interruption after ack clears probe Stop barrier');
   }finally{await f.agents.shutdown();f.store.close();}
 });

@@ -331,6 +331,20 @@ struct Sidebar: View {
             .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.worktree-startup") != true)
             Divider()
         }
+        Menu("既定のAI") {
+            Picker("会話", selection: Binding(get: {project.conversationProvider},
+                set: {provider in Task {await model.setDefaultProvider(project, provider: provider, delegation: false)}})) {
+                Text("Codex").tag("codex")
+                Text("Claude Code").tag("claude")
+            }
+            Picker("委任", selection: Binding(get: {project.delegationProvider},
+                set: {provider in Task {await model.setDefaultProvider(project, provider: provider, delegation: true)}})) {
+                Text("Codex").tag("codex")
+                Text("Claude Code").tag("claude")
+            }
+        }
+        .disabled(!model.connected || model.isBusy("project.settings.\(project.id)") || model.state.features?.contains("project.default-providers") != true)
+        Divider()
         Menu("Workspaceへ移動") {
             ForEach(model.sidebarSpaces.spaces.filter {$0.id != space.id}) {space in
                 Button(space.name) {model.moveProject(project.id, to: space.id)}

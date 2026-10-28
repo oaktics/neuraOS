@@ -20,10 +20,10 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
   const headers={authorization:`Bearer ${d.token}`};
   const p=(await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.add',path:repo}}})).json();
   const workspace=d.store.state().workspaces[0];
-  const probe=root+'/claude';await writeFile(probe,'#!/bin/sh\necho --mcp-config --append-system-prompt\n',{mode:0o700});
+  const probe=root+'/claude';await writeFile(probe,'#!/bin/sh\nif [ "$1" = --version ]; then echo 2.1.312; else echo --mcp-config --append-system-prompt --settings; fi\n',{mode:0o700});
   const terminalId=randomUUID();
   const launchArgs=await claudeMCPArguments(probe,{endpoint:()=>`http://127.0.0.1:${address.port}`,tokenPath:root+'/data/daemon-token'},workspace.id,terminalId);
-  const config=JSON.parse(launchArgs[1]).mcpServers.neuraos;
+  const config=JSON.parse(launchArgs[launchArgs.indexOf('--mcp-config')+1]).mcpServers.neuraos;
   const child=spawn(config.command,config.args,{env:{...process.env,...config.env},stdio:'pipe'});
   child.stderr.resume();let sequence=0;const pending=new Map<number,(value:any)=>void>();
   const lines=createInterface({input:child.stdout});lines.on('line',line=>{const m=JSON.parse(line);pending.get(m.id)?.(m);pending.delete(m.id);});
@@ -82,6 +82,18 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.equal(JSON.parse((await tool('workspace_delete',cleanupArgs)).content[0].text).verifiedAbsent,true);
     assert.equal(JSON.parse((await tool('workspace_delete',cleanupArgs)).content[0].text).verifiedAbsent,true,'retry preserves idempotency after deletion');
 
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.set-worktree-startup',projectId:p.id,providers:['codex']}}});
+    const beforeTerminals=d.store.state().terminals.length,beforeTasks=d.store.list('agents').length;
+    const createArgs={operationId:randomUUID(),projectId:p.id,name:'visible own work',baseRef:'HEAD'};
+    const own=JSON.parse((await tool('workspace_create',createArgs)).content[0].text);
+    assert.equal(own.name,'visible own work');assert.ok(own.setup,'setup is retained when agent startup is skipped');
+    for(let i=0;i<150&&d.store.state().workspaces.find(w=>w.id===own.id)?.setup?.status==='running';i++)await new Promise(r=>setTimeout(r,20));
+    const ownListed=JSON.parse((await tool('workspace_list')).content[0].text).workspaces.find((w:any)=>w.id===own.id);
+    assert.equal(ownListed.setup.status,'succeeded');assert.match(ownListed.setup.output,/ready/);
+    assert.equal(d.store.state().terminals.length,beforeTerminals);assert.equal(d.store.list('agents').length,beforeTasks);
+    assert.equal(JSON.parse((await tool('workspace_create',createArgs)).content[0].text).id,own.id);
+    assert.equal(d.store.state().workspaces.filter(w=>w.id===own.id).length,1);
+    assert.equal(d.store.state().terminals.length,beforeTerminals,'startup provider must never start an agent for workspace_create');
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
   }finally{child.kill();lines.close();await d.app.close();if(old===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=old;await rm(root,{recursive:true,force:true});}
 });

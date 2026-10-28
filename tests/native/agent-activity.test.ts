@@ -78,7 +78,11 @@ test('real hook helper delivers only whitelisted metadata to its own private soc
   try{
     assert.equal((await stat(dirname(bridge.path))).mode&0o777,0o700);
     assert.deepEqual(await invoke(bridge.path,{hook_event_name:'PreToolUse',tool_name:'AskUserQuestion',tool_input:{secret:'never forward'},prompt:'private'}),{code:0,output:''});
-    assert.deepEqual(received,[{hook_event_name:'PreToolUse',tool_name:'AskUserQuestion'}]);
+    assert.match((received[0] as any).observed_at,/^\d+$/);
+    const {observed_at,...metadata}=received[0] as any;assert.deepEqual(metadata,{hook_event_name:'PreToolUse',tool_name:'AskUserQuestion'});
+    const long='x'.repeat(12000)+' final verification proof';
+    await invoke(bridge.path,{hook_event_name:'Stop',last_assistant_message:long});
+    assert.equal((received[1] as any).last_assistant_message,long.slice(-8000));
     assert.deepEqual(await invoke('/tmp/nonexistent-neura-activity.sock',{}),{code:0,output:''});
   }finally{await bridge.close();}
   await assert.rejects(access(dirname(bridge.path)));
@@ -155,4 +159,11 @@ test('notification events distinguish completion from interrupt and suppress dup
     event('Stop');assert.equal(tracker.notification,undefined);
     event('UserPromptSubmit');event('StopFailure');assert.equal(tracker.notification,undefined);
   }
+});
+
+test('delayed completion metadata cannot mark a newer Claude turn idle',()=>{
+  const tracker=new ActivityTracker();tracker.accept({hook_event_name:'UserPromptSubmit'});tracker.interrupt();
+  tracker.accept({hook_event_name:'UserPromptSubmit',observed_at:String(Date.now())});
+  assert.equal(tracker.accept({hook_event_name:'Stop',observed_at:String(Date.now()-10000)}),'working');
+  assert.equal(tracker.accept({hook_event_name:'Stop',assistant_timestamp:new Date(0).toISOString()}),'working');
 });

@@ -1,3 +1,4 @@
+import {validChannelCredential} from './channel-credentials.ts';
 import {detectSetup,setupPath,runSetup} from './worktree-setup.ts';
 import {Agents} from './agents.ts';
 import {Diagnostics} from './diagnostics.ts';
@@ -7,7 +8,7 @@ import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {mkdir,readFile,writeFile,chmod,stat,realpath} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
-import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command,type PullRequestSource} from './contracts.ts';
+import {Envelope,Fault,requireValue,daemonFeatures,projectDefaultProvider,type Workspace,type Project,type TerminalRecord,type Command,type PullRequestSource} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
 import {ProviderUsageService} from './provider-usage.ts';
@@ -121,6 +122,13 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const updated={...project,worktreeStartup:c.providers};
         store.put('projects',updated);return updated;
       }
+      case 'project.set-default-providers':{
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        const updated={...project,
+          ...(c.defaultConversationProvider!==undefined?{defaultConversationProvider:c.defaultConversationProvider}:{}),
+          ...(c.defaultDelegationProvider!==undefined?{defaultDelegationProvider:c.defaultDelegationProvider}:{})};
+        store.put('projects',updated);return updated;
+      }
       case 'project.set-worktree-setup':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','Gitリポジトリを選択してください。');
@@ -197,7 +205,12 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         store.deleteWorkspace(record.id);
         return {ok:true};
       }
-      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'terminal.open':{
+        if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);
+        const record=workspace(c.workspaceId),previous=c.resumeId?agents.get(c.resumeId):undefined;
+        const provider=c.provider??(previous?(previous.provider??'codex'):projectDefaultProvider(store.get<Project>('projects',record.projectId),'conversation'));
+        return terminals.open(record,provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      }
       case 'agent.report':return agents.report(c.agentId,c.text,c.sourceTerminalId);
       case 'agent.ack':return agents.ack(c.agentId,c.reportIds);
       case 'agent.watch':return agents.watch(c.agentId,c.taskIds);
@@ -274,6 +287,16 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     });if(isDelete){queue=result;githubQueue=result;}else if(isGitHub)githubQueue=result;else if(isRemoteWorkspace)workspaceNetworkQueue=result;else queue=result;
     try {const value=await result;if(traced)diagnostics.record('operation.success',command.type,operationId,performance.now()-started);return value;}
     catch(error){diagnostics.record('operation.failure',command.type,operationId,performance.now()-started);throw error;}
+  });
+  app.post('/v1/claude/:terminalId/channel',async req=>{
+    const terminalId=z.uuid().parse((req.params as {terminalId:string}).terminalId);
+    if(!await validChannelCredential(tokenPath,terminalId,req.headers['x-neura-channel-token']))throw new Fault('channel_forbidden','このターミナルのChannels認証が必要です。',403);
+    return agents.channel(terminalId);
+  });
+  app.post('/v1/claude/:terminalId/channel-ack',async req=>{
+    const terminalId=z.uuid().parse((req.params as {terminalId:string}).terminalId);
+    if(!await validChannelCredential(tokenPath,terminalId,req.headers['x-neura-channel-token']))throw new Fault('channel_forbidden','このターミナルのChannels認証が必要です。',403);
+    return agents.acknowledgeChannel(terminalId,z.object({nonce:z.uuid()}).parse(req.body).nonce);
   });
   app.get('/v1/agents',async()=>({agents:agents.list(),revision:store.state().revision}));
   app.get('/v1/agents/:id',async req=>agents.read(z.uuid().parse((req.params as {id:string}).id),z.string().max(4096).optional().parse((req.query as {cursor?:string}).cursor)));

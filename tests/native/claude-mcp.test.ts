@@ -37,7 +37,8 @@ setInterval(()=>{},1000);
     assert.match(config.args[0],/supervision-mcp\.mjs$/);
     assert.equal(args[args.indexOf('--append-system-prompt')+1],claudeSessionInstructions);
     assert.ok(claudeSessionInstructions.startsWith(sharedSessionInstructions));
-    assert.match(claudeSessionInstructions,/not wake this Claude session/);
+    assert.match(claudeSessionInstructions,/registered neuraOS task/);
+    assert.ok(args.includes('--dangerously-load-development-channels'));
     assert.ok(JSON.parse(args[args.indexOf('--settings')+1]).hooks.SessionStart);
     assert.equal(JSON.stringify(args).includes(d.token),false,'bearer secret is not in argv');
     assert.equal(args.includes('--strict-mcp-config'),false,'retain other configured MCP servers');
@@ -52,4 +53,50 @@ test('unsupported Claude CLI fails with an actionable error before starting a te
     await writeFile(program,'#!/bin/sh\necho --settings\n',{mode:0o700});
     await assert.rejects(claudeMCPArguments(program,{endpoint:()=> 'http://127.0.0.1:1234',tokenPath:'/tmp/token'},randomUUID(),randomUUID()),{code:'claude_mcp_unsupported'});
   }finally{await rm(root,{recursive:true,force:true});}
+});
+
+test('Claude registration retains terminal identity; channel credentials reject other terminals before consuming queue',async()=>{
+  const root=await mkdtemp('/tmp/neura-channel-auth-'),program=root+'/claude',sessionId=randomUUID();
+  await writeFile(program,`#!/usr/bin/env node
+import {createConnection} from 'node:net';
+if(process.argv.includes('--help')){console.log('--mcp-config --append-system-prompt --settings');process.exit(0);}
+if(process.argv.includes('--version')){console.log('2.1.312');process.exit(0);}
+process.on('SIGINT',()=>{});
+const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);
+socket.on('error',()=>{});socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name:'SessionStart',source:'startup',session_id:${JSON.stringify(sessionId)}})+'\\n'));
+process.stdin.on('data',()=>{const s=createConnection(process.env.NEURA_ACTIVITY_SOCKET);s.on('error',()=>{});s.on('connect',()=>s.end(JSON.stringify({hook_event_name:'Stop',session_id:${JSON.stringify(sessionId)}})+'\\n'));});
+setInterval(()=>{},1000);
+`,{mode:0o700});
+  const old=process.env.NEURA_CLAUDE_PATH;process.env.NEURA_CLAUDE_PATH=program;
+  const d=await createDaemon(root+'/data');const headers={authorization:`Bearer ${d.token}`};
+  const {channelCredential}=await import('../../apps/daemon/src/channel-credentials.ts');
+  try{
+    const workspace={id:randomUUID(),projectId:randomUUID(),name:'test',path:root,branch:'main',kind:'worktree' as const,createdAt:''};d.store.put('workspaces',workspace);
+    const response=await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.open',workspaceId:workspace.id,provider:'claude',prompt:'first instruction'}}});
+    assert.equal(response.statusCode,200,response.body);const terminal=response.json();
+    for(let i=0;i<150&&!d.store.state().terminals[0].agentId;i++)await new Promise(r=>setTimeout(r,20));
+    assert.equal(d.store.state().terminals[0].agentId,sessionId,'activity store must preserve registration agentId');
+    const poll=(credential?:string)=>d.app.inject({method:'POST',url:`/v1/claude/${terminal.id}/channel`,headers:{...headers,...(credential?{'x-neura-channel-token':credential}:{})},payload:{}});
+    assert.equal((await poll()).statusCode,403);
+    assert.equal((await poll(await channelCredential(root+'/data/daemon-token',randomUUID()))).statusCode,403);
+    const self=await channelCredential(root+'/data/daemon-token',terminal.id);
+    const probe=await poll(self);assert.equal(probe.statusCode,200);assert.equal(probe.json().meta.kind,'probe');
+    assert.deepEqual((await poll(self)).json(),{},'initialized MCP without channel receipt cannot consume instructions');
+    const before=d.store.list<any>('agents').find(a=>a.id===sessionId);assert.equal(before.status,'idle');assert.equal(before.pending[0].text,'first instruction');
+    const nonce=probe.json().content.match(/nonce ([a-f0-9-]{36})/)[1];
+    const receipt=await d.app.inject({method:'POST',url:`/v1/claude/${terminal.id}/channel-ack`,headers:{...headers,'x-neura-channel-token':self},payload:{nonce}});assert.equal(receipt.statusCode,200);
+    await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:'12777777-2222-4333-8444-555555555551',data:'stop\r'}}});
+    await new Promise(r=>setTimeout(r,100));
+    const delivery=await poll(self);assert.equal(delivery.statusCode,200);assert.equal(delivery.json().content,'first instruction');
+    assert.deepEqual((await poll(self)).json(),{});
+    for(const key of ['\x1b','\x03']){
+      await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'terminal.input',terminalId:terminal.id,clientId:'12777777-2222-4333-8444-555555555551',data:key}}});
+      assert.equal(d.store.get<any>('agents',sessionId).status,'interrupted');assert.equal(d.store.get<any>('agents',sessionId).turnId,undefined);
+      await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.send',agentId:sessionId,text:'recover native interrupt'}}});
+      assert.equal((await poll(self)).json().content,'recover native interrupt');
+    }
+    const recipient=randomUUID();d.store.put('agents',{id:recipient,terminalId:randomUUID(),workspaceId:workspace.id,name:'recipient',status:'interrupted',pending:[],requests:[],updatedAt:''});
+    const report=await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'agent.report',agentId:recipient,text:'proof',sourceTerminalId:terminal.id}}});
+    assert.equal(report.statusCode,200);assert.equal((d.store.list('agents').find((a:any)=>a.id===recipient) as any).reports[0].sourceTaskId,sessionId);
+  }finally{await d.app.close();if(old===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=old;await rm(root,{recursive:true,force:true});}
 });
