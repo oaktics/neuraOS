@@ -71,6 +71,7 @@ struct WorkspaceView: View {
     var body: some View {
         VStack(spacing: 0) {
             tabBar
+            if workspace.setup != nil {WorktreeSetupStatus(workspace: workspace)}
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
                 contents.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
