@@ -12,6 +12,29 @@ struct SidebarSpaces: Codable {
     var spaces = [SidebarSpace(name: "メイン")]
     var activeId: String?
     var projectSpaces: [String: String] = [:]
+    // Optional for compatibility with layouts saved before project reordering.
+    var projectOrder: [String: [String]]?
+    func projects(in spaceId: String, from projects: [Project]) -> [Project] {
+        let members = projects.filter {owner(of: $0.id) == spaceId}
+        let order = projectOrder?[spaceId] ?? []
+        let ranks = Dictionary(order.enumerated().map {($0.element, $0.offset)}, uniquingKeysWith: {first, _ in first})
+        return members.enumerated().sorted {
+            let left = ranks[$0.element.id] ?? Int.max
+            let right = ranks[$1.element.id] ?? Int.max
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+    }
+    @discardableResult
+    mutating func reorderProject(_ id: String, onto targetId: String, in spaceId: String, projects: [Project]) -> Bool {
+        guard spaces.contains(where: {$0.id == spaceId}), id != targetId else {return false}
+        var ids = self.projects(in: spaceId, from: projects).map(\.id)
+        guard let source = ids.firstIndex(of: id), let target = ids.firstIndex(of: targetId) else {return false}
+        ids.remove(at: source)
+        ids.insert(id, at: target)
+        if projectOrder == nil {projectOrder = [:]}
+        projectOrder?[spaceId] = ids
+        return true
+    }
     var active: SidebarSpace {spaces.first {$0.id == activeId} ?? spaces[0]}
     func owner(of projectId: String) -> String {projectSpaces[projectId] ?? spaces[0].id}
     mutating func create(name: String) {
@@ -212,5 +235,22 @@ struct NewSidebarSpaceSheet: View {
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(24).frame(width: 380)
+    }
+}
+
+/// Private drag payload keeps project ordering separate from file and text drops.
+struct SidebarProjectDrag: Codable {
+    static let typeIdentifier = "com.neuraos.sidebar-project"
+    let projectId: String
+    let spaceId: String
+
+    var provider: NSItemProvider {
+        let provider = NSItemProvider()
+        let data = try? JSONEncoder().encode(self)
+        provider.registerDataRepresentation(forTypeIdentifier: Self.typeIdentifier, visibility: .ownProcess) {completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
 }
