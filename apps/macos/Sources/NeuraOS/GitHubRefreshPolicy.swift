@@ -2,6 +2,8 @@ import Foundation
 
 struct GitHubRefreshPolicy {
     static func interval(state: String?, checks: [String], selected: Bool = true) -> TimeInterval? {
+        // Discover externally-created PRs even when the last PR is terminal.
+        if selected {return 60}
         if state == "CLOSED" {return 900}
         if state == "MERGED" {
             let terminal = Set(["SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"])
