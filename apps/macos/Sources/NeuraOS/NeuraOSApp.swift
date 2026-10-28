@@ -187,7 +187,7 @@ struct Sidebar: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Image(systemName: "square.stack").foregroundStyle(.secondary)
-                Text(model.sidebarSpaces.active.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                SidebarSpaceName(space: model.sidebarSpaces.active).id(model.sidebarSpaces.active.id)
                 Spacer()
                 Menu {
                     ForEach(model.sidebarSpaces.spaces) {space in
@@ -235,6 +235,13 @@ struct Sidebar: View {
                         ForEach(model.sidebarSpaces.spaces) {space in
                             SidebarSpaceButton(space: space, isSelected: space.id == model.sidebarSpaces.active.id) {
                                 switchSpace(space.id)
+                            }
+                            .draggable(SidebarSpaceDrag(id: space.id))
+                            .dropDestination(for: SidebarSpaceDrag.self) {items, _ in
+                                guard !settling, swipeTranslation == 0, let item = items.first,
+                                      model.sidebarSpaces.spaces.contains(where: {$0.id == item.id}) else {return false}
+                                model.sidebarSpaces.move(item.id, to: space.id)
+                                return true
                             }
                         }
                     }
