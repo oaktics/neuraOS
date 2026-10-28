@@ -50,7 +50,7 @@ export class Agents {
       // Materialize the empty thread before the TUI resolves its resume ID. This does not start inference.
       if(!resumeId)await rpc.call('thread/inject_items',{threadId:thread.id,items:[{type:'message',role:'developer',content:[{type:'input_text',text:`This Codex session is managed by neuraOS. Your neuraOS task ID is ${thread.id}. Its conversation can be inspected and directed from the neuraOS task tools and UI.`}]}]});
       if(!sameWorkspacePath(thread.cwd,workspace.path))throw new Fault('agent_workspace_mismatch','会話の作業フォルダが一致しません。',409);
-      this.register(terminalId,workspace,thread,parentTaskId);
+      if(!this.register(terminalId,workspace,thread,parentTaskId))throw new Fault('agent_already_running','この会話は別のターミナルで実行中です。',409);
       return {endpoint:rpc.endpoint,threadId:thread.id};
     }catch(e){await this.close(terminalId);throw e;}
   }
@@ -65,7 +65,7 @@ export class Agents {
           if(!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)continue;
           const result=await rpc.call('thread/resume',{threadId:id,excludeTurns:true});
           if(this.backends.get(terminalId)===rpc){
-            this.register(terminalId,workspace,result.thread);
+            if(!this.register(terminalId,workspace,result.thread))continue;
             const terminal=this.store.get<TerminalRecord>('terminals',terminalId);
             if(terminal)this.store.put('terminals',{...terminal,sessionId:id,agentId:id,sessionName:result.thread.name??undefined});
             await rpc.call('thread/inject_items',{threadId:id,items:[{type:'message',role:'developer',content:[{type:'input_text',text:`Your neuraOS task ID is ${id}. Use the neuraos MCP tools to discover and supervise other worktree sessions.`}]}]});
@@ -79,15 +79,21 @@ export class Agents {
     }while(cursor&&this.backends.get(terminalId)===rpc);
   }
   private register(terminalId:string,workspace:Workspace,thread:any,parentTaskId?:string){
-    if(typeof thread?.id!=='string'||!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)return;
+    if(typeof thread?.id!=='string'||!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)return false;
     const existing=this.store.get<AgentRecord>('agents',thread.id);
-    if(existing?.terminalId===terminalId){if(parentTaskId||thread.name&&thread.name!==existing.name)this.save({...existing,name:thread.name||existing.name,parentTaskId:parentTaskId??existing.parentTaskId});return;}
-    this.save({id:thread.id,terminalId,workspaceId:workspace.id,name:thread.name||existing?.name||workspace.name,status:thread.status?.type==='active'?'working':'idle',updatedAt:'',pending:existing?.pending??[],requests:[],parentTaskId:parentTaskId??existing?.parentTaskId,watching:existing?.watching,lastTurnId:existing?.lastTurnId,lastTurnStatus:existing?.lastTurnStatus,summary:existing?.summary});
+    if(existing&&existing.terminalId!==terminalId&&this.backends.has(existing.terminalId)){
+      // History selection happens inside the TUI, bypassing open(resumeId). Never
+      // transfer a live session's identity, turn or watches to that second server.
+      if(this.store.get<TerminalRecord>('terminals',terminalId))this.store.append(terminalId,'\r\nneuraOS: この会話は別のターミナルで実行中です。元の作業を開いてください。\r\n');
+      void this.close(terminalId).catch(()=>{});return false;
+    }
+    if(existing?.terminalId===terminalId){if(parentTaskId||thread.name&&thread.name!==existing.name)this.save({...existing,name:thread.name||existing.name,parentTaskId:parentTaskId??existing.parentTaskId});return true;}
+    this.save({id:thread.id,terminalId,workspaceId:workspace.id,name:thread.name||existing?.name||workspace.name,status:thread.status?.type==='active'?'working':'idle',updatedAt:'',pending:existing?.pending??[],requests:[],parentTaskId:parentTaskId??existing?.parentTaskId,watching:existing?.watching,lastTurnId:existing?.lastTurnId,lastTurnStatus:existing?.lastTurnStatus,summary:existing?.summary});return true;
   }
   private event(terminalId:string,workspace:Workspace,event:RPCEvent){
     if(!this.store.get<Workspace>('workspaces',workspace.id))return;
     if(event.method==='thread/started'){
-      this.register(terminalId,workspace,event.params?.thread);
+      if(!this.register(terminalId,workspace,event.params?.thread))return;
       const thread=event.params?.thread,current=this.store.get<TerminalRecord>('terminals',terminalId);
       if(current&&thread?.cwd&&sameWorkspacePath(thread.cwd,workspace.path)&&!thread.parentThreadId)this.store.put('terminals',{...current,sessionId:thread.id,agentId:thread.id,sessionName:thread.name??undefined});
     }

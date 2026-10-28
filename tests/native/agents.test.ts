@@ -150,3 +150,17 @@ test('cold resume accepts the same workspace through its canonical filesystem pa
     await restarted.shutdown();
   }finally{await f.agents.shutdown();f.store.close();await rm(root+'-alias');await rm(root,{recursive:true,force:true});}
 });
+
+test('history selection in another terminal cannot take over a live session',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,second=(await f.open()).threadId!;
+    await f.agents.send(worker,'original work','queue');const owner=f.agents.get(worker);
+    f.clients[1].emit({method:'thread/started',params:{thread:{id:worker,cwd:f.workspace.path,status:{type:'idle'}}}});await tick();
+    assert.equal(f.agents.get(worker).terminalId,owner.terminalId);
+    assert.equal(f.agents.get(worker).turnId,owner.turnId);
+    await assert.rejects(f.agents.send(second,'must not run','queue'),/停止/);
+    f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:owner.turnId,status:'completed'}}});
+    assert.equal(f.agents.get(worker).lastTurnStatus,'completed');
+    assert.equal(f.agents.get(worker).status,'idle');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
