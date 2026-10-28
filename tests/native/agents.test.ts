@@ -1,12 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
+import {mkdtemp,symlink,rm,realpath} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {Store} from '../../apps/daemon/src/store.ts';
 import {Agents} from '../../apps/daemon/src/agents.ts';
 import {CodexRPC,type RPCEvent} from '../../apps/daemon/src/codex-rpc.ts';
 import type {Workspace} from '../../apps/daemon/src/contracts.ts';
 
-function fixture(){
+function fixture(reportedCwd?:string){
   const store=new Store(':memory:');
   const workspace:Workspace={id:randomUUID(),projectId:randomUUID(),name:'worker',path:'/tmp/worker',branch:'test',kind:'worktree',createdAt:''};store.put('workspaces',workspace);
   const clients:{emit:(e:RPCEvent)=>void;calls:{method:string;params:any}[];replies:any[];failStart:boolean}[]=[];
@@ -14,7 +15,7 @@ function fixture(){
     const client={emit,calls:[] as {method:string;params:any}[],replies:[] as any[],failStart:false};clients.push(client);
     return {endpoint:'unix:///tmp/fake',pid:999999,
       async call(method:string,params:any){client.calls.push({method,params});
-        if(method==='thread/start'||method==='thread/resume')return {thread:{id:params.threadId??randomUUID(),cwd:workspace.path,status:{type:'idle'}}};
+        if(method==='thread/start'||method==='thread/resume')return {thread:{id:params.threadId??randomUUID(),cwd:reportedCwd??workspace.path,status:{type:'idle'}}};
         if(method==='thread/loaded/list')return {data:[],nextCursor:null};
         if(method==='thread/turns/list')return {data:[{id:'history',items:[{type:'agentMessage',text:'result'}]}],nextCursor:null};
         if(method==='turn/start'){
@@ -122,4 +123,30 @@ test('a completion saved before a crash is delivered once on recovery without ru
     const twice=new Agents(f.store,()=>'', '',f.factory);assert.equal(twice.get(main).pending.length,1);
     await recovered.shutdown();await twice.shutdown();
   }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('a new failed turn never reports the previous turn summary',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(worker,'first','queue');let turn=f.agents.get(worker).turnId!;
+    f.clients[0].emit({method:'item/completed',params:{threadId:worker,turnId:turn,item:{type:'agentMessage',text:'Old tests passed'}}});
+    f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:turn,status:'completed'}}});
+    f.agents.watch(main,[worker]);await f.agents.send(worker,'second','queue');turn=f.agents.get(worker).turnId!;
+    assert.equal(f.agents.get(worker).summary,undefined);
+    f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:turn,status:'failed'}}});await tick();
+    const report=f.clients[1].calls.find(c=>c.method==='turn/start')!.params.toolOutput.output;
+    assert.doesNotMatch(report,/Old tests passed/);assert.match(report,/failed/);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+
+test('cold resume accepts the same workspace through its canonical filesystem path',async()=>{
+  const root=await mkdtemp('/tmp/neura-alias-test-');await symlink(root,root+'-alias');
+  const f=fixture(await realpath(root));f.workspace.path=root+'-alias';f.store.put('workspaces',f.workspace);
+  try{
+    const id=(await f.open()).threadId!;await f.agents.shutdown();
+    const restarted=new Agents(f.store,()=>'', '',f.factory);
+    assert.equal((await restarted.open('fake',{},f.workspace,randomUUID(),id)).threadId,id);
+    await restarted.shutdown();
+  }finally{await f.agents.shutdown();f.store.close();await rm(root+'-alias');await rm(root,{recursive:true,force:true});}
 });

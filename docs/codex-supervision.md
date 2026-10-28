@@ -24,7 +24,7 @@ neuraOSから起動したCodexは、他のCodexや「Codexの作業一覧」か�
 
 ## 実装
 
-Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。
+Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。App Serverの所有プロセスはDaemonとのパイプ切断を検知し、Daemonの異常終了時にも子プロセス群を停止します。
 
 Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・terminal・状態・ターンID・未送信の指示・監視対象を保存します。起動順や親子関係に依存しません。CLIの画面テキストから会話IDや完了を推測しません。
 
@@ -66,6 +66,6 @@ pnpm build
 NEURA_LIVE_CODEX_TEST=1 node --import tsx scripts/native/supervision-smoke.ts
 ```
 
-この検証は、先に起動したworktreeのCodexを後から起動したメインがMCPで発見すること、指示の重複排除、子の応答終了後に待機中のメインがtool outputで自動再開することを実際のCodexで確認します。モデルの会話履歴はCodex側に保存されます。
+この検証は、先に起動したworktreeのCodexを後から起動したメインがMCPで発見すること、指示の重複排除、子の応答終了後に待機中のメインがtool outputで自動再開すること、Daemon再起動後の履歴読み取りと同一会話の再開を実際のCodexで確認します。モデルの会話履歴はCodex側に保存されます。
 
 仕様参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)

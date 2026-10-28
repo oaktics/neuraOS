@@ -8,7 +8,7 @@ import type {AgentRecord} from '../../apps/daemon/src/agents.ts';
 if(process.env.NEURA_LIVE_CODEX_TEST!=='1')throw new Error('Set NEURA_LIVE_CODEX_TEST=1 to run real model turns.');
 const root=await mkdtemp('/tmp/neura-supervision-smoke-'),repo=root+'/repo';
 await mkdir(repo);await git(repo,['init','-b','main']);await git(repo,['config','user.name','Smoke']);await git(repo,['config','user.email','smoke@example.invalid']);await writeFile(repo+'/README.md','temporary smoke repository\n');await git(repo,['add','.']);await git(repo,['commit','-m','initial']);
-const daemon=await createDaemon(root+'/data');await daemon.app.listen({host:'127.0.0.1',port:0});
+let daemon=await createDaemon(root+'/data');await daemon.app.listen({host:'127.0.0.1',port:0});
 const headers={authorization:`Bearer ${daemon.token}`};
 async function command(command:unknown,operationId=randomUUID()){const response=await daemon.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId,command}});assert.equal(response.statusCode,200,response.body);return response.json();}
 async function finished(id:string,previous?:string){
@@ -38,5 +38,11 @@ try{
   assert.ok(after.history.data.flatMap((t:any)=>t.items).some((i:any)=>i.type==='functionCallOutput'&&i.name==='neuraos_task_event'));
   console.log('Worker completed; idle supervisor resumed from a tool report. Duplicate send was not replayed.');
   assert.equal((await git(repo,['status','--porcelain'])).trim(),'');
+  await daemon.app.close();daemon=await createDaemon(root+'/data');await daemon.app.listen({host:'127.0.0.1',port:0});
+  const recovered=(await daemon.app.inject({url:'/v1/agents/'+worker.agentId,headers})).json();assert.equal(recovered.agent.status,'interrupted');assert.ok(recovered.history.data.length);
+  const resumed=await command({type:'terminal.open',provider:'codex',workspaceId:workerWorkspace.id,resumeId:worker.agentId});assert.equal(resumed.agentId,worker.agentId);
+  await command({type:'agent.send',agentId:worker.agentId,text:'Reply exactly RESUMED_OK. Do not use tools.',mode:'queue'});
+  const previous=recovered.agent.lastTurnId;assert.match((await finished(worker.agentId,previous)).summary??'',/RESUMED_OK/);
+  console.log('Cold daemon restart, offline conversation read and exact-thread resume passed.');
   console.log(JSON.stringify({result:'passed',workerThread:worker.agentId,supervisorThread:main.agentId,supervisorTurn:followup.lastTurnId}));
 }finally{await daemon.app.close();await rm(root,{recursive:true,force:true});}

@@ -170,7 +170,8 @@ struct AgentSupervisor: View {
     private func read() async {
         guard let id = selected else {return}
         let stamp = id + (current?.updatedAt ?? "")
-        guard lastReadStamp != stamp else {return}
+        // Command output can change without an agent message or registry timestamp.
+        guard lastReadStamp != stamp || ["working", "waiting"].contains(current?.status ?? "") else {return}
         do {let value: AgentConversation = try await model.api.get("v1/agents/\(id)"); guard selected == id else {return}; history.refresh(value.history); lastReadStamp = stamp; error = nil}
         catch {self.error = error.localizedDescription}
     }

@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import {spawn,execFile,type ChildProcessWithoutNullStreams} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {parseProcessTable,processGroupAlive} from './terminals.ts';
 import {mkdtemp,access,rm} from 'node:fs/promises';
@@ -28,7 +29,7 @@ export class CodexRPC {
   }
   static async start(program:string,env:Record<string,string>,args:string[],event:(event:RPCEvent)=>void){
     const directory=await mkdtemp('/tmp/neura-codex-'),socket=join(directory,'server.sock');
-    const server=spawn(program,['app-server','--listen',`unix://${socket}`,...args],{env,detached:true,stdio:'pipe'});
+    const server=spawn(process.execPath,[fileURLToPath(new URL('./codex-host.mjs',import.meta.url)),program,'app-server','--listen',`unix://${socket}`,...args],{env,detached:true,stdio:'pipe'});
     let startupError:Error|undefined;server.on('error',e=>{startupError=e;});server.stderr.resume();server.stdout.resume();
     try {
       let ready=false;

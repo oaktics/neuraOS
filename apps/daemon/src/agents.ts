@@ -1,9 +1,15 @@
 import {executable,terminalEnvironment} from './terminals.ts';
+import {realpathSync} from 'node:fs';
+import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {randomUUID} from 'node:crypto';
 import {CodexRPC,type RPCEvent} from './codex-rpc.ts';
 import {Fault,requireValue,type Workspace,type TerminalRecord} from './contracts.ts';
 import type {Store} from './store.ts';
+
+function sameWorkspacePath(left:string,right:string){
+  try{return realpathSync(left)===realpathSync(right);}catch{return resolve(left)===resolve(right);}
+}
 
 export interface AgentRecord {
   id:string;terminalId:string;workspaceId:string;name:string;status:'idle'|'working'|'waiting'|'interrupted'|'failed';
@@ -43,7 +49,7 @@ export class Agents {
       const thread=result.thread;
       // Materialize the empty thread before the TUI resolves its resume ID. This does not start inference.
       if(!resumeId)await rpc.call('thread/inject_items',{threadId:thread.id,items:[{type:'message',role:'developer',content:[{type:'input_text',text:`This Codex session is managed by neuraOS. Your neuraOS task ID is ${thread.id}. Its conversation can be inspected and directed from the neuraOS task tools and UI.`}]}]});
-      if(thread.cwd!==workspace.path)throw new Fault('agent_workspace_mismatch','会話の作業フォルダが一致しません。',409);
+      if(!sameWorkspacePath(thread.cwd,workspace.path))throw new Fault('agent_workspace_mismatch','会話の作業フォルダが一致しません。',409);
       this.register(terminalId,workspace,thread,parentTaskId);
       return {endpoint:rpc.endpoint,threadId:thread.id};
     }catch(e){await this.close(terminalId);throw e;}
@@ -56,7 +62,7 @@ export class Agents {
         if(this.list().some(a=>a.id===id&&a.terminalId===terminalId))continue;
         try {
           const {thread}=await rpc.call('thread/read',{threadId:id});
-          if(thread.cwd!==workspace.path||thread.parentThreadId)continue;
+          if(!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)continue;
           const result=await rpc.call('thread/resume',{threadId:id,excludeTurns:true});
           if(this.backends.get(terminalId)===rpc){
             this.register(terminalId,workspace,result.thread);
@@ -73,7 +79,7 @@ export class Agents {
     }while(cursor&&this.backends.get(terminalId)===rpc);
   }
   private register(terminalId:string,workspace:Workspace,thread:any,parentTaskId?:string){
-    if(typeof thread?.id!=='string'||thread.cwd!==workspace.path||thread.parentThreadId)return;
+    if(typeof thread?.id!=='string'||!sameWorkspacePath(thread.cwd,workspace.path)||thread.parentThreadId)return;
     const existing=this.store.get<AgentRecord>('agents',thread.id);
     if(existing?.terminalId===terminalId){if(parentTaskId||thread.name&&thread.name!==existing.name)this.save({...existing,name:thread.name||existing.name,parentTaskId:parentTaskId??existing.parentTaskId});return;}
     this.save({id:thread.id,terminalId,workspaceId:workspace.id,name:thread.name||existing?.name||workspace.name,status:thread.status?.type==='active'?'working':'idle',updatedAt:'',pending:existing?.pending??[],requests:[],parentTaskId:parentTaskId??existing?.parentTaskId,watching:existing?.watching,lastTurnId:existing?.lastTurnId,lastTurnStatus:existing?.lastTurnStatus,summary:existing?.summary});
@@ -83,7 +89,7 @@ export class Agents {
     if(event.method==='thread/started'){
       this.register(terminalId,workspace,event.params?.thread);
       const thread=event.params?.thread,current=this.store.get<TerminalRecord>('terminals',terminalId);
-      if(current&&thread?.cwd===workspace.path&&!thread.parentThreadId)this.store.put('terminals',{...current,sessionId:thread.id,agentId:thread.id,sessionName:thread.name??undefined});
+      if(current&&thread?.cwd&&sameWorkspacePath(thread.cwd,workspace.path)&&!thread.parentThreadId)this.store.put('terminals',{...current,sessionId:thread.id,agentId:thread.id,sessionName:thread.name??undefined});
     }
     const ids=this.list().filter(a=>a.terminalId===terminalId);
     const p=event.params??{};
@@ -93,7 +99,7 @@ export class Agents {
       if(p.turnId&&a.turnId&&p.turnId!==a.turnId)continue;
       if(event.method==='turn/completed'&&((a.turnId&&a.turnId!==p.turn?.id)||a.lastTurnId===p.turn?.id))continue;
       if(event.id!==undefined){this.save({...a,status:'waiting',requests:[...a.requests,{id:event.id,method:event.method,params:p}]});continue;}
-      if(event.method==='turn/started')this.save({...a,status:'working',turnId:p.turn.id,lastTurnStatus:undefined});
+      if(event.method==='turn/started')this.save({...a,status:'working',turnId:p.turn.id,lastTurnStatus:undefined,summary:undefined});
       if(event.method==='serverRequest/resolved')this.save({...a,requests:a.requests.filter(r=>r.id!==p.requestId)});
       if(event.method==='item/completed'&&p.item?.type==='agentMessage')this.save({...a,summary:String(p.item.text??'').slice(-16000)});
       if(event.method==='thread/name/updated'&&p.threadName)this.save({...a,name:p.threadName});
