@@ -22,4 +22,29 @@ final class AgentSupervisorTests: XCTestCase {
         let string = Data(#"{"id":"request-1","method":"other","params":{}}"#.utf8)
         XCTAssertEqual(try JSONDecoder().decode(AgentQuestionRequest.self, from: string).id, .string("request-1"))
     }
+    private func historyPage(_ ids: ClosedRange<Int>, cursor: String?, status: String = "completed") -> AgentConversation.History {
+        .init(data: ids.reversed().map {AgentConversation.Turn(id: String($0), status: status, items: [])}, nextCursor: cursor)
+    }
+    func testRefreshKeepsTurnsThatLeaveTheNewestPage() {
+        var window = AgentHistoryWindow()
+        window.refresh(historyPage(21...40, cursor: "before21"))
+        window.prepend(historyPage(1...20, cursor: nil), expectedCursor: "before21")
+        window.refresh(historyPage(22...41, cursor: "before22", status: "updated"))
+        XCTAssertEqual(window.turns.map(\.id), (1...41).map(String.init))
+        XCTAssertEqual(window.turns.last?.status, "updated")
+        XCTAssertNil(window.nextCursor)
+    }
+    func testDisconnectedRefreshResetsCursorAndRejectsOldPaginationResponse() {
+        var window = AgentHistoryWindow()
+        window.refresh(historyPage(21...40, cursor: "before21"))
+        window.refresh(historyPage(81...100, cursor: "before81"))
+        window.prepend(historyPage(1...20, cursor: nil), expectedCursor: "before21")
+        XCTAssertEqual(window.turns.map(\.id), (81...100).map(String.init))
+        XCTAssertEqual(window.nextCursor, "before81")
+        window.prepend(historyPage(61...80, cursor: "before61"), expectedCursor: "before81")
+        window.refresh(historyPage(82...101, cursor: "before82"))
+        XCTAssertEqual(window.turns.map(\.id), (61...101).map(String.init))
+        XCTAssertEqual(window.nextCursor, "before61")
+    }
+
 }

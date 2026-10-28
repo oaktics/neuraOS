@@ -47,6 +47,31 @@ struct AgentConversation: Decodable {
     }
 }
 
+struct AgentHistoryWindow {
+    private(set) var turns: [AgentConversation.Turn] = []
+    private(set) var nextCursor: String?
+    mutating func refresh(_ page: AgentConversation.History) {
+        let incoming = Array(page.data.reversed())
+        let incomingIDs = Set(incoming.map(\.id))
+        // Preserve the contiguous older prefix, including turns that just fell off
+        // the newest page. With no overlap (e.g. a long disconnection), reset the
+        // window and cursor together so history can be fetched without a hidden gap.
+        if let shared = incoming.first(where: {item in turns.contains {$0.id == item.id}}),
+           let index = turns.firstIndex(where: {$0.id == shared.id}), index > 0 {
+            turns = turns[..<index].filter {!incomingIDs.contains($0.id)} + incoming
+        } else {
+            turns = incoming; nextCursor = page.nextCursor
+        }
+    }
+    mutating func prepend(_ page: AgentConversation.History, expectedCursor: String) {
+        // A refresh may have reset pagination while this request was in flight.
+        guard nextCursor == expectedCursor else {return}
+        let existing = Set(turns.map(\.id))
+        turns = page.data.reversed().filter {!existing.contains($0.id)} + turns
+        nextCursor = page.nextCursor
+    }
+}
+
 struct AgentSupervisor: View {
     @Environment(AppModel.self) private var model
     let workspace: Workspace
@@ -54,9 +79,7 @@ struct AgentSupervisor: View {
     @State private var agents: [ManagedAgent] = []
     @State private var selected: String?
     @State private var lastReadStamp: String?
-    @State private var conversation: AgentConversation?
-    @State private var olderTurns: [AgentConversation.Turn] = []
-    @State private var cursor: String?
+    @State private var history = AgentHistoryWindow()
     @State private var text = ""
     @State private var answers: [String: String] = [:]
     @State private var steer = false
@@ -88,8 +111,8 @@ struct AgentSupervisor: View {
                     Divider()
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 16) {
-                            if cursor != nil {Button("以前の会話を読み込む") {Task {await loadOlder()}}}
-                            ForEach(olderTurns + (conversation?.history.data.reversed().map {$0} ?? [])) {turn in
+                            if history.nextCursor != nil {Button("以前の会話を読み込む") {Task {await loadOlder()}}}
+                            ForEach(history.turns) {turn in
                                 ForEach(turn.items.filter {!$0.display.isEmpty}) {item in
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(item.label).font(.caption).foregroundStyle(.secondary)
@@ -131,7 +154,7 @@ struct AgentSupervisor: View {
             }.padding().frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: visible) {guard visible else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
-        .task(id: selected) {conversation = nil; lastReadStamp = nil; olderTurns = []; cursor = nil; steer = false; text = ""; answers = [:]; await read()}
+        .task(id: selected) {history = AgentHistoryWindow(); lastReadStamp = nil; steer = false; text = ""; answers = [:]; await read()}
     }
     private func answerBinding(_ id: String) -> Binding<String> {Binding(get: {answers[id] ?? ""}, set: {answers[id] = $0})}
     private func workspaceName(_ agent: ManagedAgent) -> String {model.state.workspaces.first {$0.id == agent.workspaceId}?.name ?? "作業"}
@@ -148,12 +171,12 @@ struct AgentSupervisor: View {
         guard let id = selected else {return}
         let stamp = id + (current?.updatedAt ?? "")
         guard lastReadStamp != stamp else {return}
-        do {let value: AgentConversation = try await model.api.get("v1/agents/\(id)"); guard selected == id else {return}; conversation = value; lastReadStamp = stamp; if olderTurns.isEmpty {cursor = value.history.nextCursor}; error = nil}
+        do {let value: AgentConversation = try await model.api.get("v1/agents/\(id)"); guard selected == id else {return}; history.refresh(value.history); lastReadStamp = stamp; error = nil}
         catch {self.error = error.localizedDescription}
     }
     private func loadOlder() async {
-        guard let id = selected, let cursor else {return}
-        do {let page: AgentConversation = try await model.api.get("v1/agents/\(id)", query: ["cursor": cursor]); guard selected == id else {return}; olderTurns = page.history.data.reversed() + olderTurns; self.cursor = page.history.nextCursor}
+        guard let id = selected, let cursor = history.nextCursor else {return}
+        do {let page: AgentConversation = try await model.api.get("v1/agents/\(id)", query: ["cursor": cursor]); guard selected == id else {return}; history.prepend(page.history, expectedCursor: cursor)}
         catch {self.error = error.localizedDescription}
     }
     private func send(_ agent: ManagedAgent) {
