@@ -159,7 +159,7 @@ final class DaemonClient {
     }() {
         didSet {if let data = try? JSONEncoder().encode(sidebarSpaces) {UserDefaults.standard.set(data, forKey: "sidebarSpaces")}}
     }
-    var visibleProjects: [Project] {state.projects.filter {sidebarSpaces.owner(of: $0.id) == sidebarSpaces.active.id}}
+    var visibleProjects: [Project] {sidebarSpaces.projects(in: sidebarSpaces.active.id, from: state.projects)}
     var visibleWorkspaces: [Workspace] {state.workspaces.filter {sidebarSpaces.owner(of: $0.projectId) == sidebarSpaces.active.id}}
     func createSpace(name: String) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
