@@ -1,3 +1,4 @@
+import {channelCredential} from './channel-credentials.ts';
 import {claudeSessionInstructions} from './session-instructions.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -22,7 +23,7 @@ export async function claudeMCPArguments(program:string,connection:ClaudeMCPConn
   if(!await supportsActivity('claude',program))throw new Fault('claude_channels_unsupported','Claudeの双方向監督にはClaude Code 2.1.306以降とChannels対応環境が必要です。CLI更新と組織のChannels設定を確認してください。',409);
   const config={mcpServers:{neuraos:{type:'stdio',command:process.execPath,args:[fileURLToPath(new URL('./supervision-mcp.mjs',import.meta.url))],env:{
     NEURA_SUPERVISION_URL:connection.endpoint(),NEURA_SUPERVISION_TOKEN_FILE:connection.tokenPath,
-    NEURA_SUPERVISION_CHANNEL:'claude',NEURA_SUPERVISION_WORKSPACE:workspaceId,NEURA_SUPERVISION_TERMINAL:terminalId,
+    NEURA_CHANNEL_TOKEN:await channelCredential(connection.tokenPath,terminalId),NEURA_SUPERVISION_CHANNEL:'claude',NEURA_SUPERVISION_WORKSPACE:workspaceId,NEURA_SUPERVISION_TERMINAL:terminalId,
   }}}};
   // Inline configuration is scoped to this launch; leave user/project MCPs and hooks intact.
   return ['--dangerously-load-development-channels','server:neuraos','--mcp-config',JSON.stringify(config),'--append-system-prompt',

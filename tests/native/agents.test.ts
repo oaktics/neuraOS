@@ -33,6 +33,13 @@ function fixture(reportedCwd?:string,loadedId?:string){
   return {store,workspace,agents,clients,open,factory};
 }
 const tick=()=>new Promise(r=>setImmediate(r));
+function confirmClaudeChannel(agents:Agents,terminalId:string){
+  const probe=agents.channel(terminalId);assert.equal(probe.meta?.kind,'probe');
+  const nonce=probe.content!.match(/nonce ([a-f0-9-]{36})/)![1];agents.acknowledgeChannel(terminalId,nonce);
+  const a=agents.list().find(a=>a.terminalId===terminalId&&a.provider==='claude')!;
+  agents.claudeEvent(terminalId,{hook_event_name:'Stop',session_id:a.id,transcript_path:a.transcriptPath});
+}
+
 
 test('a later supervisor discovers existing independent sessions and reads the exact conversation',async()=>{
   const f=fixture();try{
@@ -318,7 +325,7 @@ test('Claude and Codex supervise each other with exact reports, compact safety, 
   const event=(hook_event_name:string,extra:Record<string,string>={})=>f.agents.claudeEvent(terminalId,{hook_event_name,session_id:id,transcript_path:path,...extra});
   try{
     f.agents.prepareClaude(f.workspace,terminalId,undefined,undefined,()=>interrupted++);
-    event('SessionStart',{source:'startup'});
+    event('SessionStart',{source:'startup'});confirmClaudeChannel(f.agents,terminalId);
     const codex=(await f.open()).threadId!;
     f.agents.watch(codex,[id]);await f.agents.send(id,'Claude work','queue');
     assert.equal(f.agents.channel(terminalId).content,'Claude work');const first=f.agents.get(id).turnId;
@@ -353,5 +360,40 @@ test('Claude resume validates provider/workspace and never transfers a live iden
     f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(rejected,1);assert.equal(f.agents.get(id).terminalId,t);
     await f.agents.close(t);f.agents.prepareClaude(f.workspace,other,id,undefined,()=>{});
     f.agents.claudeEvent(other,{hook_event_name:'SessionStart',session_id:id,source:'resume'});assert.equal(f.agents.get(id).terminalId,other);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('delegated Codex and Claude attach watches before first inference without replacing existing watches',async()=>{
+  const f=fixture();
+  try{
+    const parent=(await f.open()).threadId!,existing=(await f.open()).threadId!;
+    f.agents.watch(parent,[existing]);
+    const codex=await f.agents.open('fake',{},f.workspace,randomUUID(),undefined,parent);
+    assert.deepEqual(f.agents.get(parent).watching?.map(w=>w.taskId),[existing,codex.threadId]);
+    await f.agents.send(codex.threadId!,'fast completion','queue');const turn=f.agents.get(codex.threadId!).turnId;
+    f.clients[2].emit({method:'turn/completed',params:{threadId:codex.threadId,turn:{id:turn,status:'completed'}}});await tick();
+    assert.equal(f.agents.get(parent).reports?.[0].sourceTaskId,codex.threadId);
+    const terminal=randomUUID(),claude=randomUUID();
+    f.agents.prepareClaude(f.workspace,terminal,undefined,parent,()=>{},'initial Claude instruction');
+    assert.deepEqual(f.agents.channel(terminal),{});
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',session_id:claude,source:'startup'});
+    assert.deepEqual(f.agents.get(parent).watching?.map(w=>w.taskId),[existing,claude]);
+    confirmClaudeChannel(f.agents,terminal);assert.equal(f.agents.get(claude).lastTurnId,undefined,'probe is not worker completion');
+    assert.equal(f.agents.channel(terminal).content,'initial Claude instruction');
+    f.agents.claudeEvent(terminal,{hook_event_name:'Stop',session_id:claude});
+    assert.ok(f.agents.get(parent).reports?.some(r=>r.sourceTaskId===claude));
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('MCP polling without a Channels listener leaves instructions queued and times out without claiming connected',async()=>{
+  const f=fixture(),terminal=randomUUID(),id=randomUUID();
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{},'keep queued');
+    f.agents.claudeEvent(terminal,{hook_event_name:'SessionStart',source:'startup',session_id:id});
+    const probe=f.agents.channel(terminal);assert.equal(probe.meta?.kind,'probe');
+    assert.throws(()=>f.agents.acknowledgeChannel(terminal,randomUUID()),/一致/);
+    assert.deepEqual(f.agents.channel(terminal),{});assert.equal(f.agents.get(id).pending[0].text,'keep queued');assert.equal(f.agents.get(id).status,'idle');
+    const now=Date.now;try{Date.now=()=>now()+61000;assert.deepEqual(f.agents.channel(terminal),{});}finally{Date.now=now;}
+    assert.equal(f.agents.get(id).channelState,'unavailable');assert.equal(f.agents.get(id).pending.length,1);assert.equal(f.agents.get(id).turnId,undefined);
   }finally{await f.agents.shutdown();f.store.close();}
 });

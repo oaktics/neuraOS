@@ -6,10 +6,10 @@ struct ManagedAgent: Decodable, Identifiable {
     let workspaceId: String
     let name: String
     let status: String
-    let provider: String?
-    let parentTaskId: String?
-    let channelState: String?
-    let watching: [Watch]?
+    var provider: String? = nil
+    var parentTaskId: String? = nil
+    var channelState: String? = nil
+    var watching: [Watch]? = nil
     struct Watch: Decodable {let taskId: String}
     let updatedAt: String
     let turnId: String?
@@ -157,7 +157,7 @@ struct AgentSupervisor: View {
                         } else {Text("エージェントが操作の確認を待っています。「作業を開く」から確認してください。").font(.callout)}
                     }
                     Divider()
-                    if agent.provider == "claude" {Text(agent.channelState == "connected" ? "Channels接続済み。指示は現在の応答後に届きます。" : "Channels接続待ち。ターミナルの標準確認、Claudeの対応バージョン・アカウント・組織設定を確認してください。").font(.caption).foregroundStyle(.secondary)}
+                    if agent.provider == "claude" {Text(agent.channelState == "connected" ? "Channels受信確認済み。指示は現在の応答後に届きます。" : "Channels受信未確認。指示は保持されています。ターミナルの標準確認、Claudeの対応バージョン・アカウント・組織設定を確認してください。").font(.caption).foregroundStyle(.secondary)}
                     TextField("このエージェントへの指示", text: $text, axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(2...6)
                     HStack {
                         Toggle("実行中の作業へすぐ反映", isOn: $steer).disabled(agent.turnId == nil || agent.provider == "claude")
