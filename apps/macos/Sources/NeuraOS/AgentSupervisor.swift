@@ -18,6 +18,9 @@ struct ManagedAgent: Decodable, Identifiable {
     let pending: [Pending]
     let requests: [AgentQuestionRequest]
     struct Pending: Decodable {let id: String; let text: String}
+    func isVisible(runningTerminalIDs: Set<String>, includeStopped: Bool) -> Bool {
+        includeStopped || runningTerminalIDs.contains(terminalId)
+    }
     var statusLabel: String {
         switch status {case "working": return "作業中"; case "waiting": return "回答待ち"; case "idle": return "次の指示待ち"; case "failed": return "失敗"; default: return "中断"}
     }
@@ -90,19 +93,26 @@ struct AgentSupervisor: View {
     @State private var steer = false
     @State private var busy = false
     @State private var error: String?
-    private var current: ManagedAgent? {agents.first {$0.id == selected}}
+    @State private var includeStopped = false
+    private var visibleAgents: [ManagedAgent] {
+        let running = Set(model.state.terminals.filter {$0.status == "running"}.map(\.id))
+        return agents.filter {$0.isVisible(runningTerminalIDs: running, includeStopped: includeStopped)}
+    }
+    private var current: ManagedAgent? {visibleAgents.first {$0.id == selected}}
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 0) {
                 Text("エージェントの作業一覧").font(.headline).padding()
-                List(agents, selection: $selected) {agent in
+                Toggle("停止した作業も表示", isOn: $includeStopped)
+                    .toggleStyle(.checkbox).font(.callout).padding(.horizontal).padding(.bottom, 8)
+                List(visibleAgents, selection: $selected) {agent in
                     VStack(alignment: .leading, spacing: 5) {
                         Text(agent.name).lineLimit(1)
                         Text("\(agent.provider == "claude" ? "Claude" : "Codex") · \((agent.watching?.isEmpty == false) ? "監督" : agent.parentTaskId != nil ? "委任先" : "独立")").font(.caption2).foregroundStyle(.secondary)
                         HStack {Text(workspaceName(agent)); Spacer(); Text(agent.statusLabel)}.font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 4).tag(agent.id)
                 }
-                if agents.isEmpty {Text("このプロジェクトでCodex・Claudeを起動すると、起動順に関係なくここに表示されます。").font(.callout).foregroundStyle(.secondary).padding()}
+                if visibleAgents.isEmpty {Text(includeStopped ? "このプロジェクトの作業はありません。" : "起動中のエージェントはありません。停止した作業は「停止した作業も表示」から確認・再開できます。").font(.callout).foregroundStyle(.secondary).padding()}
             }.frame(minWidth: 200, idealWidth: 250, maxWidth: 340)
             VStack(alignment: .leading, spacing: 12) {
                 if let agent = current {
@@ -161,7 +171,11 @@ struct AgentSupervisor: View {
             }.padding().frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
         }
         .task(id: visible) {guard visible else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
+        .onChange(of: visibleAgents.map(\.id)) {_, _ in reconcileSelection()}
         .task(id: selected) {history = AgentHistoryWindow(); lastReadStamp = nil; steer = false; text = ""; answers = [:]; await read()}
+    }
+    private func reconcileSelection() {
+        if !visibleAgents.contains(where: {$0.id == selected}) {selected = visibleAgents.first?.id}
     }
     private func answerBinding(_ id: String) -> Binding<String> {Binding(get: {answers[id] ?? ""}, set: {answers[id] = $0})}
     private func workspaceName(_ agent: ManagedAgent) -> String {model.state.workspaces.first {$0.id == agent.workspaceId}?.name ?? "作業"}
@@ -170,7 +184,7 @@ struct AgentSupervisor: View {
             let result: ManagedAgents = try await model.api.get("v1/agents")
             let ids = Set(model.state.workspaces.filter {$0.projectId == workspace.projectId}.map(\.id))
             agents = result.agents.filter {ids.contains($0.workspaceId)}
-            if selected == nil {selected = agents.first?.id}
+            reconcileSelection()
             await read()
         } catch {self.error = error.localizedDescription}
     }
