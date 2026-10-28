@@ -12,10 +12,10 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var title: String {
         if kind == "file", let filePath {return (filePath as NSString).lastPathComponent}
         if kind == "browser", let browserTitle, !browserTitle.isEmpty {return browserTitle}
-        let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
-        return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
+        let name = kind == "agents" ? "作業一覧" : kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
+        return ["files", "diff", "github", "agents"].contains(kind) ? name : "\(name) \(number)"
     }
-    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
+    var icon: String {kind == "agents" ? "person.3" : kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
 struct WorkspaceTabState: Codable {
@@ -171,6 +171,7 @@ struct WorkspaceView: View {
         Button {add("codex")} label: {Label("Codex", systemImage: "sparkle")}
         Button {add("claude")} label: {Label("Claude Code", systemImage: "asterisk")}
         Button {add("shell")} label: {Label("Terminal", systemImage: "terminal")}
+        if model.state.features?.contains("agent.supervision") == true {Button {showUtility("agents")} label: {Label("Codexの作業一覧", systemImage: "person.3")}}
         Button {add("browser")} label: {Label("Browser", systemImage: "globe")}
 
     }
@@ -189,6 +190,7 @@ struct WorkspaceView: View {
                 let visible = active && model.selectedId == workspace.id
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $item.terminalId, visible: visible)}
+                    else if item.kind == "agents" {AgentSupervisor(workspace: workspace, visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
                         FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }

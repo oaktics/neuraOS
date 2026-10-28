@@ -1,0 +1,25 @@
+import XCTest
+@testable import NeuraOS
+
+final class AgentSupervisorTests: XCTestCase {
+    func testTaskStatusDoesNotCallAnIdleAgentFinished() throws {
+        let data = Data(#"{"id":"task","terminalId":"terminal","workspaceId":"workspace","name":"Worker","status":"idle","updatedAt":"now","pending":[],"requests":[],"lastTurnStatus":"completed"}"#.utf8)
+        let agent = try JSONDecoder().decode(ManagedAgent.self, from: data)
+        XCTAssertEqual(agent.statusLabel, "次の指示待ち")
+        XCTAssertEqual(agent.lastTurnStatus, "completed")
+    }
+    func testConversationDisplaysUserAgentAndCommandEvidence() throws {
+        let data = Data(#"{"agent":{"id":"task","terminalId":"terminal","workspaceId":"workspace","name":"Worker","status":"working","updatedAt":"now","pending":[],"requests":[]},"history":{"data":[{"id":"turn","status":"inProgress","items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"Fix tests"}]},{"id":"command","type":"commandExecution","command":"pnpm test","aggregatedOutput":"Passed"},{"id":"reply","type":"agentMessage","text":"Done"}]}],"nextCursor":"older"}}"#.utf8)
+        let value = try JSONDecoder().decode(AgentConversation.self, from: data)
+        XCTAssertEqual(value.history.data[0].items.map(\.display), ["Fix tests", "pnpm test\nPassed", "Done"])
+        XCTAssertEqual(value.history.nextCursor, "older")
+    }
+    func testQuestionRequestPreservesStringAndNumericIDs() throws {
+        let numeric = Data(#"{"id":42,"method":"item/tool/requestUserInput","params":{"questions":[{"id":"q","question":"Which approach?","options":[{"label":"A","description":"First"}]}]}}"#.utf8)
+        let question = try JSONDecoder().decode(AgentQuestionRequest.self, from: numeric)
+        XCTAssertEqual(question.id, .number(42))
+        XCTAssertEqual(question.params.questions?.first?.options?.first?.label, "A")
+        let string = Data(#"{"id":"request-1","method":"other","params":{}}"#.utf8)
+        XCTAssertEqual(try JSONDecoder().decode(AgentQuestionRequest.self, from: string).id, .string("request-1"))
+    }
+}
