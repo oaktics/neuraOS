@@ -1,9 +1,9 @@
 // Exercises the real callback handlers with owned CEF C-API stubs, without
 // initializing Chromium, reading a user profile, or presenting a save panel.
 BOOL NCVerifyDownloadTerminalStates(void) {
-    static int terminalKind, continuations;
+    static int terminalKind, continuations, cancellations;
     static uint32_t identifier;
-    continuations = 0;
+    continuations = 0; cancellations = 0;
     auto browser = []() {
         auto h = new Handler<cef_browser_t>(nil);
         h->api.get_identifier = [](cef_browser_t *) -> int {return -108;};
@@ -54,6 +54,26 @@ BOOL NCVerifyDownloadTerminalStates(void) {
         Release(&late->api); Release(&original->api);
         [downloadHistory removeObject:download];
     }
+    // Save can consume BeforeDownload before CEF supplies any control callback.
+    // A user cancel in that gap must reach the first late update's control.
+    identifier = UINT32_MAX - 3; terminalKind = 3;
+    NCDownload *pending = Download(identifier, -108);
+    auto before = new Handler<cef_before_download_callback_t>(nil);
+    before->api.cont = [](cef_before_download_callback_t *, const cef_string_t *, int) {continuations++;};
+    before->api.base.add_ref(&before->api.base);
+    pending->_before = &before->api; pending->_selectionGeneration = 1;
+    NCChromiumView *owner = [[NCChromiumView alloc] initWithFrame:NSZeroRect];
+    SelectDownloadDestination(pending, &before->api, 1, owner, [NSURL fileURLWithPath:@"/tmp/never-written"]);
+    passed &= continuations == 1 && pending->_before == nullptr && pending->_control == nullptr;
+    [pending cancel];
+    auto lateControl = new Handler<cef_download_item_callback_t>(nil);
+    lateControl->api.cancel = [](cef_download_item_callback_t *) {cancellations++;};
+    lateControl->api.base.add_ref(&lateControl->api.base);
+    handler->on_download_updated(handler, browser(), item(), &lateControl->api);
+    passed &= cancellations == 1 && [pending.status isEqualToString:@"canceled"] && lateControl->refs == 1;
+    passed &= pending->_before == nullptr && pending->_control == nullptr;
+    Release(&before->api); Release(&lateControl->api);
+    [downloadHistory removeObject:pending];
     Release(handler);
     return passed;
 }
