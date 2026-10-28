@@ -12,6 +12,7 @@ import ChromiumBridge
               let tabs = config["tabs"] as? [[String:String]],
               Bundle.main.object(forInfoDictionaryKey:"NeuraDataDirectory") as? String == config["dataDirectory"] as? String,
               tabs.allSatisfy({URL(string:$0["url"] ?? "")?.host == "127.0.0.1"}) else {exit(2)}
+        UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":config["dataDirectory"] as! String], forName:"NeuraChromiumSmoke")
         if let error = NCInitializeChromium() {fputs(error,stderr);exit(1)}
         NSApp.setActivationPolicy(.regular)
         for tab in tabs {mount(tab)}
