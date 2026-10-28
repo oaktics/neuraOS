@@ -38,6 +38,11 @@ final class GitHubPresentationTests: XCTestCase {
         XCTAssertFalse(try decode().canCreatePullRequest)
         object["sourcePullRequest"] = ["repository": "oaktics/neuraOS", "number": 1]
         XCTAssertTrue(try decode().canCreatePullRequest)
+        object["branch"] = ""
+        XCTAssertFalse(try decode().canMutate)
+        XCTAssertFalse(try decode().canCreatePullRequest)
+        object["branch"] = "renamed"
+        XCTAssertTrue(try decode().canMutate)
         object.removeValue(forKey: "sourcePullRequest")
         pr["state"] = "MERGED"; object["pullRequest"] = pr
         XCTAssertTrue(try decode().canCreatePullRequest)
