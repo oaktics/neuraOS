@@ -31,7 +31,7 @@ export interface AgentRecord {
   pending:{id:string;text:string;report?:boolean}[];requests:{id:number|string;method:string;params:unknown}[];
 }
 export class Agents {
-  private claudeLive=new Map<string,{workspace:Workspace;parentTaskId?:string;sessionId?:string;resumeId?:string;initialPrompt?:string;channelNonce:string;probeSentAt?:number;channelConfirmed?:boolean;probeAcked?:boolean;turnStartedAt?:number;interruptedAt?:number;providerTurnId?:string;interrupt:()=>void}>();
+  private claudeLive=new Map<string,{workspace:Workspace;parentTaskId?:string;sessionId?:string;resumeId?:string;initialPrompt?:string;channelNonce:string;probeSentAt?:number;channelConfirmed?:boolean;probeAcked?:boolean;turnStartedAt?:number;interruptedAt?:number;providerTurnId?:string;interrupt:(waiting?:boolean)=>void}>();
   private titles=new Map<string,CodexTitles>();
   private backends=new Map<string,CodexRPC>();
   private observers=new Map<string,NodeJS.Timeout>();
@@ -45,7 +45,7 @@ export class Agents {
   private save(agent:AgentRecord){this.store.put('agents',{...agent,updatedAt:new Date().toISOString()});}
   private rpc(id:string){const a=this.get(id);return requireValue(this.backends.get(a.terminalId),'agent_offline','このCodexは停止しています。再開してから指示してください。');}
   private online(a:AgentRecord){return this.backends.has(a.terminalId)||this.claudeLive.get(a.terminalId)?.sessionId===a.id;}
-  prepareClaude(workspace:Workspace,terminalId:string,resumeId:string|undefined,parentTaskId:string|undefined,interrupt:()=>void,initialPrompt?:string){
+  prepareClaude(workspace:Workspace,terminalId:string,resumeId:string|undefined,parentTaskId:string|undefined,interrupt:(waiting?:boolean)=>void,initialPrompt?:string){
     if(parentTaskId)this.get(parentTaskId);
     if(resumeId){const a=this.get(resumeId);if(a.provider!=='claude'||a.workspaceId!==workspace.id)throw new Fault('agent_workspace_mismatch','Claudeの会話と作業フォルダが一致しません。',409);if(this.online(a)||[...this.claudeLive.values()].some(live=>live.resumeId===resumeId))throw new Fault('agent_already_running','この会話は実行中です。',409);}
     this.claudeLive.set(terminalId,{workspace,parentTaskId,resumeId,interrupt,initialPrompt,channelNonce:randomUUID()});
@@ -364,7 +364,7 @@ export class Agents {
       if(delivered&&this.backends.has(supervisor.terminalId))void this.serial(supervisor.id,()=>this.flush(supervisor.id)).catch(()=>{});
     }
   }
-  interrupt(id:string,expectedTurnId:string){return this.serial(id,async()=>{const a=this.get(id);if(a.turnId!==expectedTurnId)throw new Fault('agent_turn_changed','対象ターンが変わりました。',409);this.save({...a,pending:[],watching:[]});if(a.provider==='claude'){this.claudeLive.get(a.terminalId)?.interrupt();this.claudeInterrupted(a.terminalId,true);}else await this.rpc(id).call('turn/interrupt',{threadId:id,turnId:expectedTurnId});return {ok:true};});}
+  interrupt(id:string,expectedTurnId:string){return this.serial(id,async()=>{const a=this.get(id);if(a.turnId!==expectedTurnId)throw new Fault('agent_turn_changed','対象ターンが変わりました。',409);this.save({...a,pending:[],watching:[]});if(a.provider==='claude'){this.claudeLive.get(a.terminalId)?.interrupt(a.status==='waiting');this.claudeInterrupted(a.terminalId,true);}else await this.rpc(id).call('turn/interrupt',{threadId:id,turnId:expectedTurnId});return {ok:true};});}
   respond(id:string,requestId:number|string,result:unknown){const a=this.get(id);if(!a.requests.some(r=>r.id===requestId))throw new Fault('agent_request_missing','この質問は既に終了しています。',409);this.rpc(id).reply(requestId,result);this.save({...a,requests:a.requests.filter(r=>r.id!==requestId),status:'working'});return {ok:true};}
   pid(terminalId:string){return this.backends.get(terminalId)?.pid;}
   signal(terminalId:string,signal:NodeJS.Signals){this.backends.get(terminalId)?.signal(signal);}
