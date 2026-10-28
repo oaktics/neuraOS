@@ -228,6 +228,7 @@ struct WorkspaceView: View {
         }.frame(height: 32)
     }
     @ViewBuilder private var addTabButtons: some View {
+        Button {add(model.conversationProvider(for: workspace))} label: {Label("新しい会話", systemImage: "bubble.left")}
         Button {add("codex")} label: {Label("Codex", systemImage: "sparkle")}
         Button {add("claude")} label: {Label("Claude Code", systemImage: "asterisk")}
         Button {add("shell")} label: {Label("Terminal", systemImage: "terminal")}

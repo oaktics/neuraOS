@@ -25,7 +25,8 @@ struct WorkspaceCommands: Commands {
         CommandMenu("タブ") {
             Group {
                 Button("新しいTerminal") {send(.add("shell"))}.keyboardShortcut("t")
-                Button("新しいCodex") {send(.add("codex"))}.keyboardShortcut("t", modifiers: [.command, .shift])
+                Button("新しい会話") {if let workspace = model.selected {send(.add(model.conversationProvider(for: workspace)))}}.keyboardShortcut("t", modifiers: [.command, .shift])
+                Button("新しいCodex") {send(.add("codex"))}
                 Button("新しいClaude Code") {send(.add("claude"))}.keyboardShortcut("t", modifiers: [.command, .option])
                 Button("新しいBrowser") {send(.add("browser"))}.keyboardShortcut("b", modifiers: [.command, .shift])
                 Divider()

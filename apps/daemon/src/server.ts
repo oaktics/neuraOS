@@ -121,6 +121,13 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         const updated={...project,worktreeStartup:c.providers};
         store.put('projects',updated);return updated;
       }
+      case 'project.set-default-providers':{
+        const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
+        const updated={...project,
+          ...(c.defaultConversationProvider!==undefined?{defaultConversationProvider:c.defaultConversationProvider}:{}),
+          ...(c.defaultDelegationProvider!==undefined?{defaultDelegationProvider:c.defaultDelegationProvider}:{})};
+        store.put('projects',updated);return updated;
+      }
       case 'project.set-worktree-setup':{
         const project=requireValue(store.get<Project>('projects',c.projectId),'project_missing','プロジェクトがありません。');
         if(project.isGit===false)throw new Fault('git_required','Gitリポジトリを選択してください。');
@@ -197,7 +204,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         store.deleteWorkspace(record.id);
         return {ok:true};
       }
-      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider??store.get<Project>('projects',workspace(c.workspaceId).projectId)?.defaultConversationProvider??'codex',c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
       case 'agent.report':return agents.report(c.agentId,c.text,c.sourceTerminalId);
       case 'agent.ack':return agents.ack(c.agentId,c.reportIds);
       case 'agent.watch':return agents.watch(c.agentId,c.taskIds);

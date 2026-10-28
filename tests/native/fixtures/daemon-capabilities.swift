@@ -34,9 +34,18 @@ struct DaemonCapabilitiesContractTest {
         let legacyProject = #"{"id":"project","name":"test","path":"/tmp/test","isGit":true}"#
         let project = try JSONDecoder().decode(Project.self, from: Data(legacyProject.utf8))
         precondition(project.worktreeStartup == nil)
+        precondition(project.conversationProvider == "codex" && project.delegationProvider == "codex")
         var configured = project
+        configured.defaultConversationProvider = "claude"
+        configured.defaultDelegationProvider = "codex"
         configured.worktreeStartup = ["codex", "shell"]
         let roundTrip = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(configured))
+        precondition(roundTrip.conversationProvider == "claude" && roundTrip.delegationProvider == "codex")
+        let model = AppModel(startPolling: false)
+        let workspace = Workspace(id: "workspace", projectId: project.id, name: "test", path: "/tmp", branch: "", kind: "root")
+        precondition(model.conversationProvider(for: workspace) == "codex")
+        model.state.projects = [roundTrip]
+        precondition(model.conversationProvider(for: workspace) == "claude")
         precondition(roundTrip.worktreeStartup == ["codex", "shell"])
         let created = try JSONDecoder().decode(CreatedWorkspace.self, from: Data(#"{"id":"workspace","startupErrors":["CLI missing"]}"#.utf8))
         precondition(created.startupErrors == ["CLI missing"])

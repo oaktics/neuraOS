@@ -2,12 +2,14 @@ import {z} from 'zod';
 
 export const protocolVersion = 1;
 // Additive features are negotiated separately so existing v1 clients keep working.
-export const daemonFeatures = ['agent.supervision','agent.reports','workspace.cleanup','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr'] as const;
+export const daemonFeatures = ['agent.supervision','agent.reports','workspace.cleanup','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr','project.default-providers','agent.claude-channels'] as const;
 const id = z.uuid();
 const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);
 export type Provider = z.infer<typeof Provider>;
-export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; worktreeSetup?:string; createdAt:string}
+export const ConversationProvider = z.enum(['codex', 'claude']);
+export type ConversationProvider = z.infer<typeof ConversationProvider>;
+export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; worktreeSetup?:string; defaultConversationProvider?:ConversationProvider; defaultDelegationProvider?:ConversationProvider; createdAt:string}
 // Immutable workspace provenance. localBranch/sourceHead describe creation, not live Git state.
 export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
 export interface Workspace {nameSource?:'manual'|'session'; sessionNameUpdatedAt?:number; id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource; setup?:{status:'running'|'succeeded'|'failed'; script:string; output:string; error?:string}}
@@ -20,12 +22,13 @@ export const Command = z.discriminatedUnion('type', [
   z.object({type:z.literal('project.attach'), projectId:id, path:z.string().min(1).max(4096)}),
   z.object({type:z.literal('project.add'), path:z.string().min(1).max(4096)}),
   z.object({type:z.literal('project.set-worktree-startup'), projectId:id, providers:z.array(Provider).max(3).refine(values=>new Set(values).size===values.length)}),
+  z.object({type:z.literal('project.set-default-providers'), projectId:id, defaultConversationProvider:ConversationProvider.optional(), defaultDelegationProvider:ConversationProvider.optional()}).refine(value=>value.defaultConversationProvider!==undefined||value.defaultDelegationProvider!==undefined),
   z.object({type:z.literal('project.set-worktree-setup'), projectId:id, script:z.string().trim().max(4096)}),
   z.object({type:z.literal('workspace.setup'), workspaceId:id}),
   z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80).optional(), baseRef:z.string().min(1).max(200).optional(), pullRequest:z.string().trim().min(1).max(500).optional(),skipStartup:z.boolean().default(false)}),
   z.object({type:z.literal('workspace.sync-default'), workspaceId:id}),
   z.object({type:z.literal('workspace.delete'), workspaceId:id, discardChanges:z.boolean().default(false), stopTerminals:z.boolean().default(false),cleanup:z.object({callerWorkspaceId:id,expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/),mergedPR:z.number().int().positive()}).optional()}),
-  z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider, resume:z.boolean().default(false),prompt:z.string().min(1).max(65536).optional(),resumeId:id.optional(),parentTaskId:id.optional()}),
+  z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider.optional(), resume:z.boolean().default(false),prompt:z.string().min(1).max(65536).optional(),resumeId:id.optional(),parentTaskId:id.optional()}),
   z.object({type:z.literal('agent.watch'),agentId:id,taskIds:z.array(id).max(32).refine(ids=>new Set(ids).size===ids.length)}),
   z.object({type:z.literal('agent.report'),agentId:id,text:z.string().trim().min(1).max(16384),sourceTerminalId:id.optional()}),
   z.object({type:z.literal('agent.ack'),agentId:id,reportIds:z.array(id).max(32)}),

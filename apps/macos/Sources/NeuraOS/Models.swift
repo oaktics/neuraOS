@@ -12,7 +12,7 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var worktreeSetup: String? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
+struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var worktreeSetup: String? = nil; var defaultConversationProvider: String? = nil; var defaultDelegationProvider: String? = nil; var conversationProvider: String {defaultConversationProvider == "claude" ? "claude" : "codex"}; var delegationProvider: String {defaultDelegationProvider == "claude" ? "claude" : "codex"}; var supportsGit: Bool {folderless != true && isGit != false}}
 struct WorktreeSetup: Codable, Hashable {let status: String; let script: String; let output: String; var error: String?}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var setup: WorktreeSetup? = nil; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
 struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil}
@@ -284,6 +284,20 @@ final class DaemonClient {
             await refresh(); select(state.workspaces.first {$0.projectId == project.id}?.id)
         } catch {report(error)}}
     }
+    func conversationProvider(for workspace: Workspace) -> String {
+        state.projects.first {$0.id == workspace.projectId}?.conversationProvider ?? "codex"
+    }
+    func setDefaultProvider(_ project: Project, provider: String, delegation: Bool) async {
+        let key = "project.settings.\(project.id)"
+        guard state.features?.contains("project.default-providers") == true,
+              ["codex", "claude"].contains(provider), beginAction(key, label: "既定のAIを保存中") else {return}
+        defer {endAction(key)}
+        do {
+            let field = delegation ? "defaultDelegationProvider" : "defaultConversationProvider"
+            let _: Project = try await api.command(["type": "project.set-default-providers", "projectId": project.id, field: provider])
+            await refresh()
+        } catch {report(error)}
+    }
     func setWorktreeStartup(_ project: Project, provider: String, enabled: Bool) async {
         let key = "project.settings.\(project.id)"
         guard beginAction(key, label: "自動起動設定を保存中") else {return}
@@ -349,7 +363,7 @@ final class DaemonClient {
             pendingWorkspaceDeletion = workspace
         } catch {report(error)}
     }
-    func openTerminal(_ workspace: Workspace, provider: String, resume: Bool = false) async -> TerminalRecord? {
+    func openTerminal(_ workspace: Workspace, provider: String? = nil, resume: Bool = false) async -> TerminalRecord? {
         guard beginAction(workspace.id, label: "ターミナルを起動中") else {return nil}
         defer {endAction(workspace.id)}
         do {
@@ -357,7 +371,7 @@ final class DaemonClient {
             guard state.supportsMultipleTerminals else {
                 throw APIError(error: "daemon_update_required", message: "Daemonの更新が必要です。実行中の作業を終えてから pnpm service restart を実行してください。")
             }
-            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider, "resume": resume])
+            let terminal: TerminalRecord = try await api.command(["type": "terminal.open", "workspaceId": workspace.id, "provider": provider ?? conversationProvider(for: workspace), "resume": resume])
             await refresh(); return terminal
         } catch {report(error); return nil}
     }
