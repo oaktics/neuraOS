@@ -5,7 +5,7 @@ import {mkdtemp,mkdir,writeFile,appendFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
-import {codexSessionName,claudeSessionName,SessionNames} from '../../apps/daemon/src/session-names.ts';
+import {codexSessionName,claudeSessionName,SessionNames,followsSessionName} from '../../apps/daemon/src/session-names.ts';
 import {Store} from '../../apps/daemon/src/store.ts';
 import type {Workspace,TerminalRecord} from '../../apps/daemon/src/contracts.ts';
 
@@ -81,7 +81,7 @@ test('workspace names follow the latest provider conversation, persist, and neve
       claude:async path=>{assert.equal(path,workspace.path);return claude;},
     },0);
     await names.refresh();
-    assert.deepEqual(store.get('workspaces',workspace.id),{...workspace,name:'Claudeの会話名'});
+    assert.deepEqual(store.get('workspaces',workspace.id),{...workspace,name:'Claudeの会話名',sessionNameUpdatedAt:2000});
     const revision=store.state().revision;
     await names.refresh();assert.equal(store.state().revision,revision);
     codex={name:'Codexの新しい会話名',updatedAt:3000};await names.refresh();
@@ -93,7 +93,7 @@ test('workspace names follow the latest provider conversation, persist, and neve
     await unavailable.refresh();
     assert.equal(store.get<Workspace>('workspaces',workspace.id)?.name,codex.name);
     await names.close();store.close();store=new Store(dbPath);
-    assert.deepEqual(store.get('workspaces',workspace.id),{...workspace,name:codex.name});
+    assert.deepEqual(store.get('workspaces',workspace.id),{...workspace,name:codex.name,sessionNameUpdatedAt:3000});
   } finally {store.close();await rm(home,{recursive:true,force:true});}
 });
 
@@ -185,4 +185,43 @@ test('tab names follow exact sessions, including root folders, and preserve conc
     assert.equal(store.get<Workspace>('workspaces','w')?.name,'Root');
     await names.close();
   } finally {store.close();}
+});
+
+test('manual workspace names and newer pushed names survive stale provider polling, including restarts',async()=>{
+  const store=new Store(':memory:');
+  try{
+    const workspace:Workspace={id:'w',projectId:'p',name:'Manual',nameSource:'manual',path:'/repo',branch:'test',kind:'worktree',createdAt:''};
+    store.put('workspaces',workspace);
+    store.put('terminals',{id:'t',workspaceId:'w',provider:'codex',sessionId:'s',agentId:'s',status:'running',cols:80,rows:24,createdAt:''});
+    const names=new SessionNames(store,{codex:async()=>({name:'Stale',updatedAt:1000}),claude:async()=>undefined},0);
+    await names.refresh();assert.equal(store.get<Workspace>('workspaces','w')?.name,'Manual');
+    store.put('workspaces',{...workspace,name:'Pushed',nameSource:'session',sessionNameUpdatedAt:2000});
+    await names.refresh();assert.equal(store.get<Workspace>('workspaces','w')?.name,'Pushed');
+    const restarted=new SessionNames(store,{codex:async()=>({name:'Stale',updatedAt:1000}),claude:async()=>undefined},0);
+    await restarted.refresh();assert.equal(store.get<Workspace>('workspaces','w')?.name,'Pushed');
+  }finally{store.close();}
+});
+
+ test('legacy explicit creation names remain manual while default worktree slugs follow sessions',()=>{
+  const workspace={path:'/data/worktrees/project/My-task-a1234567'} as Workspace;
+  assert.equal(followsSessionName(workspace),false);
+  assert.equal(followsSessionName({...workspace,path:'/data/worktrees/project/worktree-a1234567'}),true);
+  assert.equal(followsSessionName({...workspace,nameSource:'session'}),true);
+});
+
+test('an in-flight final lookup cannot overwrite a pushed terminal title',async()=>{
+  const store=new Store(':memory:');
+  try{
+    store.put('workspaces',{id:'w',projectId:'p',name:'Root',path:'/repo',branch:'main',kind:'root',createdAt:''});
+    const terminal:TerminalRecord={id:'t',workspaceId:'w',provider:'codex',sessionId:'s',status:'running',sessionName:'Old',cols:80,rows:24,createdAt:''};
+    store.put('terminals',terminal);
+    let release!:(value:{name:string;updatedAt:number})=>void;
+    const names=new SessionNames(store,{codex:async()=>new Promise(resolve=>{release=resolve;}),claude:async()=>undefined},0);
+    store.put('terminals',{...terminal,status:'exited'});
+    const refresh=names.refresh();
+    store.put('terminals',{...terminal,status:'exited',sessionName:'Pushed'});
+    release({name:'Stale',updatedAt:1});await refresh;
+    await names.refresh();
+    assert.equal(store.get<TerminalRecord>('terminals','t')?.sessionName,'Pushed');
+  }finally{store.close();}
 });

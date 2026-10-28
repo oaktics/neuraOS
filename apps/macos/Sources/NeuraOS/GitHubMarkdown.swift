@@ -79,6 +79,7 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
     let baseURL: URL?
     var workspaceRoot: URL? = nil
     var openFile: ((String) -> Void)? = nil
+    @Environment(\.openURL) private var openURL
     let dark: Bool
     @Binding var height: CGFloat
 
@@ -155,7 +156,7 @@ struct GitHubMarkdownWebView: NSViewRepresentable {
                 decisionHandler(.cancel); return
             }
             if action.navigationType == .linkActivated, let url = action.request.url,
-               ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {NSWorkspace.shared.open(url)}
+               ["https", "http", "mailto"].contains(url.scheme?.lowercased() ?? "") {parent.openURL(url)}
             decisionHandler(.cancel)
         }
     }

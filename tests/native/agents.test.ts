@@ -1,3 +1,4 @@
+import {codexSessionInstructions} from '../../apps/daemon/src/session-instructions.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtemp,symlink,rm,realpath} from 'node:fs/promises';
@@ -7,16 +8,17 @@ import {Agents} from '../../apps/daemon/src/agents.ts';
 import {CodexRPC,type RPCEvent} from '../../apps/daemon/src/codex-rpc.ts';
 import type {Workspace} from '../../apps/daemon/src/contracts.ts';
 
-function fixture(reportedCwd?:string){
+function fixture(reportedCwd?:string,loadedId?:string){
   const store=new Store(':memory:');
   const workspace:Workspace={id:randomUUID(),projectId:randomUUID(),name:'worker',path:'/tmp/worker',branch:'test',kind:'worktree',createdAt:''};store.put('workspaces',workspace);
-  const clients:{emit:(e:RPCEvent)=>void;calls:{method:string;params:any}[];replies:any[];failStart:boolean}[]=[];
+  const clients:{emit:(e:RPCEvent)=>void;calls:{method:string;params:any}[];replies:any[];failStart:boolean;args:string[]}[]=[];
   const factory:typeof CodexRPC.start=async(_program,_env,_args,emit)=>{
-    const client={emit,calls:[] as {method:string;params:any}[],replies:[] as any[],failStart:false};clients.push(client);
+    const client={emit,calls:[] as {method:string;params:any}[],replies:[] as any[],failStart:false,args:_args};clients.push(client);
     return {endpoint:'unix:///tmp/fake',pid:999999,
       async call(method:string,params:any){client.calls.push({method,params});
         if(method==='thread/start'||method==='thread/resume')return {thread:{id:params.threadId??randomUUID(),cwd:reportedCwd??workspace.path,status:{type:'idle'}}};
-        if(method==='thread/loaded/list')return {data:[],nextCursor:null};
+        if(method==='thread/loaded/list')return {data:loadedId?[loadedId]:[],nextCursor:null};
+        if(method==='thread/read')return {thread:{id:params.threadId,cwd:reportedCwd??workspace.path,status:{type:'idle'}}};
         if(method==='thread/turns/list')return {data:[{id:'history',items:[{type:'agentMessage',text:'result'}]}],nextCursor:null};
         if(method==='turn/start'){
           if(client.failStart)throw new Error('timeout');
@@ -118,9 +120,9 @@ test('a completion saved before a crash is delivered once on recovery without ru
     f.agents.watch(main,[worker]);await f.agents.shutdown();
     f.store.put('agents',{...f.agents.get(worker),lastTurnId:randomUUID(),lastTurnStatus:'completed',summary:'Recovered report'});
     const recovered=new Agents(f.store,()=>'', '',f.factory);
-    assert.equal(recovered.get(main).pending.length,1);assert.equal(recovered.get(main).pending[0].report,true);
+    assert.equal(recovered.get(main).pending.length,0);assert.equal(recovered.get(main).reports?.length,1);
     assert.equal(recovered.get(main).status,'interrupted');
-    const twice=new Agents(f.store,()=>'', '',f.factory);assert.equal(twice.get(main).pending.length,1);
+    const twice=new Agents(f.store,()=>'', '',f.factory);assert.equal(twice.get(main).reports?.length,1);
     await recovered.shutdown();await twice.shutdown();
   }finally{await f.agents.shutdown();f.store.close();}
 });
@@ -162,5 +164,151 @@ test('history selection in another terminal cannot take over a live session',asy
     f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:owner.turnId,status:'completed'}}});
     assert.equal(f.agents.get(worker).lastTurnStatus,'completed');
     assert.equal(f.agents.get(worker).status,'idle');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+for(const resume of [false,true])test(`shared workflow instructions reach Codex ${resume?'resume':'start'}`,async()=>{
+  const f=fixture();try{
+    const first=await f.open();
+    if(resume){await f.agents.shutdown();await f.agents.open('fake',{},f.workspace,randomUUID(),first.threadId);}
+    const call=f.clients.at(-1)!.calls.find(c=>c.method===(resume?'thread/resume':'thread/start'))!;
+    assert.equal(call.params.developerInstructions,codexSessionInstructions);
+    assert.ok(f.clients.at(-1)!.args.includes('developer_instructions='+JSON.stringify(codexSessionInstructions)));
+    assert.match(call.params.developerInstructions,/Respect explicit user instructions/);
+    assert.match(call.params.developerInstructions,/task_list/);
+    assert.match(call.params.developerInstructions,/Isolate independent code changes in a worktree/);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('history chooser discovery also installs shared workflow instructions',async()=>{
+  const id=randomUUID(),f=fixture(undefined,id);
+  try{
+    const opened=await f.agents.open('fake',{},f.workspace,randomUUID(),undefined,undefined,true);
+    assert.equal(opened.threadId,undefined);
+    assert.ok(f.clients[0].args.includes('developer_instructions='+JSON.stringify(codexSessionInstructions)),'server config covers TUI-created threads before discovery');
+    for(let i=0;i<150&&!f.agents.list().length;i++)await new Promise(r=>setTimeout(r,25));
+    assert.equal(f.agents.get(id).id,id);
+    const resume=f.clients[0].calls.find(c=>c.method==='thread/resume');
+    assert.equal(resume?.params.developerInstructions,codexSessionInstructions);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+
+test('active supervisor receives and acknowledges many reports without filling instruction queue',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;await f.agents.send(id,'long-running work','queue');
+    await f.agents.send(id,'do not discard this instruction','queue');
+    const instructionId=f.agents.get(id).pending[0].id;
+    for(let i=0;i<100;i++){
+      const {reportId}=f.agents.report(id,`progress ${i}`);
+      const {agent}=await f.agents.read(id);assert.equal(agent.reports?.[0].id,reportId);
+      f.agents.ack(id,[reportId,instructionId]);
+      assert.equal(f.agents.get(id).pending[0].id,instructionId);
+      assert.equal(f.agents.get(id).reports?.length,0);
+    }
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    for(let i=1;i<32;i++)await f.agents.send(id,`instruction ${i}`,'queue');
+    await assert.rejects(f.agents.send(id,'overflow instruction','queue'),{code:'agent_queue_full'});
+    const {reportId}=f.agents.report(id,'report still accepted with 32 queued instructions');
+    f.agents.ack(id,[reportId]);assert.equal(f.agents.get(id).pending.length,32);
+    assert.throws(()=>f.agents.report(id,'x'.repeat(16385)),{code:'invalid_report'});
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('report notification does not restart forever when the receiver completes without acknowledging',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;
+    const {reportId}=f.agents.report(id,'done');await tick();
+    const turn=f.agents.get(id).turnId!;
+    f.clients[0].emit({method:'turn/completed',params:{threadId:id,turn:{id:turn,status:'completed'}}});await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    assert.equal(f.agents.get(id).reports?.[0].id,reportId);
+    assert.equal(f.agents.get(id).reports?.[0].notified,true);
+    f.agents.ack(id,[reportId]);await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('full report inbox preserves watches and delivers after ack without deleting execution instructions',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');
+    for(let i=0;i<32;i++)f.agents.report(main,`report ${i}`);
+    assert.throws(()=>f.agents.report(main,'overflow'),{code:'agent_reports_full'});
+    await f.agents.send(main,'instruction still fits','queue');
+    f.agents.watch(main,[worker]);await f.agents.send(worker,'work','queue');
+    f.clients[0].emit({method:'item/completed',params:{threadId:worker,item:{type:'agentMessage',text:'completion evidence'}}});
+    f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:f.agents.get(worker).turnId,status:'completed'}}});await tick();
+    assert.equal(f.agents.get(main).watching?.length,1);
+    await f.agents.send(worker,'next turn clears summary','queue');
+    const report=f.agents.get(main).reports![0];f.agents.ack(main,[report.id]);
+    assert.equal(f.agents.get(main).watching?.length,0);
+    assert.equal(f.agents.get(main).reports?.length,32);
+    assert.equal(f.agents.get(main).reports?.at(-1)?.sourceTaskId,worker);
+    assert.match(f.agents.get(main).reports!.at(-1)!.text,/completion evidence/);
+    assert.equal(f.agents.get(main).pending[0].text,'instruction still fits');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('watch updates coalesce by worker and stale acknowledgments never erase a new report',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');let oldId='';
+    for(let i=0;i<50;i++){
+      f.agents.watch(main,[worker]);await f.agents.send(worker,`work ${i}`,'queue');
+      f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:f.agents.get(worker).turnId,status:'completed'}}});await tick();
+      const report=f.agents.get(main).reports![0];assert.notEqual(report.id,oldId);
+      f.agents.ack(main,[oldId]);assert.equal(f.agents.get(main).reports![0].id,report.id);oldId=report.id;
+    }
+    assert.equal(f.agents.get(main).reports?.length,1);
+    assert.equal(f.agents.get(main).reports?.[0].updates,50);
+    assert.equal(f.agents.get(main).pending.length,0);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('legacy watch reports migrate in bounded batches while old send instructions remain untouched',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;await f.agents.shutdown();
+    const instruction={id:randomUUID(),text:'old progress indistinguishable from an instruction'};
+    const legacy=Array.from({length:40},()=>({id:randomUUID(),text:'old report',report:true}));
+    f.store.put('agents',{...f.agents.get(id),pending:[instruction,...legacy]});
+    const recovered=new Agents(f.store,()=>'', '',f.factory);
+    assert.equal(recovered.get(id).reports?.length,32);assert.equal(recovered.get(id).pending.length,9);
+    recovered.ack(id,recovered.get(id).reports!.map(r=>r.id));
+    assert.equal(recovered.get(id).reports?.length,8);assert.deepEqual(recovered.get(id).pending,[instruction]);
+    recovered.ack(id,[instruction.id,...legacy.map(r=>r.id)]);
+    assert.equal(recovered.get(id).reports?.length,0);assert.deepEqual(recovered.get(id).pending,[instruction]);
+    await recovered.shutdown();
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('Codex name notifications update the exact tab and worktree but preserve manual worktree names',async()=>{
+  const f=fixture();try{
+    const {threadId:id}=await f.open(),agent=f.agents.get(id!);
+    f.store.put('terminals',{id:agent.terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',sessionId:id,cols:80,rows:24,createdAt:''});
+    const rename=(name:string)=>f.clients[0].emit({method:'thread/name/updated',params:{threadId:id,threadName:name}});
+    rename('生成されたタイトル');
+    assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'生成されたタイトル');
+    assert.equal(f.store.get<any>('terminals',agent.terminalId)?.sessionName,'生成されたタイトル');
+    f.store.put('workspaces',{...f.workspace,name:'Manual',nameSource:'manual'});
+    rename('更新されたタイトル');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,'Manual');
+    f.store.put('workspaces',f.workspace);
+    f.store.put('terminals',{...f.store.get<any>('terminals',agent.terminalId),sessionId:'another'});
+    rename('古いセッション');assert.equal(f.store.get<Workspace>('workspaces',f.workspace.id)?.name,f.workspace.name);
+    f.clients[0].emit({method:'thread/started',params:{thread:{id:'temporary',cwd:f.workspace.path,ephemeral:true}}});
+    assert.equal(f.agents.list().length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+
+test('manual report attribution uses the current terminal task, not an older thread sharing that terminal',async()=>{
+  const f=fixture();try{
+    const old=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');
+    const terminalId=f.agents.get(old).terminalId,currentId=randomUUID();
+    f.store.put('agents',{...f.agents.get(old),id:currentId});
+    f.store.put('terminals',{id:terminalId,workspaceId:f.workspace.id,provider:'codex',status:'running',agentId:currentId,sessionId:currentId,cols:80,rows:24,createdAt:''});
+    f.agents.report(main,'current task report',terminalId);
+    assert.equal(f.agents.get(main).reports?.[0].sourceTaskId,currentId);
   }finally{await f.agents.shutdown();f.store.close();}
 });
