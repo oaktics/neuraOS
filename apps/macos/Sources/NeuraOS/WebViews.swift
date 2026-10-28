@@ -9,11 +9,20 @@ import ChromiumBridge
     @Published var canGoBack = false
     @Published var canGoForward = false
     @Published var isLoading = false
-    private let storageId: String
+    let storageId: String
+    let workspaceId: String
+    let projectId: String
+    var tabId: String {String(storageId.split(separator: ".").last ?? "")}
+    var browserVisible = true
+    @Published var automationEnabled = true {
+        didSet {UserDefaults.standard.set(!automationEnabled, forKey: "browser.mcpDisabled." + storageId)}
+    }
+    @Published var automationOwner = ""
     private var observedURL = ""
 
-    init(storageId: String, workspaceId: String, view: NCChromiumView? = nil) {
-        self.storageId = storageId
+    init(storageId: String, workspaceId: String, projectId: String, view: NCChromiumView? = nil) {
+        self.storageId = storageId; self.workspaceId = workspaceId; self.projectId = projectId
+        automationEnabled = !UserDefaults.standard.bool(forKey: "browser.mcpDisabled." + storageId)
         address = Self.savedAddress(storageId: storageId, workspaceId: workspaceId)
         self.view = view ?? NCChromiumView(frame: .zero)
         self.view.onState = { [weak self] url, title, back, forward, loading in
@@ -30,8 +39,12 @@ import ChromiumBridge
             }
         }
         self.view.onError = { [weak self] message in DispatchQueue.main.async {self?.message = message} }
+        self.view.onAutomationInvalidated = { [weak self] reason in
+            DispatchQueue.main.async {if let self {BrowserAutomation.shared.stop(self, reason: reason)}}
+        }
         // A popup already owns a Chromium navigation/opener. Do not reload it.
         if view == nil {navigate()}
+        BrowserAutomation.shared.register(self)
     }
     static func savedAddress(storageId: String, workspaceId: String, defaults: UserDefaults = .standard) -> String {
         let key = "browser.\(storageId)", legacyKey = "browser.\(workspaceId)"
@@ -64,10 +77,10 @@ struct BrowserPane: View {
     let onPopup: (NCChromiumView, String) -> Bool
     let onClosed: () -> Void
     @StateObject private var browser: BrowserModel
-    init(storageId: String, workspaceId: String, visible: Bool, title: Binding<String?>, view: NCChromiumView? = nil,
+    init(storageId: String, workspaceId: String, projectId: String, visible: Bool, title: Binding<String?>, view: NCChromiumView? = nil,
          onPopup: @escaping (NCChromiumView, String) -> Bool, onClosed: @escaping () -> Void) {
         self.visible = visible; self._title = title; self.onPopup = onPopup; self.onClosed = onClosed
-        _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, view: view))
+        _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, projectId: projectId, view: view))
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -83,6 +96,13 @@ struct BrowserPane: View {
                     Image(systemName: "arrow.up.right.square")
                 }.help("デフォルトのブラウザで開く")
             }.buttonStyle(.plain).font(.system(size: 12)).padding(.horizontal, 8).frame(height: 34)
+            HStack {
+                Text(browser.automationOwner.isEmpty ? (browser.automationEnabled ? "MCP接続可・同じプロジェクト" : "MCP接続解除中") : "MCP操作中 · \(browser.automationOwner.prefix(8))")
+                Spacer()
+                Button(browser.automationEnabled ? "停止・接続解除" : "MCP接続を再開") {
+                    if browser.automationEnabled {BrowserAutomation.shared.stop(browser)} else {browser.automationEnabled = true}
+                }
+            }.font(.system(size: 11)).padding(.horizontal, 8).padding(.vertical, 4)
             if let message = browser.message {Text(message).font(.system(size: 11)).foregroundStyle(.secondary).padding(8)}
             BrowserWebView(browser: browser, visible: visible, onPopup: onPopup, onClosed: onClosed)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -99,9 +119,10 @@ struct BrowserWebView: NSViewRepresentable {
     }
     func makeNSView(context: Context) -> NCChromiumView {browser.view}
     func updateNSView(_ view: NCChromiumView, context: Context) {
+        browser.browserVisible = visible
         view.isHidden = !visible
         view.onPopup = onPopup
         view.onClosed = {DispatchQueue.main.async {onClosed()}}
     }
-    static func dismantleNSView(_ view: NCChromiumView, coordinator: ()) {view.onClosed = nil; view.close()}
+    static func dismantleNSView(_ view: NCChromiumView, coordinator: ()) {BrowserAutomation.shared.unregister(view); view.onClosed = nil; view.close()}
 }

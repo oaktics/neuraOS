@@ -1,4 +1,5 @@
 import {validChannelCredential} from './channel-credentials.ts';
+import {registerBrowserAutomation} from './browser-automation.ts';
 import {detectSetup,setupPath,runSetup} from './worktree-setup.ts';
 import {Agents} from './agents.ts';
 import {Diagnostics} from './diagnostics.ts';
@@ -37,6 +38,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     reply.header('Cache-Control','no-store');
   });
   app.setErrorHandler((error,req,reply)=>{const e=error instanceof Fault?error:error instanceof z.ZodError?new Fault('invalid_request','要求の形式が正しくありません。'):new Fault('operation_failed','操作に失敗しました。パスと接続状態を確認してください。',500);reply.code(e.status).send({error:e.code,message:e.message});});
+  registerBrowserAutomation(app,store,token);
   const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',z.uuid().parse(id)),'workspace_missing','作業フォルダが見つかりません。');
   const setupJobs=new Map<string,{controller:AbortController; promise:Promise<void>}>();
   for(const record of store.list<Workspace>('workspaces')){

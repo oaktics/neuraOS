@@ -1,11 +1,13 @@
 #import "ChromiumBridge.h"
 #include "include/capi/cef_app_capi.h"
 #include "include/capi/cef_client_capi.h"
+#include "include/capi/cef_devtools_message_observer_capi.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
 #include <atomic>
 #include <map>
+#include <set>
 #include <string>
 
 #define API(name) static decltype(&name) p_##name
@@ -76,10 +78,15 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 @interface NCChromiumView () {
 @public
     cef_browser_t *_browser;
+    cef_registration_t *_devRegistration;
+    NSMutableDictionary<NSNumber *, id> *_devCallbacks;
+    int _devSequence;
+    std::set<int> _devOutstanding;
     NSString *_url, *_title, *_pendingURL;
-    BOOL _creating, _closed, _back, _forward, _loading;
+    BOOL _creating, _closed, _back, _forward, _loading, _automationCapture, _requestedHidden;
 }
 - (void)emitState;
+- (void)failDevTools:(NSString *)reason;
 - (void)createBrowser;
 @end
 
@@ -222,6 +229,8 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         h->api.on_render_process_terminated = [](cef_request_handler_t *s, cef_browser_t *browser, cef_termination_status_t, int, const cef_string_t *) {
             CallbackRef browserRef(browser);
             NCChromiumView *v = View(s);
+            [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
+            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");
             if (v.onError && !v->_closed) v.onError(@"ページの表示プロセスが終了しました。再読み込みしてください。");
         };
         return &h->api;
@@ -271,7 +280,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         };
         h->api.on_before_close = [](cef_life_span_handler_t *s, cef_browser_t *browser) {
             NCChromiumView *v = View(s);
-            if (v) {v->_browser = nullptr; if (!shuttingDown && v.onClosed) v.onClosed();}
+            if (v) {[v failDevTools:@"browser_tab_closed"]; Release(v->_devRegistration); v->_devRegistration = nullptr; v->_devOutstanding.clear(); v->_browser = nullptr; if (!shuttingDown && v.onClosed) v.onClosed();}
             auto found = browsers.find(browser->get_identifier(browser));
             if (found != browsers.end()) {Release(found->second); browsers.erase(found);}
             Release(browser); CompleteShutdown();
@@ -298,13 +307,16 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     if (!_browser && self.onError) self.onError(@"Chromiumのタブを作成できませんでした。");
 }
 - (void)setHidden:(BOOL)hidden {
+    _requestedHidden = hidden;
     if (hidden && _browser) {
         auto host = _browser->get_host(_browser); host->set_focus(host, 0); Release(host);
         id responder = self.window.firstResponder;
         if ([responder isKindOfClass:NSView.class] && [(NSView *)responder isDescendantOf:self]) [self.window makeFirstResponder:nil];
     }
-    [super setHidden:hidden];
+    [super setHidden:_automationCapture ? NO : hidden];
 }
+- (void)beginAutomationCapture {_requestedHidden = self.hidden; _automationCapture = YES; [super setHidden:NO]; [self setNeedsDisplay:YES];}
+- (void)endAutomationCapture {_automationCapture = NO; [self setHidden:_requestedHidden];}
 - (void)setFrameSize:(NSSize)size {[super setFrameSize:size]; [self setNeedsLayout:YES];}
 - (void)layout {[super layout]; for (NSView *child in self.subviews) {child.frame = self.bounds; child.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;}}
 - (void)emitState {if (self.onState) self.onState(_url ?: @"", _title ?: @"", _back, _forward, _loading);}
@@ -313,12 +325,52 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     if (_browser) {auto frame = _browser->get_main_frame(_browser); if (frame) {NCString value(url); frame->load_url(frame, &value.value); Release(frame);}}
     else if (self.window) [self createBrowser];
 }
+- (void)cancelDevTools {[self failDevTools:@"browser_cancelled"];}
+- (void)failDevTools:(NSString *)reason {
+    NSDictionary *callbacks = [_devCallbacks copy]; [_devCallbacks removeAllObjects];
+    for (void (^callback)(NSString *, NSString *) in callbacks.allValues) callback(nil, reason);
+}
+- (void)devTools:(NSString *)method parameters:(NSString *)json completion:(void (^)(NSString *, NSString *))completion {
+    NSAssert(NSThread.isMainThread, @"CEF DevTools must run on the AppKit thread");
+    if (!_browser || _closed || shuttingDown) {completion(nil, @"browser_unavailable"); return;}
+    // A timed-out/cancelled CDP call may still be in the renderer. Fail closed
+    // until its result arrives (or that renderer closes), even after Swift unwinds.
+    if (_devOutstanding.size() > _devCallbacks.count) {completion(nil, @"browser_uncertain"); return;}
+    if (!_devCallbacks) _devCallbacks = [NSMutableDictionary dictionary];
+    auto host = _browser->get_host(_browser);
+    if (!_devRegistration) {
+        auto observer = new Handler<cef_dev_tools_message_observer_t>(self);
+        observer->api.on_dev_tools_method_result = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser, int messageId, int success, const void *result, size_t size) {
+            CallbackRef browserRef(browser); NCChromiumView *v = View(s); if (!v) return;
+            v->_devOutstanding.erase(messageId);
+            void (^callback)(NSString *, NSString *) = v->_devCallbacks[@(messageId)];
+            [v->_devCallbacks removeObjectForKey:@(messageId)];
+            if (callback) callback(success ? ([[NSString alloc] initWithBytes:result length:size encoding:NSUTF8StringEncoding] ?: @"{}") : nil, success ? nil : @"browser_protocol_error");
+        };
+        observer->api.on_dev_tools_agent_detached = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser) {CallbackRef ref(browser); NCChromiumView *v = View(s); [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
+            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");};
+        // CEF consumes the observer reference across its C API boundary.
+        _devRegistration = host->add_dev_tools_message_observer(host, &observer->api);
+    }
+    NSNumber *requestId = @(++_devSequence);
+    _devCallbacks[requestId] = [completion copy]; _devOutstanding.insert(requestId.intValue);
+    id params = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"id":requestId, @"method":method, @"params":params ?: @{}} options:0 error:nil];
+    BOOL sent = host->send_dev_tools_message(host, data.bytes, data.length); Release(host);
+    if (!sent) {_devOutstanding.erase(requestId.intValue); [_devCallbacks removeObjectForKey:requestId]; completion(nil, @"browser_protocol_error"); return;}
+    __weak NCChromiumView *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        NCChromiumView *v = weakSelf; if (!v) return;
+        void (^callback)(NSString *, NSString *) = v->_devCallbacks[requestId]; [v->_devCallbacks removeObjectForKey:requestId];
+        if (callback) callback(nil, @"browser_timeout");
+    });
+}
 - (void)goBack {if (_browser) _browser->go_back(_browser);}
 - (void)goForward {if (_browser) _browser->go_forward(_browser);}
 - (void)reload {if (_browser) _browser->reload(_browser); else [self createBrowser];}
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
-    if (_closed) return; _closed = YES;
+    if (_closed) return; _closed = YES; [self cancelDevTools];
     if (_browser) {auto host = _browser->get_host(_browser); host->close_browser(host, 1); Release(host);}
 }
 - (void)dealloc {[self close];}

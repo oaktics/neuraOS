@@ -1,3 +1,4 @@
+import {browserTools,callBrowser} from './browser-tools.mjs';
 // stdio MCP adapter for neuraOS-launched Codex and Claude Code clients.
 import {createInterface} from 'node:readline';
 import {readFile} from 'node:fs/promises';
@@ -23,7 +24,7 @@ const definitions=[
   ['task_wait','Wait up to 25 seconds for changes since revision; returns all registered sessions and a new revision. Continue waiting while supervising unfinished work.',{after:{type:'integer',minimum:0}},['after']],
 ];
 if(process.env.NEURA_SUPERVISION_CHANNEL==='claude')definitions.push(['channel_ack','Confirm receipt of the neuraOS Channels probe using its exact nonce. This is not a worker completion or user approval.',{nonce:id},['nonce']]);
-const tools=definitions.map(([name,description,properties,required])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}}));
+const tools=definitions.map(([name,description,properties,required])=>({name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}})).concat(browserTools);
 async function request(path,body,extraHeaders={}){const response=await fetch(new URL(path,endpoint),{method:body?'POST':'GET',headers:{authorization:`Bearer ${token}`,...extraHeaders,...(body?{'content-type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(250000)});const result=await response.json();if(!response.ok)throw new Error(JSON.stringify(result));return result;}
 const command=(operationId,command)=>request('/v1/commands',{operationId,command});
 function derived(id){const h=createHash('sha256').update(`neura-terminal:${id}`).digest('hex');return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-a${h.slice(17,20)}-${h.slice(20,32)}`;}
@@ -100,7 +101,7 @@ createInterface({input:process.stdin,crlfDelay:Infinity}).on('line',line=>{
     if(m.method==='ping')return {};
     if(m.method==='tools/list')return {tools};
     if(m.method==='tools/call'){
-      try{return {content:[{type:'text',text:JSON.stringify(await call(m.params.name,m.params.arguments??{}))}]};}
+      try{if(m.params.name.startsWith('browser_'))return await callBrowser(m.params.name,m.params.arguments??{},request,process.env.NEURA_SUPERVISION_TERMINAL,process.env.NEURA_BROWSER_TOKEN);return {content:[{type:'text',text:JSON.stringify(await call(m.params.name,m.params.arguments??{}))}]};}
       catch(error){return {isError:true,content:[{type:'text',text:String(error)}]};}
     }
     throw new Error('Unsupported method');

@@ -1,4 +1,5 @@
 import {channelCredential} from './channel-credentials.ts';
+import {browserCredential} from './browser-credentials.ts';
 import {claudeSessionInstructions} from './session-instructions.ts';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -24,6 +25,7 @@ export async function claudeMCPArguments(program:string,connection:ClaudeMCPConn
   const config={mcpServers:{neuraos:{type:'stdio',command:process.execPath,args:[fileURLToPath(new URL('./supervision-mcp.mjs',import.meta.url))],env:{
     NEURA_SUPERVISION_URL:connection.endpoint(),NEURA_SUPERVISION_TOKEN_FILE:connection.tokenPath,
     NEURA_CHANNEL_TOKEN:await channelCredential(connection.tokenPath,terminalId),NEURA_SUPERVISION_CHANNEL:'claude',NEURA_SUPERVISION_WORKSPACE:workspaceId,NEURA_SUPERVISION_TERMINAL:terminalId,
+    NEURA_BROWSER_TOKEN:await browserCredential(connection.tokenPath,terminalId),
   }}}};
   // Inline configuration is scoped to this launch; leave user/project MCPs and hooks intact.
   return ['--dangerously-load-development-channels','server:neuraos','--mcp-config',JSON.stringify(config),'--append-system-prompt',
