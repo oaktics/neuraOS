@@ -331,7 +331,7 @@ struct Sidebar: View {
             .disabled(!model.connected || model.isBusy("project.remove.\(project.id)") || model.state.features?.contains("project.remove") != true)
     }
     private func projectList(_ space: SidebarSpace) -> some View {
-        let projects = model.state.projects.filter {model.sidebarSpaces.owner(of: $0.id) == space.id}
+        let projects = model.sidebarSpaces.projects(in: space.id, from: model.state.projects)
         let searchQuery = space.id == model.sidebarSpaces.active.id ? query : ""
         return List(selection: Binding<String?>(
             get: {model.selectedId},
@@ -399,6 +399,21 @@ struct Sidebar: View {
                         }
                     }.padding(.horizontal, 2).padding(.top, 6).padding(.bottom, 2)
                     .contextMenu {projectActions(project, space: space)}
+                    .onDrag {SidebarProjectDrag(projectId: project.id, spaceId: space.id).provider}
+                    .onDrop(of: [SidebarProjectDrag.typeIdentifier], isTargeted: nil) {providers in
+                        guard space.id == model.sidebarSpaces.active.id,
+                              let provider = providers.first else {return false}
+                        provider.loadDataRepresentation(forTypeIdentifier: SidebarProjectDrag.typeIdentifier) {data, _ in
+                            guard let data, let drag = try? JSONDecoder().decode(SidebarProjectDrag.self, from: data),
+                                  drag.spaceId == space.id else {return}
+                            Task { @MainActor in
+                                guard model.sidebarSpaces.active.id == space.id else {return}
+                                _ = model.sidebarSpaces.reorderProject(drag.projectId, onto: project.id,
+                                                                       in: space.id, projects: model.state.projects)
+                            }
+                        }
+                        return true
+                    }
                 }
             }
             if projects.isEmpty {
