@@ -3,6 +3,14 @@ import ServiceManagement
 import SleepControl
 
 enum SleepServiceRegistration {
+    /// register() can report authorization failure before status reflects approval.
+    static func needsApproval(status: SMAppService.Status, error: Error?) -> Bool {
+        if status == .enabled {return false}
+        if status == .requiresApproval {return true}
+        guard let error = error as NSError? else {return false}
+        return error.domain == "SMAppServiceErrorDomain" && error.code == kSMErrorAuthorizationFailure
+    }
+
     /// Explicit recovery for a registration left pointing at a replaced app.
     /// Wait for removal to finish before registering the current bundle.
     @MainActor static func repair(status: () -> SMAppService.Status,

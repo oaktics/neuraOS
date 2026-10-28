@@ -12,6 +12,17 @@ public enum SleepService {
     public static let plist = name + ".plist"
     public static let stateDirectory = "/Library/Application Support/neuraOS Sleep Control"
 
+    /// launchd may supply a relative or synthetic argv[0]. Ask dyld instead.
+    public static func executableURL() throws -> URL {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buffer = [CChar](repeating: 0, count: Int(size))
+        guard _NSGetExecutablePath(&buffer, &size) == 0 else {
+            throw SleepSessionError("サービスの実行ファイルを確認できません。")
+        }
+        return URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath()
+    }
+
     /// Pin the peer to the designated requirement of the bundled executable.
     /// Ad-hoc builds use its exact cdhash; Developer ID builds retain their identity
     /// across updates. Never accept a bundle identifier alone.

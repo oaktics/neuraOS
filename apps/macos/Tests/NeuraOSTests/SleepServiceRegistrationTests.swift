@@ -3,6 +3,18 @@ import ServiceManagement
 @testable import NeuraOS
 
 final class SleepServiceRegistrationTests: XCTestCase {
+    func testAuthorizationFailureOffersApprovalEvenBeforeStatusUpdates() {
+        let denied = NSError(domain: "SMAppServiceErrorDomain", code: kSMErrorAuthorizationFailure)
+        for status in [SMAppService.Status.notFound, .notRegistered, .requiresApproval] {
+            XCTAssertTrue(SleepServiceRegistration.needsApproval(status: status, error: denied))
+        }
+        XCTAssertFalse(SleepServiceRegistration.needsApproval(status: .enabled, error: denied))
+        XCTAssertFalse(SleepServiceRegistration.needsApproval(status: .notFound,
+            error: NSError(domain: NSPOSIXErrorDomain, code: 1)))
+        XCTAssertFalse(SleepServiceRegistration.needsApproval(status: .notFound, error: nil))
+        XCTAssertTrue(SleepServiceRegistration.needsApproval(status: .requiresApproval, error: nil))
+    }
+
     @MainActor func testRepairWaitsForRemovalBeforeRegistering() async throws {
         var events: [String] = []
         try await SleepServiceRegistration.repair(status: {.enabled}, validate: {
