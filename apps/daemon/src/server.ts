@@ -21,7 +21,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   await chmod(tokenPath,0o600);
   const token=(await readFile(tokenPath,'utf8')).trim(),store=new Store(join(dataDir,'developer.sqlite'));
   let controlEndpoint=`http://127.0.0.1:${process.env.NEURA_DEV_PORT??4318}`;
-  const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents);
+  const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents,{endpoint:()=>controlEndpoint,tokenPath});
   const diagnostics=new Diagnostics(join(dataDir,'diagnostics'));
   diagnostics.record('daemon.start');
   const sessionNames=new SessionNames(store);
@@ -169,12 +169,25 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         if(!c.stopTerminals&&store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'))throw new Fault('workspace_running','このworktreeのターミナルとエージェントを停止してから削除してください。',409);
         const project=requireValue(store.get<Project>('projects',record.projectId),'project_missing','プロジェクトがありません。');
         const checkChanges=async()=>{
+          if(c.cleanup){
+            workspace(c.cleanup.callerWorkspaceId);
+            if(c.cleanup.callerWorkspaceId===record.id)throw new Fault('workspace_self_cleanup','現在作業中のworktreeは自分自身から削除できません。',409);
+            if(c.discardChanges||!c.stopTerminals)throw new Fault('workspace_cleanup_options','cleanupでは変更破棄は禁止で、停止確認が必要です。',409);
+            const active=agents.list().filter(a=>a.workspaceId===record.id);
+            const unverifiedTerminal=store.list<TerminalRecord>('terminals').some(t=>t.workspaceId===record.id&&t.status==='running'&&(t.provider==='codex'?!active.some(a=>a.terminalId===t.id):t.activity!=='idle'));
+            if(unverifiedTerminal)throw new Fault('workspace_task_unfinished','作業終了を確認できないターミナルがあります。確認して停止するまで保持します。',409);
+            if(active.some(a=>a.turnId||a.status==='working'||a.status==='waiting'||a.status==='failed'||a.pending.length||(a.reports?.length??0)||(a.watching?.length??0)))throw new Fault('workspace_task_unfinished','未完了・未実行指示・未受領報告・監視のある作業は削除できません。',409);
+            const head=(await work.git(record.path,['rev-parse','HEAD'])).trim();
+            if(head!==c.cleanup.expectedHead)throw new Fault('workspace_head_changed','HEADが変わりました。削除せず作業内容を再確認してください。',409);
+            await github.verifyCleanup(record.path,c.cleanup.mergedPR,head);
+          }
           if(c.discardChanges)return;
           // Git removes ignored files even without --force, including local secrets.
           const ignored=await work.git(record.path,['ls-files','--others','--ignored','--exclude-standard','--directory','-z']);
           if(ignored.length)throw new Fault('workspace_ignored_files','Gitの無視対象ファイル・フォルダがあります（.envなど）。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
           const changes=await work.git(record.path,['status','--porcelain=v1','-z','--untracked-files=normal']);
           if(changes.length)throw new Fault('workspace_dirty','未コミットの変更または未追跡ファイルがあります。必要なデータを退避するか、削除確認で「変更・未追跡ファイルも含めて削除」を選んでください。',409);
+          if(c.cleanup&&(await work.git(record.path,['rev-parse','HEAD'])).trim()!==c.cleanup.expectedHead)throw new Fault('workspace_head_changed','HEADが変わりました。作業を保持しました。',409);
         };
         await checkChanges();
         if(c.stopTerminals){await terminals.stopWorkspace(record.id);await checkChanges();}
@@ -185,6 +198,8 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         return {ok:true};
       }
       case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider,c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'agent.report':return agents.report(c.agentId,c.text,c.sourceTerminalId);
+      case 'agent.ack':return agents.ack(c.agentId,c.reportIds);
       case 'agent.watch':return agents.watch(c.agentId,c.taskIds);
       case 'agent.send':return agents.send(c.agentId,c.text,c.mode,c.expectedTurnId);
       case 'agent.interrupt':return agents.interrupt(c.agentId,c.expectedTurnId);

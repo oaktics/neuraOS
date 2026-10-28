@@ -66,6 +66,12 @@ export class GitHub {
   private checksCache=new ChecksCache();
   private statusCache=new GitHubRefreshCache<Awaited<ReturnType<GitHub['fetchStatus']>>>(()=>60000);
   constructor(private run:Runner=runGitHub,private gitRun:Runner=git){}
+  async verifyCleanup(path:string,number:number,expectedHead:string){
+    const repository=githubRepository(await this.gitRun(path,['remote','get-url','origin']));
+    const pr=z.object({state:z.string(),headRefOid:z.string()}).parse(JSON.parse(await this.run(path,['pr','view',String(number),'--repo',repository,'--json','state,headRefOid'])));
+    if(pr.state!=='MERGED'||pr.headRefOid!==expectedHead)throw new Fault('workspace_unmerged','現在のHEADと一致するマージ済みPRを確認できません。未push・未統合の作業を保持しました。',409);
+  }
+
   async pullRequests(root:string,query=''){
     const repository=githubRepository(await this.gitRun(root,['remote','get-url','origin']));
     if(/^#?\d+$/.test(query)||/^https?:\/\//i.test(query)){

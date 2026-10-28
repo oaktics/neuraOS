@@ -2,7 +2,7 @@ import {z} from 'zod';
 
 export const protocolVersion = 1;
 // Additive features are negotiated separately so existing v1 clients keep working.
-export const daemonFeatures = ['agent.supervision','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr'] as const;
+export const daemonFeatures = ['agent.supervision','agent.reports','workspace.cleanup','project.remove','github','workspace.delete','workspace.delete.discard','workspace.delete.stop-terminals','terminal.multiple','provider.usage','terminal.activity','terminal.notifications','github.checks','workspace.remote-default','project.worktree-startup','project.worktree-setup','project.folderless','workspace.from-pr'] as const;
 const id = z.uuid();
 const githubTarget = {workspaceId:id, repository:z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), branch:z.string().min(1).max(255), expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/)};
 export const Provider = z.enum(['codex', 'claude', 'shell']);
@@ -24,9 +24,11 @@ export const Command = z.discriminatedUnion('type', [
   z.object({type:z.literal('workspace.setup'), workspaceId:id}),
   z.object({type:z.literal('workspace.create'), projectId:id, name:z.string().trim().min(1).max(80).optional(), baseRef:z.string().min(1).max(200).optional(), pullRequest:z.string().trim().min(1).max(500).optional(),skipStartup:z.boolean().default(false)}),
   z.object({type:z.literal('workspace.sync-default'), workspaceId:id}),
-  z.object({type:z.literal('workspace.delete'), workspaceId:id, discardChanges:z.boolean().default(false), stopTerminals:z.boolean().default(false)}),
+  z.object({type:z.literal('workspace.delete'), workspaceId:id, discardChanges:z.boolean().default(false), stopTerminals:z.boolean().default(false),cleanup:z.object({callerWorkspaceId:id,expectedHead:z.string().regex(/^[a-f0-9]{40,64}$/),mergedPR:z.number().int().positive()}).optional()}),
   z.object({type:z.literal('terminal.open'), workspaceId:id, provider:Provider, resume:z.boolean().default(false),prompt:z.string().min(1).max(65536).optional(),resumeId:id.optional(),parentTaskId:id.optional()}),
   z.object({type:z.literal('agent.watch'),agentId:id,taskIds:z.array(id).max(32).refine(ids=>new Set(ids).size===ids.length)}),
+  z.object({type:z.literal('agent.report'),agentId:id,text:z.string().trim().min(1).max(16384),sourceTerminalId:id.optional()}),
+  z.object({type:z.literal('agent.ack'),agentId:id,reportIds:z.array(id).max(32)}),
   z.object({type:z.literal('agent.send'),agentId:id,text:z.string().trim().min(1).max(65536),mode:z.enum(['queue','steer']).default('queue'),expectedTurnId:id.optional()}),
   z.object({type:z.literal('agent.interrupt'),agentId:id,expectedTurnId:id}),
   z.object({type:z.literal('agent.respond'),agentId:id,requestId:z.union([z.string().max(256),z.number().int()]),result:z.record(z.string(),z.unknown())}),

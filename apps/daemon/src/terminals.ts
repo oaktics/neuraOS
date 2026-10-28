@@ -10,6 +10,7 @@ import {randomUUID} from 'node:crypto';
 import {Fault,requireValue,type Provider,type TerminalRecord,type Workspace} from './contracts.ts';
 import type {Agents} from './agents.ts';
 import type {Store} from './store.ts';
+import {claudeMCPArguments,type ClaudeMCPConnection} from './claude-mcp.ts';
 import {ActivityTracker,activityArguments,activityBridge,supportsActivity,type ActivityBridge} from './agent-activity.ts';
 
 const execFileAsync=promisify(execFile);
@@ -68,7 +69,7 @@ export class Terminals {
   private closing=false;
   private stoppingGroups=new Map<string,Set<number>>();
   private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge}>();
-  constructor(readonly store:Store,private processTable=readProcessTable,private agents?:Agents){}
+  constructor(readonly store:Store,private processTable=readProcessTable,private agents?:Agents,private claudeMCP?:ClaudeMCPConnection){}
   async open(workspace:Workspace,provider:Provider,resume:boolean,options:{prompt?:string;resumeId?:string;parentTaskId?:string}={}){
     const program=await executable(provider),id=randomUUID();
     const env=terminalEnvironment();
@@ -76,6 +77,7 @@ export class Terminals {
     let managed:{endpoint:string;threadId:string|undefined}|undefined;
     if(provider==='codex'&&this.agents&&await supportsManagedCodex(program))managed=await this.agents.open(program,env,workspace,id,options.resumeId,options.parentTaskId,resume);
     if((options.prompt||options.resumeId)&&!managed)throw new Fault('codex_supervision_unsupported','このCodex CLIは監督機能に対応していません。Codexを更新してください。',409);
+    if(provider==='claude'&&this.claudeMCP)extraArgs=await claudeMCPArguments(program,this.claudeMCP,workspace.id,id);
     if(!managed&&await supportsActivity(provider,program)){
       const tracker=new ActivityTracker();
       // Status integration is optional: a failed observer must not block the CLI.
@@ -92,7 +94,7 @@ export class Terminals {
           if(current.activity!==activity||current.sessionId!==sessionId||notification)this.store.put('terminals',{...current,activity,sessionId,sessionName},notification);
         });
         this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
-        extraArgs=activityArguments(provider);
+        extraArgs.push(...activityArguments(provider));
       }catch{}
     }
     // Interactive user CLIs retain normal login/config, with full access selected at launch.
