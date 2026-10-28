@@ -28,7 +28,15 @@ async function call(name,a){
     case 'task_list':return {...await request('/v1/agents'),currentWorkspaceId:process.env.NEURA_SUPERVISION_WORKSPACE,currentTerminalId:process.env.NEURA_SUPERVISION_TERMINAL};
     case 'task_read':return request(`/v1/agents/${encodeURIComponent(a.taskId)}${a.cursor?'?cursor='+encodeURIComponent(a.cursor):''}`);
     case 'task_spawn':{
-      const w=await command(a.operationId,{type:'workspace.create',projectId:a.projectId,name:a.name,baseRef:a.baseRef,skipStartup:true});
+      let w=await command(a.operationId,{type:'workspace.create',projectId:a.projectId,name:a.name,baseRef:a.baseRef,skipStartup:true});
+      // Creation responses are cached, but setup progresses asynchronously. Do not
+      // cache a terminal.open failure while setup is still preparing the worktree.
+      if(w.setup){
+        const state=await request('/v1/state');
+        w=state.workspaces.find(workspace=>workspace.id===w.id)??w;
+        if(w.setup?.status==='running')return {workspace:w,setupPending:true,recovery:'Setup is running. Inspect workspace_list and retry task_spawn with the same operationId after setup completes.'};
+        if(w.setup?.status==='failed')return {workspace:w,startupError:w.setup.error??'Setup failed',recovery:'Inspect the setup log and retry setup in the app. Then retry task_spawn with the same operationId.'};
+      }
       try{const terminal=await command(derived(a.operationId),{type:'terminal.open',workspaceId:w.id,provider:'codex',prompt:a.prompt,parentTaskId:a.parentTaskId});return {workspace:w,terminal};}
       catch(error){return {workspace:w,startupError:String(error),recovery:'The worktree remains. Inspect task_list before retrying task_start.'};}
     }

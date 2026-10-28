@@ -173,6 +173,7 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var collapsed: Set<String> = []
+    @State private var setupProject: Project?
     @State private var removingProject: Project?
     private var deleting: Workspace? {
         get {model.pendingWorkspaceDeletion}
@@ -260,6 +261,7 @@ struct Sidebar: View {
             var transaction = Transaction(); transaction.disablesAnimations = true
             withTransaction(transaction) {swipeTranslation = 0; settling = false}
         }
+        .sheet(item: $setupProject) {project in WorktreeSetupSheet(project: project)}
         .alert("neuraOSからプロジェクトを削除しますか？", isPresented: Binding(get: {removingProject != nil}, set: {if !$0 {removingProject = nil}}), presenting: removingProject) {project in
             Button("キャンセル", role: .cancel) {removingProject = nil}
             Button("neuraOSから削除", role: .destructive) {
@@ -317,6 +319,8 @@ struct Sidebar: View {
                 .disabled(!model.connected || model.isBusy("project.attach.\(project.id)") || !model.supportsFolderless)
         }
         if project.supportsGit {
+            Button("setup scriptを設定…") {setupProject = project}
+                .disabled(!model.connected || model.state.features?.contains("project.worktree-setup") != true)
             Menu("worktree作成時に自動起動") {
                 ForEach(["codex", "claude", "shell"], id: \.self) {provider in
                     Toggle(provider == "codex" ? "Codex" : provider == "claude" ? "Claude Code" : "Terminal",

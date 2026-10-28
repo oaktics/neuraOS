@@ -12,8 +12,9 @@ struct WorkspaceCommandRequest {
     let action: WorkspaceAction
 }
 
-struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
-struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
+struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var worktreeSetup: String? = nil; var supportsGit: Bool {folderless != true && isGit != false}}
+struct WorktreeSetup: Codable, Hashable {let status: String; let script: String; let output: String; var error: String?}
+struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var setup: WorktreeSetup? = nil; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
 struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
