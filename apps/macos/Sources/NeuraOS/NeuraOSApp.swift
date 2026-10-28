@@ -6,6 +6,9 @@ import ChromiumBridge
 @main enum NeuraOSMain {
     static func main() {
         NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--download-smoke"), CommandLine.arguments.count > index + 2 {
+            exit(NCRunDownloadSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2], NSHostingView(rootView: BrowserDownloadsButton().padding(8))))
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--chromium-smoke"), CommandLine.arguments.count > index + 2 {
             exit(NCRunChromiumSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2]))
         }

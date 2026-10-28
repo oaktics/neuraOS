@@ -1,3 +1,4 @@
+#import "BrowserDownloads.h"
 #import <AppKit/AppKit.h>
 NS_ASSUME_NONNULL_BEGIN
 // Called before SwiftUI creates NSApplication. No Chromium work happens in tests.
@@ -19,3 +20,8 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 NS_ASSUME_NONNULL_END
 // Packaged, isolated integration check. Requires a loopback fixture URL.
 FOUNDATION_EXPORT int NCRunChromiumSmoke(NSString * _Nonnull url, NSString * _Nonnull dataDirectory);
+
+FOUNDATION_EXPORT int NCRunDownloadSmoke(NSString * _Nonnull url, NSString * _Nonnull dataDirectory, NSView * _Nonnull accessory);
+
+// True only for the process-local isolated smoke profile, never persisted preferences.
+FOUNDATION_EXPORT BOOL NCChromiumUsesTestKeychain(void);
