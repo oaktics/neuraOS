@@ -117,6 +117,9 @@ static NSString *StartChromiumImpl() {
     if (!canonical) return @"ブラウザ保存先を解決できませんでした。";
     profile = [NSString stringWithUTF8String:canonical]; free(canonical);
     cef_settings_t settings = {}; settings.size = sizeof(settings);
+    NCString locale(@"ja"), languages(@"ja-JP,ja,en-US,en");
+    settings.locale = locale.value;
+    settings.accept_language_list = languages.value;
     NCString frameworkPath(framework), mainPath(NSBundle.mainBundle.bundlePath), root(profile), cache([profile stringByAppendingPathComponent:@"Default"]);
     settings.framework_dir_path = frameworkPath.value;
     settings.main_bundle_path = mainPath.value;
