@@ -1,4 +1,4 @@
-import {open} from 'node:fs/promises';
+import {open,stat} from 'node:fs/promises';
 import type {ActivityEvent} from './agent-activity.ts';
 
 // A missing hook is not evidence of completion. Only Claude's persisted end-of-
@@ -7,8 +7,9 @@ export async function claudeCompletion(path:string,sessionId:string,after:number
   const file=await open(path,'r').catch(()=>undefined);
   if(!file)return;
   try{
-    const size=(await file.stat()).size,start=Math.max(0,size-512*1024),buffer=Buffer.alloc(size-start);
-    await file.read(buffer,0,buffer.length,start);
+    const before=await file.stat(),size=before.size,start=Math.max(0,size-512*1024),buffer=Buffer.alloc(size-start);
+    const {bytesRead}=await file.read(buffer,0,buffer.length,start);
+    if(bytesRead!==buffer.length)return;
     const text=buffer.toString('utf8'),lines=text.split('\n');
     if(start)lines.shift();
     // An unfinished write may be the start of the next turn. Wait for its flush.
@@ -27,6 +28,11 @@ export async function claudeCompletion(path:string,sessionId:string,after:number
         completed={hook_event_name:'Stop',session_id:sessionId,transcript_path:path,observed_at:String(timestamp),...(summary?{last_assistant_message:summary}:{})};
       }
     }
+    if(!completed)return;
+    const afterStat=await stat(path).catch(()=>undefined);
+    // A newer prompt may be appended while its hook is delayed or lost. Never
+    // publish a completion from a stale prefix or a replaced/truncated file.
+    if(!afterStat||before.dev!==afterStat.dev||before.ino!==afterStat.ino||before.size!==afterStat.size||before.mtimeMs!==afterStat.mtimeMs||before.ctimeMs!==afterStat.ctimeMs)return;
     return completed;
   }finally{await file.close();}
 }
