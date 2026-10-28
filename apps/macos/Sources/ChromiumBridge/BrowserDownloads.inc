@@ -107,6 +107,9 @@ static cef_download_handler_t *MakeDownloadHandler(NCChromiumView *view) {
         CallbackRef browserRef(browser); CallbackRef itemRef(item);
         if (!item->is_valid(item)) {Release(callback); return;}
         NCDownload *download = Download(item->get_id(item), browser ? browser->get_identifier(browser) : 0);
+        // Cancel may precede the first control callback (Save already consumed
+        // _before). Honor it before the terminal latch discards late updates.
+        if (download->_cancelRequested && item->is_in_progress(item) && callback) callback->cancel(callback);
         if (DownloadTerminal(download)) {Release(callback); return;}
         Release(download->_control); download->_control = callback;
         download.received = item->get_received_bytes(item); download.total = item->get_total_bytes(item);
@@ -118,7 +121,6 @@ static cef_download_handler_t *MakeDownloadHandler(NCChromiumView *view) {
             download.status = @"failed";
             download.detail = [NSString stringWithFormat:@"ダウンロードに失敗しました（エラー %d）。保存先の空き容量・権限や接続を確認し、再度お試しください。", (int)item->get_interrupt_reason(item)];
         }
-        if (download->_cancelRequested && item->is_in_progress(item) && callback) callback->cancel(callback);
         if (![@[@"choosing", @"running"] containsObject:download.status]) {
             auto control = download->_control; download->_control = nullptr; Release(control);
             auto before = download->_before; download->_before = nullptr; Release(before);
