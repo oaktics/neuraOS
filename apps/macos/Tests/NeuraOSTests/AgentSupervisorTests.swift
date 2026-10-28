@@ -2,6 +2,16 @@ import XCTest
 @testable import NeuraOS
 
 final class AgentSupervisorTests: XCTestCase {
+    func testStoppedSessionsAreHiddenButRecoverable() {
+        for status in ["idle", "working", "waiting", "interrupted", "failed"] {
+            let agent = ManagedAgent(id: "task", terminalId: "terminal", workspaceId: "workspace", name: "Worker", status: status, updatedAt: "now", turnId: nil, lastTurnStatus: nil, summary: nil, pending: [], requests: [])
+            // Terminal liveness, not the last turn outcome, determines visibility.
+            XCTAssertFalse(agent.isVisible(runningTerminalIDs: [], includeStopped: false))
+            XCTAssertTrue(agent.isVisible(runningTerminalIDs: [], includeStopped: true))
+            XCTAssertTrue(agent.isVisible(runningTerminalIDs: ["terminal"], includeStopped: false))
+            XCTAssertFalse(agent.isVisible(runningTerminalIDs: ["replacement-terminal"], includeStopped: false))
+        }
+    }
     func testTaskStatusDoesNotCallAnIdleAgentFinished() throws {
         let data = Data(#"{"id":"task","terminalId":"terminal","workspaceId":"workspace","name":"Worker","status":"idle","updatedAt":"now","pending":[],"requests":[],"lastTurnStatus":"completed"}"#.utf8)
         let agent = try JSONDecoder().decode(ManagedAgent.self, from: data)
