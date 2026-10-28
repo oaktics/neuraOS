@@ -484,7 +484,7 @@ test('lost Claude Stop hooks recover probe and work completion without replaying
     assert.equal(f.agents.get(id).summary,'Verified work');assert.equal(f.agents.get(id).status,'idle');
     await new Promise(r=>setTimeout(r,5));
     assert.equal(f.agents.channel(terminal).meta?.kind,'reports');
-    f.agents.claudeEvent(terminal,stop);
+    assert.equal(f.agents.claudeEvent(terminal,stop),false,'the terminal must discard this stale event too');
     assert.equal(f.agents.get(id).status,'working','delayed original Stop cannot complete the next notification');
     assert.equal(await f.agents.claudeCompletion(terminal),undefined);
     await f.agents.close(terminal);assert.equal(await f.agents.claudeCompletion(terminal),undefined);

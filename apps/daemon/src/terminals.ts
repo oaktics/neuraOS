@@ -86,8 +86,9 @@ export class Terminals {
           if(this.closing)return;
           let current=this.store.get<TerminalRecord>('terminals',id);
           if(!current||current.status!=='running')return;
+          // Apply the same stale-turn/session fence to the UI and task registry.
+          if(provider==='claude'&&this.claudeMCP&&this.agents&&!this.agents.claudeEvent(id,event))return;
           const activity=tracker.accept(event);
-          if(provider==='claude')this.agents?.claudeEvent(id,event);
           current=this.store.get<TerminalRecord>('terminals',id)??current;
           const notification=tracker.notification?{id:randomUUID(),terminalId:id,workspaceId:current.workspaceId,provider:current.provider,kind:tracker.notification,createdAt:new Date().toISOString()}:undefined;
           // Keep the last identity after SessionEnd for the final title read.

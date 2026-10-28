@@ -206,11 +206,12 @@ import {writeFile} from 'node:fs/promises';
 if(process.argv.includes('--help')){console.log('--settings --mcp-config --append-system-prompt');process.exit(0);}
 if(process.argv.includes('--version')){console.log('2.1.312');process.exit(0);}
 const sessionId=${JSON.stringify(id)},path=${JSON.stringify(transcript)};
-const emit=hook_event_name=>new Promise(resolve=>{const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);socket.on('error',resolve);socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name,session_id:sessionId,transcript_path:path,observed_at:String(Date.now())})+'\\n'));socket.on('close',resolve);});
+const emit=(hook_event_name,extra={})=>new Promise(resolve=>{const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);socket.on('error',resolve);socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name,session_id:sessionId,transcript_path:path,observed_at:String(Date.now()),...extra})+'\\n'));socket.on('close',resolve);});
 await emit('SessionStart');await emit('UserPromptSubmit');
 await new Promise(r=>setTimeout(r,30));
 const timestamp=new Date().toISOString();
 await writeFile(path,[{type:'assistant',sessionId,timestamp,message:{content:[{type:'text',text:'Completed despite missing hook'}]}},{type:'system',subtype:'turn_duration',sessionId,timestamp}].map(JSON.stringify).join('\\n')+'\\n');
+process.stdin.on('data',data=>{if(data.toString().includes('work'))void emit('PreToolUse');if(data.toString().includes('stale'))void emit('Stop',{observed_at:String(Date.parse(timestamp))});});
 setInterval(()=>{},1000);
 `,{mode:0o700});
   process.env.NEURA_CLAUDE_PATH=program;
@@ -224,5 +225,15 @@ setInterval(()=>{},1000);
     assert.equal(agents.get(id).summary,'Completed despite missing hook');
     assert.equal(agents.get(id).status,'idle');
     assert.equal(store.get<any>('terminals',terminal.id).activity,'idle');
+    const probe=agents.channel(terminal.id),nonce=probe.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    agents.acknowledgeChannel(terminal.id,nonce);
+    agents.claudeEvent(terminal.id,{hook_event_name:'Stop',session_id:id,transcript_path:transcript});
+    await agents.send(id,'next task','queue');agents.channel(terminal.id);
+    terminals.input(terminal.id,'test','work\r');
+    for(let i=0;i<100&&store.get<any>('terminals',terminal.id).activity!=='working';i++)await new Promise(r=>setTimeout(r,20));
+    assert.equal(store.get<any>('terminals',terminal.id).activity,'working');
+    terminals.input(terminal.id,'test','stale\r');await new Promise(r=>setTimeout(r,200));
+    assert.equal(agents.get(id).status,'working');
+    assert.equal(store.get<any>('terminals',terminal.id).activity,'working','rejected old Stop must not change terminal activity');
   }finally{await terminals.shutdown();await agents.shutdown();store.close();if(old===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=old;await rm(dir,{recursive:true,force:true});}
 });
