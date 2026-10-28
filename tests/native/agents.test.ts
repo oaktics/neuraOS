@@ -237,12 +237,15 @@ test('full report inbox preserves watches and delivers after ack without deletin
     assert.throws(()=>f.agents.report(main,'overflow'),{code:'agent_reports_full'});
     await f.agents.send(main,'instruction still fits','queue');
     f.agents.watch(main,[worker]);await f.agents.send(worker,'work','queue');
+    f.clients[0].emit({method:'item/completed',params:{threadId:worker,item:{type:'agentMessage',text:'completion evidence'}}});
     f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:f.agents.get(worker).turnId,status:'completed'}}});await tick();
     assert.equal(f.agents.get(main).watching?.length,1);
+    await f.agents.send(worker,'next turn clears summary','queue');
     const report=f.agents.get(main).reports![0];f.agents.ack(main,[report.id]);
     assert.equal(f.agents.get(main).watching?.length,0);
     assert.equal(f.agents.get(main).reports?.length,32);
     assert.equal(f.agents.get(main).reports?.at(-1)?.sourceTaskId,worker);
+    assert.match(f.agents.get(main).reports!.at(-1)!.text,/completion evidence/);
     assert.equal(f.agents.get(main).pending[0].text,'instruction still fits');
   }finally{await f.agents.shutdown();f.store.close();}
 });

@@ -16,13 +16,13 @@ function sameWorkspacePath(left:string,right:string){
 
 export interface TaskReport {
   id:string;kind:'manual'|'watch'|'legacy';text:string;createdAt:string;
-  sourceTaskId?:string;sourceTerminalId?:string;updates?:number;notified?:boolean;
+  sourceTaskId?:string;sourceTurnId?:string;sourceTerminalId?:string;updates?:number;notified?:boolean;
 }
 const REPORT_LIMIT=32;
 export interface AgentRecord {
   id:string;terminalId:string;workspaceId:string;name:string;status:'idle'|'working'|'waiting'|'interrupted'|'failed';
   turnId?:string;lastTurnId?:string;lastTurnStatus?:string;summary?:string;parentTaskId?:string;updatedAt:string;
-  watching?:{taskId:string;afterTurnId?:string}[];
+  watching?:{taskId:string;afterTurnId?:string;report?:TaskReport}[];
   reports?:TaskReport[];
   pending:{id:string;text:string;report?:boolean}[];requests:{id:number|string;method:string;params:unknown}[];
 }
@@ -224,23 +224,27 @@ export class Agents {
   }
   private deliverReports(){
     for(const supervisor of this.list()){
-      const ready=(supervisor.watching??[]).flatMap(w=>{
-        const source=this.store.get<AgentRecord>('agents',w.taskId);
-        return source?.lastTurnId&&source.lastTurnId!==w.afterTurnId?[source]:[];
-      });
-      if(!ready.length)continue;
-      const current=this.migrateReports(supervisor),reports=[...current.reports!],delivered=new Set<string>();
-      for(const source of ready){
-        const index=reports.findIndex(r=>r.kind==='watch'&&r.sourceTaskId===source.id);
-        if(index<0&&reports.length>=REPORT_LIMIT)continue; // Keep watch until capacity is freed.
-        const report:TaskReport={id:randomUUID(),kind:'watch',sourceTaskId:source.id,createdAt:new Date().toISOString(),updates:Math.min((index<0?0:reports[index].updates??0)+1,Number.MAX_SAFE_INTEGER),text:JSON.stringify({taskId:source.id,workspaceId:source.workspaceId,turnId:source.lastTurnId,status:source.lastTurnStatus,summary:source.summary?.slice(-16000)})};
+      const current=this.migrateReports(supervisor),reports=[...current.reports!],watching:NonNullable<AgentRecord['watching']>=[];
+      let changed=false,delivered=false;
+      for(const watch of supervisor.watching??[]){
+        const source=this.store.get<AgentRecord>('agents',watch.taskId);
+        const index=reports.findIndex(r=>r.kind==='watch'&&r.sourceTaskId===watch.taskId);
+        let report=watch.report;
+        if(source?.lastTurnId&&source.lastTurnStatus&&source.lastTurnId!==watch.afterTurnId&&source.lastTurnId!==report?.sourceTurnId){
+          report={id:randomUUID(),kind:'watch',sourceTaskId:source.id,sourceTurnId:source.lastTurnId,createdAt:new Date().toISOString(),updates:Math.min((report?.updates??(index<0?0:reports[index].updates??0))+1,Number.MAX_SAFE_INTEGER),text:JSON.stringify({taskId:source.id,workspaceId:source.workspaceId,turnId:source.lastTurnId,status:source.lastTurnStatus,summary:source.summary?.slice(-16000)})};
+          changed=true;
+        }
+        if(!report){watching.push(watch);continue;}
+        // A bounded snapshot on each watch preserves completion evidence even if
+        // the worker starts another turn while the supervisor inbox is full.
+        if(index<0&&reports.length>=REPORT_LIMIT){watching.push({...watch,report});continue;}
         if(index<0)reports.push(report);else reports[index]=report;
-        delivered.add(source.id);
+        changed=true;delivered=true;
       }
-      if(!delivered.size)continue;
-      // The latest completion per worker and watch removal share one durable write.
-      this.save({...current,watching:current.watching?.filter(w=>!delivered.has(w.taskId)),reports});
-      if(this.backends.has(supervisor.terminalId))void this.serial(supervisor.id,()=>this.flush(supervisor.id)).catch(()=>{});
+      if(!changed)continue;
+      // Completion snapshot, inbox insertion and watch removal are atomic.
+      this.save({...current,watching,reports});
+      if(delivered&&this.backends.has(supervisor.terminalId))void this.serial(supervisor.id,()=>this.flush(supervisor.id)).catch(()=>{});
     }
   }
   interrupt(id:string,expectedTurnId:string){return this.serial(id,async()=>{const a=this.get(id);if(a.turnId!==expectedTurnId)throw new Fault('agent_turn_changed','対象ターンが変わりました。',409);this.save({...a,pending:[],watching:[]});await this.rpc(id).call('turn/interrupt',{threadId:id,turnId:expectedTurnId});return {ok:true};});}
