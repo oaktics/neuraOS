@@ -371,6 +371,9 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
     if (_closed) return; _closed = YES; [self cancelDevTools];
+    // The view may deallocate before on_before_close (handlers hold it weakly).
+    // Release our registration here; the later callback safely sees nullptr.
+    Release(_devRegistration); _devRegistration = nullptr; _devOutstanding.clear();
     if (_browser) {auto host = _browser->get_host(_browser); host->close_browser(host, 1); Release(host);}
 }
 - (void)dealloc {[self close];}
