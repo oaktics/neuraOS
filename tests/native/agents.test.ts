@@ -475,6 +475,8 @@ test('lost Claude Stop hooks recover probe and work completion without replaying
     await new Promise(r=>setTimeout(r,5));
     assert.equal(f.agents.channel(terminal).content,'queued initial work');
     assert.equal(await f.agents.claudeCompletion(terminal),undefined,'probe completion cannot finish delegated work');
+    event('PermissionRequest');
+    assert.equal(f.agents.get(id).status,'waiting');
     await finish('Verified work');
     f.agents.report(id,'new worker result');
     const stop=await f.agents.claudeCompletion(terminal);assert.ok(stop);f.agents.claudeEvent(terminal,stop);

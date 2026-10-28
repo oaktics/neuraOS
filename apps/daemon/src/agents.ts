@@ -62,7 +62,7 @@ export class Agents {
       }
       if(old?.terminalId===terminalId&&live.sessionId===id&&['compact','startup'].includes(event.source??'')){this.save({...old,transcriptPath:event.transcript_path??old.transcriptPath});return;}
       if(live.sessionId!==id){
-        live.probeAcked=false;live.turnStartedAt=undefined;live.interruptedAt=undefined;live.providerTurnId=undefined;
+        live.probeAcked=false;live.turnStartedAt=undefined;live.interruptedAt=undefined;live.providerTurnId=undefined;live.lastActivityAt=undefined;
         if(!live.channelConfirmed){live.probeSentAt=undefined;live.channelNonce=randomUUID();}
       }
       live.sessionId=id;live.resumeId=undefined;
@@ -112,13 +112,13 @@ export class Agents {
     const live=this.claudeLive.get(terminalId),id=live?.sessionId;
     if(!live||!id)return;
     const a=this.get(id);
-    if(a.status!=='working'||!a.transcriptPath)return;
+    if(!['working','waiting'].includes(a.status)||!a.transcriptPath)return;
     const after=Math.max(live.turnStartedAt??0,live.probeSentAt??0,live.lastActivityAt??0,live.interruptedAt??0);
     const event=await claudeCompletion(a.transcriptPath,id,after);
     // File I/O may overlap a new turn, interruption, session switch or shutdown.
     if(this.claudeLive.get(terminalId)!==live||live.sessionId!==id)return;
     const current=this.get(id);
-    if(current.status!=='working'||current.turnId!==a.turnId||Math.max(live.turnStartedAt??0,live.probeSentAt??0,live.lastActivityAt??0,live.interruptedAt??0)!==after)return;
+    if(current.status!==a.status||current.turnId!==a.turnId||Math.max(live.turnStartedAt??0,live.probeSentAt??0,live.lastActivityAt??0,live.interruptedAt??0)!==after)return;
     return event;
   }
   channel(terminalId:string){
