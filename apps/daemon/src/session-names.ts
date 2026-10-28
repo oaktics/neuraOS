@@ -24,7 +24,7 @@ export async function codexSessionName(path:string,codexHome=join(homedir(),'.co
   const db=new DatabaseSync(join(codexHome,files[0]),{readOnly:true});
   try {
     db.exec('PRAGMA busy_timeout=50');
-    const row=db.prepare("SELECT name, COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt FROM threads WHERE cwd IN (?,?) AND source='cli' AND archived=0 AND (? IS NULL OR id=?) ORDER BY updatedAt DESC, id DESC LIMIT 1").get(path,canonical,sessionId??null,sessionId??null);
+    const row=db.prepare("SELECT name, COALESCE(updated_at_ms, updated_at * 1000) AS updatedAt FROM threads WHERE cwd IN (?,?) AND (source='cli' OR id=?) AND archived=0 AND (? IS NULL OR id=?) ORDER BY updatedAt DESC, id DESC LIMIT 1").get(path,canonical,sessionId??null,sessionId??null,sessionId??null);
     const name=displayName(row?.name);
     if(name&&typeof row?.updatedAt==='number')return {name,updatedAt:row.updatedAt};
   } finally {db.close();}
@@ -78,7 +78,9 @@ export class SessionNames {
       const active=(['codex','claude'] as const).filter(p=>providers.has(p));
       if(!active.length)return;
       await Promise.all(active.map(async provider=>{
-        const name=await this.readers[provider](workspace.path).catch(()=>undefined);
+        const managed=refreshable.filter(t=>t.workspaceId===workspace.id&&t.provider===provider&&t.agentId&&t.sessionId);
+        const candidates=await Promise.all([this.readers[provider](workspace.path).catch(()=>undefined),...managed.map(t=>this.readers[provider](workspace.path,t.sessionId).catch(()=>undefined))]);
+        const name=candidates.filter((n):n is SessionName=>!!n).sort((a,b)=>b.updatedAt-a.updatedAt)[0];
         if(name&&displayName(name.name)&&Number.isFinite(name.updatedAt))this.names.set(`${workspace.id}:${provider}`,name);
       }));
       // Retain stopped providers' last title so an older title from another

@@ -27,7 +27,10 @@ test('Codex uses generated conversation names, scoped to the exact worktree and 
     assert.equal((await codexSessionName(path,home,'main'))?.name,'更新された会話名');
     assert.equal(await codexSessionName(path,home,'missing'),undefined);
     assert.equal(await codexSessionName('/unrelated',home),undefined);
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM threads').get()?.n,5);
+    insert.run('managed',path,'監督された会話','Raw task','appServer',0,6,6000);
+    assert.equal(await codexSessionName(path,home),undefined);
+    assert.equal((await codexSessionName(path,home,'managed'))?.name,'監督された会話');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM threads').get()?.n,6);
   } finally {db.close();await rm(home,{recursive:true,force:true});}
 });
 
