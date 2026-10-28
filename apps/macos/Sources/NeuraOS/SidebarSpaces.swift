@@ -43,7 +43,7 @@ struct SidebarSpaceButton: View {
                                                    terminals: model.state.terminals, connected: model.connected)
         let description = activity.map {"\(space.name)・\($0.label)"} ?? space.name
         Button(action: action) {
-            Group {
+            HStack(spacing: 6) {
                 if activity == .working {
                     if reduceMotion {
                         Image(systemName: "arrow.triangle.2.circlepath")
@@ -51,14 +51,15 @@ struct SidebarSpaceButton: View {
                     } else {
                         ProgressView().controlSize(.mini).frame(width: 14, height: 14)
                     }
-                } else {
-                    Circle().fill(activity == .waiting ? Color.orange :
-                                  isSelected ? Color.accentColor : Color.secondary.opacity(0.3))
-                        .frame(width: 8, height: 8)
+                } else if activity == .waiting {
+                    Circle().fill(Color.orange).frame(width: 6, height: 6)
                 }
+                Text(space.name).font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
             }
-            .frame(width: 28, height: 28)
-            .background(Color.primary.opacity(hovered ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 7))
+            .padding(.horizontal, 9).frame(height: 28)
+            .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            .background(isSelected ? Color.accentColor.opacity(0.12) : Color.primary.opacity(hovered ? 0.07 : 0), in: RoundedRectangle(cornerRadius: 7))
             .contentShape(RoundedRectangle(cornerRadius: 7))
         }
         .buttonStyle(.plain)
