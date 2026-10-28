@@ -9,10 +9,18 @@ import type {Store} from './store.ts';
 interface SessionName {name:string; updatedAt:number}
 type Readers = {codex:(path:string,sessionId?:string)=>Promise<SessionName|undefined>; claude:(path:string,sessionId?:string)=>Promise<SessionName|undefined>};
 
-function displayName(value:unknown):string|undefined {
+export function displayName(value:unknown):string|undefined {
   if(typeof value!=='string')return;
   const name=value.replace(/[\p{Cc}\p{Cf}]/gu,' ').replace(/\s+/g,' ').trim();
   return name ? [...name].slice(0,200).join('') : undefined;
+}
+
+// Older records did not persist naming provenance. A custom creation slug in
+// the immutable worktree path identifies explicit names from those versions.
+export function followsSessionName(workspace:Workspace):boolean {
+  if(workspace.nameSource)return workspace.nameSource==='session';
+  const leaf=workspace.path.split('/').at(-1)??'';
+  return !(/-[0-9a-f]{8}$/.test(leaf)&&!/^worktree-[0-9a-f]{8}$/.test(leaf));
 }
 
 // The CLI's generated name is `name`, not `title` (which contains the first prompt).
@@ -88,7 +96,7 @@ export class SessionNames {
       const names=(['codex','claude'] as const).map(provider=>this.names.get(`${workspace.id}:${provider}`));
       const latest=names.filter((n):n is SessionName=>!!n&&Number.isFinite(n.updatedAt)).sort((a,b)=>b.updatedAt-a.updatedAt)[0];
       const name=displayName(latest?.name),current=this.store.get<Workspace>('workspaces',workspace.id);
-      if(name&&current&&current.name!==name)this.store.put('workspaces',{...current,name});
+      if(name&&current&&followsSessionName(current)&&(!current.sessionNameUpdatedAt||latest!.updatedAt>=current.sessionNameUpdatedAt)&&current.name!==name)this.store.put('workspaces',{...current,name,sessionNameUpdatedAt:latest!.updatedAt});
     }));
   }
   async close(){await this.pending;}
