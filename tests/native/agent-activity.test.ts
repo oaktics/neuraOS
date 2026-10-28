@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {access,stat} from 'node:fs/promises';
+import {access,stat,mkdtemp,writeFile,rm} from 'node:fs/promises';
 import {dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {ActivityTracker,activityArguments,activityBridge} from '../../apps/daemon/src/agent-activity.ts';
@@ -83,6 +83,17 @@ test('real hook helper delivers only whitelisted metadata to its own private soc
     const long='x'.repeat(12000)+' final verification proof';
     await invoke(bridge.path,{hook_event_name:'Stop',last_assistant_message:long});
     assert.equal((received[1] as any).last_assistant_message,long.slice(-8000));
+    const root=await mkdtemp('/tmp/neura-hook-correlation-'),transcript=root+'/session.jsonl';
+    try{
+      const rows=[{type:'user',sessionId:'root',timestamp:'2026-01-01T00:00:00Z',message:{content:'first'}},{type:'assistant',sessionId:'root',timestamp:'2026-01-01T00:00:01Z',message:{content:[{type:'text',text:'Done.'}]}},{type:'user',sessionId:'root',timestamp:'2026-01-01T00:00:02Z',message:{content:'second'}}];
+      await writeFile(transcript,rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+      const stop={hook_event_name:'Stop',session_id:'root',transcript_path:transcript,last_assistant_message:'Done.'};
+      await invoke(bridge.path,stop);assert.equal((received[2] as any).assistant_timestamp,undefined,'unflushed current response must not match a prior identical response');
+      rows.push({type:'assistant',sessionId:'root',timestamp:'2026-01-01T00:00:03Z',message:{content:[{type:'text',text:'Done.'}]}});
+      await writeFile(transcript,rows.map(r=>JSON.stringify(r)).join('\n')+'\n');
+      await invoke(bridge.path,stop);assert.equal((received[3] as any).assistant_timestamp,'2026-01-01T00:00:03Z');
+    }finally{await rm(root,{recursive:true,force:true});}
+
     assert.deepEqual(await invoke('/tmp/nonexistent-neura-activity.sock',{}),{code:0,output:''});
   }finally{await bridge.close();}
   await assert.rejects(access(dirname(bridge.path)));

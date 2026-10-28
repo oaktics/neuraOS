@@ -26,12 +26,16 @@ process.stdin.on('end', async () => {
         if(file)try{
           const size=(await file.stat()).size,buffer=Buffer.alloc(Math.min(size,256*1024));
           await file.read(buffer,0,buffer.length,size-buffer.length);
-          for(const line of buffer.toString('utf8').split('\n').reverse())try{
-            const row=JSON.parse(line);
+          const rows=buffer.toString('utf8').split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}}).reverse();
+          const boundary=rows.find(row=>row.type==='user'&&row.sessionId===payload.session_id&&!row.isSidechain&&(typeof row.message?.content==='string'||row.message?.content?.some(block=>block.type==='text')));
+          // Stop can precede transcript flush. A same-text response from a past
+          // turn is not evidence about this Stop; omit correlation when ambiguous.
+          if(boundary)for(const row of rows){
+            if(Date.parse(row.timestamp??'')<Date.parse(boundary.timestamp??''))continue;
             if(row.type==='assistant'&&row.sessionId===payload.session_id&&Array.isArray(row.message?.content)&&row.message.content.some(block=>block.type==='text'&&block.text===payload.last_assistant_message)){
               if(typeof row.timestamp==='string')event.assistant_timestamp=row.timestamp;break;
             }
-          }catch{}
+          }
         }finally{await file.close();}
       }
     }
