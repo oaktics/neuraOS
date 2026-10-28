@@ -359,7 +359,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     BOOL sent = host->send_dev_tools_message(host, data.bytes, data.length); Release(host);
     if (!sent) {_devOutstanding.erase(requestId.intValue); [_devCallbacks removeObjectForKey:requestId]; completion(nil, @"browser_protocol_error"); return;}
     __weak NCChromiumView *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
         NCChromiumView *v = weakSelf; if (!v) return;
         void (^callback)(NSString *, NSString *) = v->_devCallbacks[requestId]; [v->_devCallbacks removeObjectForKey:requestId];
         if (callback) callback(nil, @"browser_timeout");

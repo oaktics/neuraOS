@@ -61,7 +61,7 @@ export function registerBrowserAutomation(app:FastifyInstance,store:Store,master
     if(command.action==='stop'){for(const p of pending.values())if(p.command.action!=='list'&&p.command.workspaceId===command.workspaceId&&'tabId' in p.command&&p.command.tabId===command.tabId)p.finish(undefined,'browser_cancelled');}
     else if([...pending.values()].some(p=>p.command.action!=='list'&&p.command.workspaceId+':'+('tabId' in p.command?p.command.tabId:'')===key))throw new Fault('browser_busy','Another request is operating this tab.',409);
     if(pending.size>=32)throw new Fault('browser_busy','Too many browser requests.',409);
-    const id=randomUUID(),deadline=Date.now()+(command.action==='wait'?command.timeoutMs+2000:10000);
+    const id=randomUUID(),deadline=Date.now()+(command.action==='wait'?command.timeoutMs+2000:30000);
     return new Promise((resolve,reject)=>{
       pending.set(id,{id,deadline,projectId,terminalId,command,sent:false,finish:(result,error)=>{
         const p=pending.get(id);if(!p||p.settled)return;p.settled=true;

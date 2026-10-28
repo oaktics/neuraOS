@@ -68,6 +68,12 @@ batches cap the entire JSON envelope at 10 MiB (below the 12 MiB HTTP limit).
 Multiple images are split across acknowledgments; a single oversized image
 returns `browser_image_too_large`, allowing later results to proceed.
 Hidden views are rendered for capture and then restored without selecting a tab.
+Ordinary requests have a 30-second budget and individual DevTools calls a
+20-second limit; wait retains its user-specified timeout. The fixture RPC allows
+40 seconds so its transport deadline does not race the request deadline. These
+bounded budgets accommodate measured CDP delays (including an 8.175-second
+frame-tree response); App Nap has not been established as the cause. A scoped
+activity covers only in-flight native work and still allows system sleep.
 
 ## Verification
 

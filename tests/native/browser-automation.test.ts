@@ -101,3 +101,17 @@ test('oversized screenshot error acknowledges and releases the tab for subsequen
   await f.poll([{id:next.id,result:{text:'recovered'}}]);assert.equal((await read).json().result.text,'recovered');
  }finally{await f.close();}
 });
+test('ordinary 30-second budget expires without releasing dispatched native work (fake clock)',async t=>{
+ t.mock.timers.enable({apis:['Date','setInterval'],now:Date.now()});
+ const f=await fixture();try{
+  const result=f.call({action:'snapshot',...f.target()}).then(r=>r);const [request]=await f.next();
+  assert.equal(request.deadline-Date.now(),30000);
+  for(let i=0;i<14;i++){t.mock.timers.tick(2000);await f.poll();}
+  t.mock.timers.tick(2501);
+  assert.equal((await result).json().error,'browser_timeout');
+  const poll=(await f.poll()).json();assert.deepEqual(poll.requests,[]);assert.ok(poll.cancelIds.includes(request.id));
+  assert.equal((await f.call({action:'click',...f.target(),ref:'r'})).json().error,'browser_busy');
+  await f.poll([{id:request.id,error:'browser_cancelled'}]);
+  const next=f.call({action:'snapshot',...f.target()}).then(r=>r);const [r2]=await f.next();await f.poll([{id:r2.id,result:{}}]);assert.equal((await next).statusCode,200);
+ }finally{await f.close();t.mock.timers.reset();}
+});

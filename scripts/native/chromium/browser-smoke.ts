@@ -54,7 +54,17 @@ let appLog='';const evidence:any={startedAt:new Date().toISOString(),checks:[]};
 try{
 await writeFile(data+'/evidence.json',JSON.stringify(evidence,null,2));
 await new Promise<void>(r=>fixture.listen(0,'127.0.0.1',r));const address=fixture.address() as any,url=`http://127.0.0.1:${address.port}/`;
-const d=await createDaemon(data);cleanupDaemon=d;await d.app.listen({host:'127.0.0.1',port});
+const d=await createDaemon(data);cleanupDaemon=d;
+let lastNativePoll=0,lastNativeId='';const transport:{maxPollGapMs:number;restartGapsMs:number[];sent:any[];completed:any[]}={maxPollGapMs:0,restartGapsMs:[],sent:[],completed:[]};evidence.transport=transport;
+d.app.addHook('onSend',async(req,reply,payload)=>{
+ if(req.url==='/v1/browser/native/poll'&&reply.statusCode===200){
+  const now=Date.now(),nativeId=(req.body as any)?.nativeId;if(lastNativePoll){if(nativeId===lastNativeId)transport.maxPollGapMs=Math.max(transport.maxPollGapMs,now-lastNativePoll);else transport.restartGapsMs.push(now-lastNativePoll);}lastNativePoll=now;lastNativeId=nativeId;
+  for(const result of (req.body as any)?.results??[])transport.completed.push({id:result.id,at:now,error:result.error??null});
+  if(typeof payload==='string')for(const request of JSON.parse(payload).requests??[])transport.sent.push({id:request.id,action:request.command.action,sentAt:now,deadline:request.deadline});
+ }
+ return payload;
+});
+await d.app.listen({host:'127.0.0.1',port});
 const project=randomUUID(),otherProject=randomUUID();
 const workspaces=[project,project,otherProject].map(projectId=>({id:randomUUID(),projectId,name:'Browser smoke',path:data,branch:'',kind:'folder' as const,createdAt:''}));for(const w of workspaces)d.store.put('workspaces',w);
 const tabs=workspaces.map((w,i)=>({workspaceId:w.id,projectId:w.projectId,tabId:randomUUID(),url,...(i===1?{hidden:'true'}:{})}));
@@ -70,7 +80,7 @@ cleanupMCP=mcp;mcp.on('error',error=>{appLog+=String(error)});mcp.stderr.on('dat
 let sequence=0;const pending=new Map<number,(value:any)=>void>();
 mcp.once('exit',()=>{for(const resolve of pending.values())resolve({result:{isError:true,content:[{type:'text',text:'MCP exited'}]}});pending.clear()});
 createInterface({input:mcp.stdout}).on('line',line=>{const message=JSON.parse(line);pending.get(message.id)?.(message);pending.delete(message.id);});
-const rpc=(method:string,params:any={})=>new Promise<any>((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>reject(Error('MCP response timeout')),30000);pending.set(id,message=>{clearTimeout(timer);resolve(message.result)});mcp.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
+const rpc=(method:string,params:any={})=>new Promise<any>((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>reject(Error('MCP response timeout')),40000);pending.set(id,message=>{clearTimeout(timer);resolve(message.result)});mcp.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
 await rpc('initialize');assert.ok((await rpc('tools/list')).tools.some((t:any)=>t.name==='browser_screenshot'));
 const call=async(action:string,args:any={},i=0)=>{
  const response=await rpc('tools/call',{name:'browser_'+action,arguments:{...(action==='list'?{}:{workspaceId:tabs[i].workspaceId,tabId:tabs[i].tabId}),...args}});

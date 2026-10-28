@@ -14,6 +14,7 @@ struct BrowserAutomationError: Error {let code: String}
     private var results: [[String: Any]] = []
     private let nativeId = UUID().uuidString.lowercased()
     private var loop: Task<Void, Never>?
+    private var lastPollStart = ProcessInfo.processInfo.systemUptime
     private var daemonInstance: String?
     private var monitor: Any?
     private let api = DaemonClient()
@@ -46,6 +47,11 @@ struct BrowserAutomationError: Error {let code: String}
         model.view.cancelDevTools()
     }
     private func poll() async {
+        let pollStarted = ProcessInfo.processInfo.systemUptime
+        if CommandLine.arguments.contains("--browser-fixture"), pollStarted-lastPollStart > 1 {
+            print("browser-poll-gap \(Int((pollStarted-lastPollStart)*1000))ms");fflush(stdout)
+        }
+        lastPollStart = pollStarted
         let tabs: [[String: Any]] = entries.values.prefix(500).compactMap {entry in
             guard let m = entry.model else {return nil}
             return ["workspaceId":m.workspaceId,"tabId":m.tabId,"projectId":m.projectId,"url":String(decoding:m.address.utf8.prefix(8192),as:UTF8.self),"title":String(decoding:m.title.utf8.prefix(2048),as:UTF8.self),"selected":m.browserVisible,"loading":m.isLoading,"enabled":m.automationEnabled]
@@ -88,11 +94,18 @@ struct BrowserAutomationError: Error {let code: String}
         guard let model = entries[key]?.model else {results.append(["id":id,"error":"browser_tab_closed"]);return}
         guard model.projectId == projectId else {results.append(["id":id,"error":"browser_forbidden"]);return}
         let action = c["action"] as? String ?? ""
+        if CommandLine.arguments.contains("--browser-fixture") {
+            print("browser-received \(id) \(action) deadlineRemaining=\(Int(deadline-Date().timeIntervalSince1970*1000))ms");fflush(stdout)
+        }
         if action == "stop" {stop(model);results.append(["id":id,"result":["stopped":true]]);return}
         guard model.automationEnabled else {results.append(["id":id,"error":"browser_disabled"]);return}
         guard !owners.values.contains(key) else {results.append(["id":id,"error":"browser_busy"]);return}
         owners[id] = key; model.automationOwner = item["terminalId"] as? String ?? "CLI"
         jobs[id] = Task {
+            // Background/hidden tabs still need CEF's external main-loop pump.
+            // Keep this request responsive without preventing system sleep.
+            let activity = ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep, reason:"Run browser automation")
+            defer {ProcessInfo.processInfo.endActivity(activity)}
             defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = ""}
             do {
                 let result = try await Self.execute(c, view: model.view, deadline: deadline, allowed: {model.automationEnabled})
@@ -103,8 +116,12 @@ struct BrowserAutomationError: Error {let code: String}
     static func devTools(_ view: NCChromiumView, _ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
         try Task.checkCancellation()
         let json = String(data: try JSONSerialization.data(withJSONObject: params), encoding: .utf8)!
+        let started = ProcessInfo.processInfo.systemUptime
         return try await withCheckedThrowingContinuation { continuation in
             view.devTools(method, parameters: json) {result, error in
+                if CommandLine.arguments.contains("--browser-fixture") {
+                    print("browser-devtools \(method) \(Int((ProcessInfo.processInfo.systemUptime-started)*1000))ms \(error ?? "ok")");fflush(stdout)
+                }
                 if let error {continuation.resume(throwing: BrowserAutomationError(code: error));return}
                 guard let data = result?.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {continuation.resume(throwing: BrowserAutomationError(code: "browser_protocol_error"));return}
                 continuation.resume(returning: object)
