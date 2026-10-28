@@ -13,7 +13,7 @@ final class BrowserMigrationTests: XCTestCase {
         XCTAssertEqual(BrowserModel.savedAddress(storageId: "workspace.first", workspaceId: "workspace", defaults: defaults), "https://example.com/project")
         XCTAssertNil(defaults.string(forKey: "browser.workspace"))
         XCTAssertEqual(BrowserModel.savedAddress(storageId: "workspace.first", workspaceId: "workspace", defaults: defaults), "https://example.com/project")
-        XCTAssertEqual(BrowserModel.savedAddress(storageId: "workspace.second", workspaceId: "workspace", defaults: defaults), "http://localhost:3000")
+        XCTAssertEqual(BrowserModel.savedAddress(storageId: "workspace.second", workspaceId: "workspace", defaults: defaults), "https://www.google.com/")
         defaults.set("https://example.com/other", forKey: "browser.other")
         XCTAssertEqual(BrowserModel.savedAddress(storageId: "other.first", workspaceId: "other", defaults: defaults), "https://example.com/other")
     }

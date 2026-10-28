@@ -60,6 +60,8 @@ export class Agents {
           const result=await rpc.call('thread/resume',{threadId:id,excludeTurns:true});
           if(this.backends.get(terminalId)===rpc){
             this.register(terminalId,workspace,result.thread);
+            const terminal=this.store.get<TerminalRecord>('terminals',terminalId);
+            if(terminal)this.store.put('terminals',{...terminal,sessionId:id,agentId:id,sessionName:result.thread.name??undefined});
             await rpc.call('thread/inject_items',{threadId:id,items:[{type:'message',role:'developer',content:[{type:'input_text',text:`Your neuraOS task ID is ${id}. Use the neuraos MCP tools to discover and supervise other worktree sessions.`}]}]});
             const history=await rpc.call('thread/turns/list',{threadId:id,limit:1,itemsView:'summary'});
             const turn=history.data[0],current=this.get(id);
@@ -78,7 +80,11 @@ export class Agents {
   }
   private event(terminalId:string,workspace:Workspace,event:RPCEvent){
     if(!this.store.get<Workspace>('workspaces',workspace.id))return;
-    if(event.method==='thread/started')this.register(terminalId,workspace,event.params?.thread);
+    if(event.method==='thread/started'){
+      this.register(terminalId,workspace,event.params?.thread);
+      const thread=event.params?.thread,current=this.store.get<TerminalRecord>('terminals',terminalId);
+      if(current&&thread?.cwd===workspace.path&&!thread.parentThreadId)this.store.put('terminals',{...current,sessionId:thread.id,agentId:thread.id,sessionName:thread.name??undefined});
+    }
     const ids=this.list().filter(a=>a.terminalId===terminalId);
     const p=event.params??{};
     for(const a of ids){

@@ -39,7 +39,7 @@ import ChromiumBridge
         if let legacy = defaults.string(forKey: legacyKey) {
             defaults.set(legacy, forKey: key); defaults.removeObject(forKey: legacyKey); return legacy
         }
-        return "http://localhost:3000"
+        return "https://www.google.com/"
     }
     static func navigationURL(_ input: String) -> URL? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)

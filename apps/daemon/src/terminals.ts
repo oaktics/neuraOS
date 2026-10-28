@@ -86,7 +86,10 @@ export class Terminals {
           if(!current||current.status!=='running')return;
           const activity=tracker.accept(event);
           const notification=tracker.notification?{id:randomUUID(),terminalId:id,workspaceId:current.workspaceId,provider:current.provider,kind:tracker.notification,createdAt:new Date().toISOString()}:undefined;
-          if(current.activity!==activity||notification)this.store.put('terminals',{...current,activity},notification);
+          // Keep the last identity after SessionEnd for the final title read.
+          const sessionId=tracker.sessionId??current.sessionId;
+          const sessionName=sessionId===current.sessionId?current.sessionName:undefined;
+          if(current.activity!==activity||current.sessionId!==sessionId||notification)this.store.put('terminals',{...current,activity,sessionId,sessionName},notification);
         });
         this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
         extraArgs=activityArguments(provider);
@@ -96,7 +99,7 @@ export class Terminals {
     let proc:pty.IPty;
     try{proc=pty.spawn(program,managed?['resume',...(managed.threadId?[managed.threadId]:[]),'--remote',managed.endpoint]:[...argumentsFor(provider,resume),...extraArgs],{cwd:workspace.path,env,name:'xterm-256color',cols:100,rows:30});}
     catch(error){await this.closeActivity(id);await this.agents?.close(id);throw error;}
-    const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',...(provider==='shell'?{}:{activity:'unknown' as const}),createdAt:new Date().toISOString(),cols:100,rows:30,...(managed?{agentId:managed.threadId}:{})};
+    const record:TerminalRecord={id,workspaceId:workspace.id,provider,status:'running',...(provider==='shell'?{}:{activity:'unknown' as const}),createdAt:new Date().toISOString(),cols:100,rows:30,...(managed?{agentId:managed.threadId,sessionId:managed.threadId}:{})};
     this.processes.set(id,proc);this.store.put('terminals',record);this.store.resize(id,record.cols,record.rows);
     proc.onData(data=>{if(!this.closing)this.store.append(id,data);});
     proc.onExit(({exitCode})=>{this.processes.delete(id);this.owners.delete(id);void this.closeActivity(id);void this.agents?.close(id).catch(()=>{});if(!this.closing)this.store.put('terminals',{...requireValue(this.store.get<TerminalRecord>('terminals',id),'terminal_missing','ターミナルがありません。'),status:'exited',activity:undefined,exitCode});});

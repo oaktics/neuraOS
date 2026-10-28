@@ -19,6 +19,8 @@ enum AgentSleepPolicy {
     @Published private(set) var enabled = false
     @Published private(set) var starting = false
     @Published private(set) var stopping = false
+    @Published private(set) var repairing = false
+    @Published private(set) var startFailed = false
     private var runnerActive = false
     @Published private(set) var approvalRequired = false
     private let service = SMAppService.daemon(plistName: SleepService.plist)
@@ -71,8 +73,36 @@ enum AgentSleepPolicy {
     }
     func openApprovalSettings() {SMAppService.openSystemSettingsLoginItems()}
 
+    func repairRegistration() {
+        guard !enabled, !runnerActive, !repairing else {return}
+        startFailed = false
+        repairing = true
+        status = "スリープ制御サービスの登録を修復しています…"
+        Task {
+            defer {repairing = false}
+            do {
+                try await SleepServiceRegistration.repair(
+                    status: {self.service.status},
+                    validate: {try SleepServiceRegistration.validateBundle(at: Bundle.main.bundleURL)},
+                    unregister: {try await self.service.unregister()},
+                    register: {try self.service.register()})
+                refreshApproval()
+                status = approvalRequired
+                    ? "システム設定で許可してから、再度有効にしてください。"
+                    : service.status == .enabled
+                        ? "登録を更新しました。「この起動中は有効にする」で再度お試しください。"
+                        : "サービスの登録を確認できません。アプリを再起動して再度お試しください。"
+            } catch {
+                refreshApproval()
+                let detail = error as NSError
+                status = "登録の修復に失敗しました: \(detail.localizedDescription)（\(detail.domain): \(detail.code)）"
+            }
+        }
+    }
+
     func enable() {
-        guard !enabled, !runnerActive else {return}
+        guard !enabled, !runnerActive, !repairing else {return}
+        startFailed = false
         do {
             // Register only once. Turning sleep control off does not revoke the
             // installation approval, and launching the app never enables sleep control.
@@ -82,6 +112,7 @@ enum AgentSleepPolicy {
                 register: {try self.service.register()})
             refreshApproval()
             guard registrationStatus == .enabled else {
+                startFailed = !approvalRequired
                 status = approvalRequired
                     ? "初回の許可が必要です。「システム設定で許可」を開いてください。"
                     : "スリープ制御サービスの登録を確認できません（状態: \(registrationStatus.rawValue)）。再度有効にしてください。"
@@ -121,10 +152,11 @@ enum AgentSleepPolicy {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(15))
                 guard let self, self.sessionID == id, self.starting else {return}
-                self.finish(id: id, message: "サービスを開始できませんでした。バックグラウンド実行の許可を確認して再度お試しください。")
+                self.finish(id: id, message: "サービスを開始できませんでした。許可済みの場合は、設定の「サービス登録を修復」をお試しください。")
             }
         } catch {
             disable(); refreshApproval()
+            startFailed = !approvalRequired
             if !approvalRequired {
                 let detail = error as NSError
                 status = "スリープ制御の開始に失敗しました: \(detail.localizedDescription)（\(detail.domain): \(detail.code)）"
@@ -133,6 +165,7 @@ enum AgentSleepPolicy {
     }
     private func finish(id: UUID, message: String) {
         guard sessionID == id else {return}
+        startFailed = starting && enabled && !message.isEmpty
         sessionID = nil
         starting = false; runnerActive = false
         disable()
@@ -161,9 +194,11 @@ struct AgentSleepFooter: View {
     @ObservedObject var controller: AgentSleepController
 
     private var label: String {
+        if controller.repairing {return "修復中…"}
         if controller.stopping {return "解除中…"}
         if controller.starting {return "開始中…"}
         if controller.approvalRequired {return "許可が必要"}
+        if controller.startFailed {return "開始失敗"}
         return controller.enabled ? "有効" : "無効"
     }
 
@@ -182,7 +217,7 @@ struct AgentSleepFooter: View {
             Label("スリープ制限：\(label)", systemImage: controller.enabled ? "moon.slash.fill" : "moon")
         }
         .buttonStyle(.plain)
-        .disabled(controller.starting || controller.stopping)
+        .disabled(controller.starting || controller.stopping || controller.repairing)
         .foregroundStyle(controller.enabled ? Color.accentColor : Color.secondary)
         .help("スリープ制限：\(label)\n\(controller.status)\n\(actionHint)")
         .accessibilityLabel("スリープ制限：\(label)")
@@ -202,10 +237,14 @@ struct AgentSleepSettings: View {
             HStack {
                 Button(controller.enabled ? "無効にする" : "この起動中は有効にする") {
                     if controller.enabled {controller.disable()} else {controller.enable()}
-                }.disabled(controller.stopping)
+                }.disabled(controller.starting || controller.stopping || controller.repairing)
                 if controller.approvalRequired {
                     Button("システム設定で許可") {controller.openApprovalSettings()}
                 }
+            }
+            if !controller.enabled && !controller.approvalRequired {
+                Button("サービス登録を修復") {controller.repairRegistration()}
+                    .disabled(controller.starting || controller.stopping || controller.repairing)
             }
             Text(controller.status).font(.callout).textSelection(.enabled)
         }.padding(24).frame(width: 520)

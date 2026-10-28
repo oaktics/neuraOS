@@ -3,6 +3,19 @@ import ServiceManagement
 import SleepControl
 
 enum SleepServiceRegistration {
+    /// Explicit recovery for a registration left pointing at a replaced app.
+    /// Wait for removal to finish before registering the current bundle.
+    @MainActor static func repair(status: () -> SMAppService.Status,
+                                 validate: () throws -> Void,
+                                 unregister: () async throws -> Void,
+                                 register: () throws -> Void) async throws {
+        try validate()
+        let current = status()
+        guard current != .requiresApproval else {return}
+        if current == .enabled {try await unregister()}
+        try register()
+    }
+
     /// A missing BTM record can report notFound even with a complete app bundle.
     /// Only explicit enable requests register; approval and enabled states are preserved.
     static func prepare(status: () -> SMAppService.Status,

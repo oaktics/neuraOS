@@ -15,6 +15,11 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
         let name = kind == "agents" ? "作業一覧" : kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
         return ["files", "diff", "github", "agents"].contains(kind) ? name : "\(name) \(number)"
     }
+    func displayTitle(terminal: TerminalRecord?) -> String {
+        if ["codex", "claude"].contains(kind), terminal?.id == terminalId,
+           let name = terminal?.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {return name}
+        return title
+    }
     var icon: String {kind == "agents" ? "person.3" : kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
@@ -143,16 +148,17 @@ struct WorkspaceView: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
                         ForEach(layout.tabs) {item in
+                            let title = item.displayTitle(terminal: model.terminal(id: item.terminalId))
                             HStack(spacing: 8) {
                                 Button {layout.selectedId = item.id} label: {
                                     HStack(spacing: 6) {
                                         Image(systemName: item.icon)
-                                        Text(item.title).lineLimit(1)
+                                        Text(title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
                                         if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
                                         TerminalRunningIndicator(terminalId: item.terminalId)
                                     }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityLabel(item.title).help(item.filePath ?? item.title)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(item.title)を閉じる").help("\(item.title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
+                                }.buttonStyle(.plain).accessibilityLabel(title).help(item.filePath ?? title)
+                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(title)を閉じる").help("\(title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
                             }
                             .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
                             .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
