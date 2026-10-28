@@ -122,7 +122,7 @@ for await(const line of createInterface({input:process.stdin})){
 `,{mode:0o700});
   process.env.NEURA_CLAUDE_PATH=program;
   const store=new Store(':memory:'),terminals=new Terminals(store);
-  const waitFor=async(check:()=>boolean)=>{for(let i=0;i<100;i++){if(check())return;await new Promise(r=>setTimeout(r,20));}assert.fail('PTY state did not converge');};
+  const waitFor=async(check:()=>boolean)=>{for(let i=0;i<250;i++){if(check())return;await new Promise(r=>setTimeout(r,20));}assert.fail('PTY state did not converge');};
   try{
     const workspace={id:'worktree',projectId:'p',name:'w',path:dir,branch:'main',kind:'worktree' as const,createdAt:''};
     const first=await terminals.open(workspace,'claude',false),second=await terminals.open(workspace,'claude',false);
@@ -177,4 +177,52 @@ test('delayed completion metadata cannot mark a newer Claude turn idle',()=>{
   tracker.accept({hook_event_name:'UserPromptSubmit',observed_at:String(Date.now())});
   assert.equal(tracker.accept({hook_event_name:'Stop',observed_at:String(Date.now()-10000)}),'working');
   assert.equal(tracker.accept({hook_event_name:'Stop',assistant_timestamp:new Date(0).toISOString()}),'working');
+});
+
+test('hook delivery survives more than one second of delayed stdin under load',async()=>{
+  const events:unknown[]=[],bridge=await activityBridge(event=>events.push(event));
+  try{
+    const child=spawn(process.execPath,[fileURLToPath(new URL('../../apps/daemon/src/agent-activity-hook.mjs',import.meta.url))],{env:{...process.env,NEURA_ACTIVITY_SOCKET:bridge.path},stdio:'pipe'});
+    child.stdin.on('error',()=>{});
+    const done=new Promise<number|null>(resolve=>child.on('close',resolve));
+    await new Promise(r=>setTimeout(r,1200));
+    child.stdin.end(JSON.stringify({hook_event_name:'Stop',session_id:'root'}));
+    assert.equal(await done,0);assert.equal(events.length,1);
+    assert.equal(JSON.parse(activityArguments('claude')[1]).hooks.Stop[0].hooks[0].timeout,10);
+  }finally{await bridge.close();}
+});
+
+test('PTY observer repairs a lost Stop in both task registry and terminal activity',async()=>{
+  const {Store}=await import('../../apps/daemon/src/store.ts');
+  const {Terminals}=await import('../../apps/daemon/src/terminals.ts');
+  const {Agents}=await import('../../apps/daemon/src/agents.ts');
+  const {randomUUID}=await import('node:crypto');
+  const dir=await mkdtemp('/tmp/neura-stop-recovery-'),program=dir+'/claude',id=randomUUID(),transcript=dir+'/session.jsonl';
+  const old=process.env.NEURA_CLAUDE_PATH;
+  await writeFile(dir+'/token','test');
+  await writeFile(program,`#!/usr/bin/env node
+import {createConnection} from 'node:net';
+import {writeFile} from 'node:fs/promises';
+if(process.argv.includes('--help')){console.log('--settings --mcp-config --append-system-prompt');process.exit(0);}
+if(process.argv.includes('--version')){console.log('2.1.312');process.exit(0);}
+const sessionId=${JSON.stringify(id)},path=${JSON.stringify(transcript)};
+const emit=hook_event_name=>new Promise(resolve=>{const socket=createConnection(process.env.NEURA_ACTIVITY_SOCKET);socket.on('error',resolve);socket.on('connect',()=>socket.end(JSON.stringify({hook_event_name,session_id:sessionId,transcript_path:path,observed_at:String(Date.now())})+'\\n'));socket.on('close',resolve);});
+await emit('SessionStart');await emit('UserPromptSubmit');
+await new Promise(r=>setTimeout(r,30));
+const timestamp=new Date().toISOString();
+await writeFile(path,[{type:'assistant',sessionId,timestamp,message:{content:[{type:'text',text:'Completed despite missing hook'}]}},{type:'system',subtype:'turn_duration',sessionId,timestamp}].map(JSON.stringify).join('\\n')+'\\n');
+setInterval(()=>{},1000);
+`,{mode:0o700});
+  process.env.NEURA_CLAUDE_PATH=program;
+  const store=new Store(':memory:'),agents=new Agents(store,()=> 'http://127.0.0.1:4318',dir+'/token'),terminals=new Terminals(store,undefined,agents,{endpoint:()=> 'http://127.0.0.1:4318',tokenPath:dir+'/token'});
+  try{
+    const terminal=await terminals.open({id:randomUUID(),projectId:randomUUID(),name:'test',path:dir,branch:'test',kind:'worktree',createdAt:''},'claude',false);
+    for(let i=0;i<150;i++){
+      if(agents.list().some(a=>a.id===id&&a.lastTurnStatus==='completed'))break;
+      await new Promise(r=>setTimeout(r,30));
+    }
+    assert.equal(agents.get(id).summary,'Completed despite missing hook');
+    assert.equal(agents.get(id).status,'idle');
+    assert.equal(store.get<any>('terminals',terminal.id).activity,'idle');
+  }finally{await terminals.shutdown();await agents.shutdown();store.close();if(old===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=old;await rm(dir,{recursive:true,force:true});}
 });

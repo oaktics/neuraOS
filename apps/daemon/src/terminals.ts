@@ -68,7 +68,7 @@ export class Terminals {
   private owners=new Map<string,{clientId:string;until:number}>();
   private closing=false;
   private stoppingGroups=new Map<string,Set<number>>();
-  private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge}>();
+  private activity=new Map<string,{tracker:ActivityTracker;bridge:ActivityBridge;observer?:NodeJS.Timeout}>();
   constructor(readonly store:Store,private processTable=readProcessTable,private agents?:Agents,private claudeMCP?:ClaudeMCPConnection){}
   async open(workspace:Workspace,provider:Provider,resume:boolean,options:{prompt?:string;resumeId?:string;parentTaskId?:string}={}){
     const program=await executable(provider),id=randomUUID();
@@ -82,7 +82,7 @@ export class Terminals {
       const tracker=new ActivityTracker();
       // Status integration is optional: a failed observer must not block the CLI.
       try{
-        const bridge=await activityBridge(event=>{
+        const onEvent=(event:import('./agent-activity.ts').ActivityEvent)=>{
           if(this.closing)return;
           let current=this.store.get<TerminalRecord>('terminals',id);
           if(!current||current.status!=='running')return;
@@ -94,8 +94,15 @@ export class Terminals {
           const sessionId=tracker.sessionId??current.sessionId;
           const sessionName=sessionId===current.sessionId?current.sessionName:undefined;
           if(current.activity!==activity||current.sessionId!==sessionId||notification)this.store.put('terminals',{...current,activity,sessionId,sessionName},notification);
-        });
-        this.activity.set(id,{tracker,bridge});env.NEURA_ACTIVITY_SOCKET=bridge.path;
+        };
+        const bridge=await activityBridge(onEvent);
+        let observing=false;
+        const observer=provider==='claude'&&this.agents?setInterval(()=>{
+          if(observing||this.closing)return;observing=true;
+          void this.agents!.claudeCompletion(id).then(event=>{if(event)onEvent(event);}).catch(()=>{}).finally(()=>{observing=false;});
+        },2000):undefined;
+        observer?.unref();
+        this.activity.set(id,{tracker,bridge,observer});env.NEURA_ACTIVITY_SOCKET=bridge.path;
         extraArgs.push(...activityArguments(provider));
       }catch(error){if(provider==='claude'&&this.agents){await this.agents.close(id);throw error;}}
     }
@@ -110,7 +117,7 @@ export class Terminals {
     if(options.prompt&&managed?.threadId)await this.agents!.send(managed.threadId,options.prompt,'queue');
     return record;
   }
-  private async closeActivity(id:string){const entry=this.activity.get(id);this.activity.delete(id);await entry?.bridge.close().catch(()=>{});}
+  private async closeActivity(id:string){const entry=this.activity.get(id);this.activity.delete(id);clearInterval(entry?.observer);await entry?.bridge.close().catch(()=>{});}
   private claim(id:string,clientId:string){
     const owner=this.owners.get(id);
     if(owner&&owner.clientId!==clientId&&owner.until>Date.now())throw new Fault('terminal_busy','別の画面で操作中です。操作終了から15秒後に入力できます。',409);

@@ -73,13 +73,13 @@ export function activityArguments(provider:Provider,hookCommand=command()):strin
   if(provider==='shell')return [];
   const events=['SessionStart','SessionEnd','UserPromptSubmit','PreToolUse','PermissionRequest','PostToolUse','Stop','PreCompact'];
   events.push(...(provider==='codex'?['Interrupt','PostCompact']:['PostToolUseFailure','Notification','StopFailure','Elicitation','ElicitationResult']));
-  const hooks=Object.fromEntries(events.map(event=>[event,[{hooks:[{type:'command',command:hookCommand,timeout:1}]}]]));
+  const hooks=Object.fromEntries(events.map(event=>[event,[{hooks:[{type:'command',command:hookCommand,timeout:10}]}]]));
   if(provider==='claude')return ['--settings',JSON.stringify({hooks})];
   // Inline session config layers add to user/project hooks. Do not alter hook
   // trust, global settings, authentication, or the user's existing hooks.
   // A private server keeps this terminal's hook environment out of shared sessions.
   return ['--no-daemon',...Object.entries(hooks).flatMap(([event,entries])=>[
-    '-c',`hooks.${event}=[{ hooks = [{ type = "command", command = ${JSON.stringify(entries[0].hooks[0].command)}, timeout = 1 }] }]`,
+    '-c',`hooks.${event}=[{ hooks = [{ type = "command", command = ${JSON.stringify(entries[0].hooks[0].command)}, timeout = 10 }] }]`,
   ])];
 }
 

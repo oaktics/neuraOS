@@ -3,7 +3,7 @@
 import {open} from 'node:fs/promises';
 const observedAt=String(Date.now());
 import {createConnection} from 'node:net';
-const timer = setTimeout(() => process.exit(0), 800);
+const timer = setTimeout(() => process.exit(0), 5000);
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {

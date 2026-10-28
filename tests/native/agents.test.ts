@@ -456,3 +456,45 @@ test('Claude receipt probe waits for manual work to finish and preserves its com
     assert.equal(f.agents.get(parent).reports?.length,1);
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+test('lost Claude Stop hooks recover probe and work completion without replaying old turns',async()=>{
+  const {writeFile}=await import('node:fs/promises');
+  const root=await mkdtemp('/tmp/neura-lost-stop-'),path=root+'/session.jsonl',f=fixture(),terminal=randomUUID(),id=randomUUID();
+  const event=(hook_event_name:string,extra={})=>f.agents.claudeEvent(terminal,{hook_event_name,session_id:id,transcript_path:path,...extra});
+  const finish=async(text:string)=>{
+    const timestamp=new Date().toISOString();
+    await writeFile(path,[{type:'assistant',sessionId:id,timestamp,message:{content:[{type:'text',text}]}},{type:'system',subtype:'turn_duration',sessionId:id,timestamp}].map(r=>JSON.stringify(r)).join('\n')+'\n');
+  };
+  try{
+    f.agents.prepareClaude(f.workspace,terminal,undefined,undefined,()=>{},'queued initial work');event('SessionStart');
+    const probe=f.agents.channel(terminal),nonce=probe.content!.match(/nonce ([a-f0-9-]{36})/)![1];
+    event('PreToolUse');f.agents.acknowledgeChannel(terminal,nonce);event('PostToolUse');
+    await finish('Probe received');
+    const recovered=await f.agents.claudeCompletion(terminal);assert.ok(recovered);f.agents.claudeEvent(terminal,recovered);
+    assert.equal(f.agents.get(id).status,'idle');assert.equal(f.agents.get(id).lastTurnId,undefined);
+    await new Promise(r=>setTimeout(r,5));
+    assert.equal(f.agents.channel(terminal).content,'queued initial work');
+    assert.equal(await f.agents.claudeCompletion(terminal),undefined,'probe completion cannot finish delegated work');
+    await finish('Verified work');
+    f.agents.report(id,'new worker result');
+    const stop=await f.agents.claudeCompletion(terminal);assert.ok(stop);f.agents.claudeEvent(terminal,stop);
+    assert.equal(f.agents.get(id).summary,'Verified work');assert.equal(f.agents.get(id).status,'idle');
+    await new Promise(r=>setTimeout(r,5));
+    assert.equal(f.agents.channel(terminal).meta?.kind,'reports');
+    f.agents.claudeEvent(terminal,stop);
+    assert.equal(f.agents.get(id).status,'working','delayed original Stop cannot complete the next notification');
+    assert.equal(await f.agents.claudeCompletion(terminal),undefined);
+    await f.agents.close(terminal);assert.equal(await f.agents.claudeCompletion(terminal),undefined);
+  }finally{await f.agents.shutdown();f.store.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('self-addressed worker reports are rejected with the supervisor recipient',async()=>{
+  const f=fixture();try{
+    const parent=(await f.open()).threadId!,child=(await f.open()).threadId!,a=f.agents.get(child);
+    f.store.put('agents',{...a,parentTaskId:parent});
+    f.store.put('terminals',{id:a.terminalId,agentId:child});
+    assert.throws(()=>f.agents.report(child,'done',a.terminalId),{code:'report_to_self'});
+    assert.equal(f.agents.get(child).reports?.length??0,0);
+    f.agents.report(parent,'done',a.terminalId);assert.equal(f.agents.get(parent).reports?.[0].sourceTaskId,child);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
