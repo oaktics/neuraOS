@@ -16,6 +16,7 @@ export class ActivityTracker {
   activity:AgentActivity='unknown';
   notification?:'waiting'|'completed';
   private session?:string;
+  get sessionId(){return this.session;}
   private transcript?:string;
   private turn?:string;
   private waiting=new Set<string>();
