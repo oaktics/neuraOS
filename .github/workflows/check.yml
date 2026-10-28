@@ -50,6 +50,24 @@ jobs:
         run: node scripts/native/release/package.mjs
       - if: github.event_name != 'push'
         run: node scripts/native/release/smoke.mjs
+      - if: github.event_name != 'push'
+        run: node scripts/native/chromium/download-smoke.mjs
+      - name: Build isolated browser fixture
+        if: github.event_name != 'push'
+        run: node scripts/native/build.mjs
+        env:
+          NEURA_APP_OUTPUT: apps/macos/dist/browser-fixture/neuraOS.app
+          NEURA_APP_ID: com.neuraos.browser-smoke.ci
+          NEURA_DEV_DATA_DIR: /tmp/neura-browser-ci
+          NEURA_DEV_PORT: '44319'
+      - name: Verify browser MCP against packaged CEF
+        if: github.event_name != 'push'
+        run: pnpm exec tsx scripts/native/chromium/browser-smoke.ts
+        env:
+          NEURA_APP_OUTPUT: apps/macos/dist/browser-fixture/neuraOS.app
+          NEURA_APP_ID: com.neuraos.browser-smoke.ci
+          NEURA_DEV_DATA_DIR: /tmp/neura-browser-ci
+          NEURA_DEV_PORT: '44319'
       - name: Retain crash symbols
         if: github.event_name != 'push'
         uses: actions/upload-artifact@v4
