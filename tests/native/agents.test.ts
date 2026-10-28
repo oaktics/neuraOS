@@ -432,3 +432,27 @@ test('clear/resume resets an unacknowledged probe without replaying old session 
     f.agents.claudeInterrupted(terminal);await f.agents.send(next,'new instruction','queue');assert.equal(f.agents.channel(terminal).content,'new instruction','interruption after ack clears probe Stop barrier');
   }finally{await f.agents.shutdown();f.store.close();}
 });
+
+
+test('Claude receipt probe waits for manual work to finish and preserves its completion report',async()=>{
+  const f=fixture(),terminal=randomUUID(),id=randomUUID(),parentTerminal=randomUUID(),parent=randomUUID();
+  const event=(name:string,extra={})=>f.agents.claudeEvent(terminal,{hook_event_name:name,session_id:id,...extra});
+  try{
+    f.agents.prepareClaude(f.workspace,parentTerminal,undefined,undefined,()=>{});
+    f.agents.claudeEvent(parentTerminal,{hook_event_name:'SessionStart',session_id:parent});
+    f.agents.prepareClaude(f.workspace,terminal,undefined,parent,()=>{});event('SessionStart');
+    f.agents.watch(parent,[id]);
+    event('UserPromptSubmit');const turn=f.agents.get(id).turnId;
+    assert.deepEqual(f.agents.channel(terminal),{});
+    event('PermissionRequest');assert.deepEqual(f.agents.channel(terminal),{});
+    event('PostToolUse');assert.deepEqual(f.agents.channel(terminal),{});
+    event('Stop',{last_assistant_message:'Manual work completed'});
+    assert.equal(f.agents.get(id).lastTurnId,turn);
+    assert.equal(f.agents.get(id).summary,'Manual work completed');
+    assert.equal(f.agents.get(parent).reports?.length,1);
+    assert.ok(f.agents.get(parent).reports?.[0].text.includes('Manual work completed'));
+    confirmClaudeChannel(f.agents,terminal);
+    assert.equal(f.agents.get(id).lastTurnId,turn);
+    assert.equal(f.agents.get(parent).reports?.length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});

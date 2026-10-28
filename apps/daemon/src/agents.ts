@@ -113,6 +113,7 @@ export class Agents {
     const live=this.claudeLive.get(terminalId)!;
     if(!live.channelConfirmed){
       if(!live.probeSentAt){
+        if(a.status!=='idle'||a.turnId)return {};
         live.probeSentAt=Date.now();
         return {content:`neuraOS Channels receipt test. Call ONLY the neuraos channel_ack tool with nonce ${live.channelNonce}, then end this turn. Do not perform work, delegate, or report completion. Real instructions remain queued until receipt is confirmed.`,meta:{kind:'probe',task_id:a.id}};
       }
