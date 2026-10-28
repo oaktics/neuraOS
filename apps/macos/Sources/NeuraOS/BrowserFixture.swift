@@ -10,9 +10,10 @@ import ChromiumBridge
               let data = try? Data(contentsOf: URL(fileURLWithPath:path)),
               let config = try? JSONSerialization.jsonObject(with:data) as? [String:Any],
               let tabs = config["tabs"] as? [[String:String]],
-              Bundle.main.object(forInfoDictionaryKey:"NeuraDataDirectory") as? String == config["dataDirectory"] as? String,
+              let dataDirectory = config["dataDirectory"] as? String, !dataDirectory.isEmpty,
+              Bundle.main.object(forInfoDictionaryKey:"NeuraDataDirectory") as? String == dataDirectory,
               tabs.allSatisfy({URL(string:$0["url"] ?? "")?.host == "127.0.0.1"}) else {exit(2)}
-        UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":config["dataDirectory"] as! String], forName:"NeuraChromiumSmoke")
+        UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":dataDirectory], forName:"NeuraChromiumSmoke")
         if let error = NCInitializeChromium() {fputs(error,stderr);exit(1)}
         NSApp.setActivationPolicy(.regular)
         for tab in tabs {mount(tab)}
