@@ -1,6 +1,7 @@
 import {realpath,stat} from 'node:fs/promises';
 import {isAbsolute,relative,resolve,sep} from 'node:path';
 import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {Fault} from './contracts.ts';
 
 export const setupCandidates=['scripts/worktree-setup.sh','worktree-setup.sh','.orca/setup.sh','.neuraos/setup.sh','scripts/setup.sh','setup.sh'];
@@ -18,14 +19,17 @@ export async function detectSetup(root:string){
   return found.filter((path):path is string=>path!==null);
 }
 // Keep the daemon responsive during installs; cap retained output and terminate the
-// process group on timeout/shutdown so children cannot outlive the setup job.
+// process group on timeout/shutdown or parent death via the dedicated pipe owner.
 export async function runSetup(root:string,path:string,source:string,signal:AbortSignal,onOutput:(output:string)=>void){
   const script=await setupPath(root,path);
   if(signal.aborted)throw new Error('セットアップを中断しました。');
   await new Promise<void>((resolve,reject)=>{
-    const child=spawn('/bin/bash',[script],{cwd:root,env:{...process.env,NEURA_PROJECT_ROOT:source,NEURA_WORKTREE_PATH:root},detached:true,stdio:['ignore','pipe','pipe']});
+    const child=spawn(process.execPath,[fileURLToPath(new URL('./setup-host.mjs',import.meta.url)),script],{cwd:root,env:{...process.env,NEURA_PROJECT_ROOT:source,NEURA_WORKTREE_PATH:root},detached:true,stdio:['pipe','pipe','pipe']});
     let output='',stopped=false;
-    const stop=()=>{stopped=true;if(child.pid&&child.pid>1){try{process.kill(-child.pid,'SIGKILL');}catch{}}};
+    // EOF is also delivered by the OS when the daemon crashes or is SIGKILLed.
+    // Do not kill the owner: it must remain alive to stop and reap the script.
+    const stop=()=>{stopped=true;child.stdin.end();};
+    child.stdin.on('error',()=>{}); // the owner may already have exited
     const timer=setTimeout(stop,15*60*1000);timer.unref();
     signal.addEventListener('abort',stop,{once:true});
     const append=(data:Buffer)=>{output=(output+data.toString()).slice(-32768);onOutput(output);};
