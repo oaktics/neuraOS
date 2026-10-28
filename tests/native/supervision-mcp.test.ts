@@ -29,6 +29,7 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
   try {
     assert.equal((await rpc('initialize')).serverInfo.name,'neuraos');
     const inventory=await rpc('tools/list');assert.ok(inventory.tools.some((t:any)=>t.name==='task_watch'));
+    for(const name of ['task_report','task_ack','workspace_delete'])assert.ok(inventory.tools.some((t:any)=>t.name===name));
     const listed=JSON.parse((await tool('workspace_list')).content[0].text);assert.equal(listed.currentWorkspaceId,workspace.id);assert.equal(listed.projects[0].id,p.id);
     const caller=JSON.parse((await tool('task_list')).content[0].text);
     assert.equal(caller.currentWorkspaceId,workspace.id);assert.equal(caller.currentTerminalId,terminalId);
@@ -44,6 +45,20 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.equal(d.store.state().workspaces.length,2);assert.equal(d.store.state().terminals.length,0);
     assert.equal((await tool('unknown')).isError,true);
     const tasks=JSON.parse((await tool('task_wait',{after:0})).content[0].text);assert.ok(tasks.revision>0);assert.deepEqual(tasks.agents,[]);
+    const mainId=randomUUID(),instructionId=randomUUID();
+    d.store.put('agents',{id:mainId,terminalId:randomUUID(),workspaceId:workspace.id,name:'main',status:'working',updatedAt:'',pending:[{id:instructionId,text:'keep instruction'}],requests:[]});
+    const reportArgs={operationId:randomUUID(),taskId:mainId,text:'progress'};
+    const report=JSON.parse((await tool('task_report',reportArgs)).content[0].text);
+    assert.equal(JSON.parse((await tool('task_report',reportArgs)).content[0].text).reportId,report.reportId);
+    const inbox=JSON.parse((await tool('task_wait',{after:0})).content[0].text).agents[0];
+    assert.equal(inbox.reports[0].id,report.reportId);assert.equal(inbox.reports[0].sourceTerminalId,terminalId);
+    const ackArgs={operationId:randomUUID(),taskId:mainId,reportIds:[report.reportId,instructionId]};
+    assert.deepEqual(JSON.parse((await tool('task_ack',ackArgs)).content[0].text).acknowledged,[report.reportId]);
+    await tool('task_ack',ackArgs);
+    const after=JSON.parse((await tool('task_list')).content[0].text).agents[0];
+    assert.deepEqual(after.reports,[]);assert.equal(after.pending[0].id,instructionId);
+    const self=await tool('workspace_delete',{operationId:randomUUID(),workspaceId:workspace.id,expectedHead:'a'.repeat(40),mergedPR:1});
+    assert.equal(self.isError,true);assert.match(self.content[0].text,/caller workspace/);
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
   }finally{child.kill();lines.close();await d.app.close();if(old===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=old;await rm(root,{recursive:true,force:true});}
 });

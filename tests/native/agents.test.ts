@@ -120,9 +120,9 @@ test('a completion saved before a crash is delivered once on recovery without ru
     f.agents.watch(main,[worker]);await f.agents.shutdown();
     f.store.put('agents',{...f.agents.get(worker),lastTurnId:randomUUID(),lastTurnStatus:'completed',summary:'Recovered report'});
     const recovered=new Agents(f.store,()=>'', '',f.factory);
-    assert.equal(recovered.get(main).pending.length,1);assert.equal(recovered.get(main).pending[0].report,true);
+    assert.equal(recovered.get(main).pending.length,0);assert.equal(recovered.get(main).reports?.length,1);
     assert.equal(recovered.get(main).status,'interrupted');
-    const twice=new Agents(f.store,()=>'', '',f.factory);assert.equal(twice.get(main).pending.length,1);
+    const twice=new Agents(f.store,()=>'', '',f.factory);assert.equal(twice.get(main).reports?.length,1);
     await recovered.shutdown();await twice.shutdown();
   }finally{await f.agents.shutdown();f.store.close();}
 });
@@ -190,5 +190,86 @@ test('history chooser discovery also installs shared workflow instructions',asyn
     assert.equal(f.agents.get(id).id,id);
     const resume=f.clients[0].calls.find(c=>c.method==='thread/resume');
     assert.equal(resume?.params.developerInstructions,codexSessionInstructions);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+
+test('active supervisor receives and acknowledges many reports without filling instruction queue',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;await f.agents.send(id,'long-running work','queue');
+    await f.agents.send(id,'do not discard this instruction','queue');
+    const instructionId=f.agents.get(id).pending[0].id;
+    for(let i=0;i<100;i++){
+      const {reportId}=f.agents.report(id,`progress ${i}`);
+      const {agent}=await f.agents.read(id);assert.equal(agent.reports?.[0].id,reportId);
+      f.agents.ack(id,[reportId,instructionId]);
+      assert.equal(f.agents.get(id).pending[0].id,instructionId);
+      assert.equal(f.agents.get(id).reports?.length,0);
+    }
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('report notification does not restart forever when the receiver completes without acknowledging',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;
+    const {reportId}=f.agents.report(id,'done');await tick();
+    const turn=f.agents.get(id).turnId!;
+    f.clients[0].emit({method:'turn/completed',params:{threadId:id,turn:{id:turn,status:'completed'}}});await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+    assert.equal(f.agents.get(id).reports?.[0].id,reportId);
+    assert.equal(f.agents.get(id).reports?.[0].notified,true);
+    f.agents.ack(id,[reportId]);await tick();
+    assert.equal(f.clients[0].calls.filter(c=>c.method==='turn/start').length,1);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('full report inbox preserves watches and delivers after ack without deleting execution instructions',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');
+    for(let i=0;i<32;i++)f.agents.report(main,`report ${i}`);
+    assert.throws(()=>f.agents.report(main,'overflow'),{code:'agent_reports_full'});
+    await f.agents.send(main,'instruction still fits','queue');
+    f.agents.watch(main,[worker]);await f.agents.send(worker,'work','queue');
+    f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:f.agents.get(worker).turnId,status:'completed'}}});await tick();
+    assert.equal(f.agents.get(main).watching?.length,1);
+    const report=f.agents.get(main).reports![0];f.agents.ack(main,[report.id]);
+    assert.equal(f.agents.get(main).watching?.length,0);
+    assert.equal(f.agents.get(main).reports?.length,32);
+    assert.equal(f.agents.get(main).reports?.at(-1)?.sourceTaskId,worker);
+    assert.equal(f.agents.get(main).pending[0].text,'instruction still fits');
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('watch updates coalesce by worker and stale acknowledgments never erase a new report',async()=>{
+  const f=fixture();try{
+    const worker=(await f.open()).threadId!,main=(await f.open()).threadId!;
+    await f.agents.send(main,'active','queue');let oldId='';
+    for(let i=0;i<50;i++){
+      f.agents.watch(main,[worker]);await f.agents.send(worker,`work ${i}`,'queue');
+      f.clients[0].emit({method:'turn/completed',params:{threadId:worker,turn:{id:f.agents.get(worker).turnId,status:'completed'}}});await tick();
+      const report=f.agents.get(main).reports![0];assert.notEqual(report.id,oldId);
+      f.agents.ack(main,[oldId]);assert.equal(f.agents.get(main).reports![0].id,report.id);oldId=report.id;
+    }
+    assert.equal(f.agents.get(main).reports?.length,1);
+    assert.equal(f.agents.get(main).reports?.[0].updates,50);
+    assert.equal(f.agents.get(main).pending.length,0);
+  }finally{await f.agents.shutdown();f.store.close();}
+});
+
+test('legacy watch reports migrate in bounded batches while old send instructions remain untouched',async()=>{
+  const f=fixture();try{
+    const id=(await f.open()).threadId!;await f.agents.shutdown();
+    const instruction={id:randomUUID(),text:'old progress indistinguishable from an instruction'};
+    const legacy=Array.from({length:40},()=>({id:randomUUID(),text:'old report',report:true}));
+    f.store.put('agents',{...f.agents.get(id),pending:[instruction,...legacy]});
+    const recovered=new Agents(f.store,()=>'', '',f.factory);
+    assert.equal(recovered.get(id).reports?.length,32);assert.equal(recovered.get(id).pending.length,9);
+    recovered.ack(id,recovered.get(id).reports!.map(r=>r.id));
+    assert.equal(recovered.get(id).reports?.length,8);assert.deepEqual(recovered.get(id).pending,[instruction]);
+    recovered.ack(id,[instruction.id,...legacy.map(r=>r.id)]);
+    assert.equal(recovered.get(id).reports?.length,0);assert.deepEqual(recovered.get(id).pending,[instruction]);
+    await recovered.shutdown();
   }finally{await f.agents.shutdown();f.store.close();}
 });
