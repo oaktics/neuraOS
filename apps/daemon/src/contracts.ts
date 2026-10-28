@@ -10,6 +10,12 @@ export type Provider = z.infer<typeof Provider>;
 export const ConversationProvider = z.enum(['codex', 'claude']);
 export type ConversationProvider = z.infer<typeof ConversationProvider>;
 export interface Project {id:string; name:string; path:string; isGit?:boolean; folderless?:boolean; worktreeStartup?:Provider[]; worktreeSetup?:string; defaultConversationProvider?:ConversationProvider; defaultDelegationProvider?:ConversationProvider; createdAt:string}
+export function projectDefaultProvider(project:Project|undefined,kind:'conversation'|'delegation'):ConversationProvider {
+  const explicit=kind==='conversation'?project?.defaultConversationProvider:project?.defaultDelegationProvider;
+  if(explicit)return explicit;
+  const agents=new Set((project?.worktreeStartup??[]).filter((provider):provider is ConversationProvider=>provider==='codex'||provider==='claude'));
+  return agents.size===1?[...agents][0]!:'codex';
+}
 // Immutable workspace provenance. localBranch/sourceHead describe creation, not live Git state.
 export interface PullRequestSource {repository:string; number:number; localBranch:string; sourceHead:string}
 export interface Workspace {nameSource?:'manual'|'session'; sessionNameUpdatedAt?:number; id:string; projectId:string; name:string; path:string; branch:string; kind:'root'|'worktree'|'folder'|'scratch'; createdAt:string; pullRequestSource?:PullRequestSource; setup?:{status:'running'|'succeeded'|'failed'; script:string; output:string; error?:string}}

@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createDaemon} from '../../apps/daemon/src/server.ts';
-import type {Workspace,Provider} from '../../apps/daemon/src/contracts.ts';
+import {projectDefaultProvider,type Project,type Workspace,type Provider} from '../../apps/daemon/src/contracts.ts';
 import {Terminals} from '../../apps/daemon/src/terminals.ts';
 
 test('project defaults persist independently, validate AI providers and select terminal provider',async t=>{
@@ -25,6 +25,14 @@ test('project defaults persist independently, validate AI providers and select t
     const otherWorkspace=snapshot.workspaces.find((w:any)=>w.projectId===other.id).id;
     const open={type:'terminal.open',workspaceId};
     assert.equal((await cmd(open)).json().provider,'codex');
+    for(const [providers,expected] of [[['claude'],'claude'],[['shell','claude'],'claude'],[['codex'],'codex'],[['shell'],'codex'],[['claude','codex'],'codex'],[[],'codex']] as [Provider[],Provider][]) {
+      assert.equal((await cmd({type:'project.set-worktree-startup',projectId:project.id,providers})).statusCode,200);
+      assert.equal((await cmd(open)).json().provider,expected);
+      assert.equal((await cmd({...open,provider:'codex'})).json().provider,'codex');
+    }
+    await cmd({type:'project.set-worktree-startup',projectId:project.id,providers:['claude']});
+    await daemon.app.close();daemon=await createDaemon(data);
+    assert.equal((await cmd(open)).json().provider,'claude');
     const update={type:'project.set-default-providers',projectId:project.id};
     for(const field of ['defaultConversationProvider','defaultDelegationProvider']) {
       for(const provider of ['shell','invalid',null,42]) assert.equal((await cmd({...update,[field]:provider})).statusCode,400);
@@ -58,4 +66,16 @@ test('project defaults persist independently, validate AI providers and select t
     assert.equal((await cmd(open)).json().provider,'codex');
     assert.equal((await state()).projects.find((p:any)=>p.id===project.id).defaultDelegationProvider,'claude');
   } finally {await daemon.app.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('both project defaults inherit only a single distinct startup agent and explicit defaults win',()=>{
+  const base:Project={id:randomUUID(),name:'legacy',path:'/tmp',createdAt:''};
+  for(const [startup,expected] of [[undefined,'codex'],[[],'codex'],[['shell'],'codex'],[['codex'],'codex'],[['claude'],'claude'],[['shell','claude'],'claude'],[['claude','claude','shell'],'claude'],[['codex','claude'],'codex'],[['shell','codex','claude'],'codex']] as [Provider[]|undefined,Provider][]) {
+    const project={...base,worktreeStartup:startup};
+    for(const kind of ['conversation','delegation'] as const)assert.equal(projectDefaultProvider(project,kind),expected);
+    assert.equal(projectDefaultProvider({...project,defaultConversationProvider:'codex'},'conversation'),'codex');
+    assert.equal(projectDefaultProvider({...project,defaultDelegationProvider:'claude'},'delegation'),'claude');
+    assert.equal(projectDefaultProvider({...project,defaultDelegationProvider:'codex'},'conversation'),expected);
+    assert.equal(projectDefaultProvider({...project,defaultConversationProvider:'codex'},'delegation'),expected);
+  }
 });

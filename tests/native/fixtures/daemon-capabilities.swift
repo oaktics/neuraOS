@@ -35,6 +35,16 @@ struct DaemonCapabilitiesContractTest {
         let project = try JSONDecoder().decode(Project.self, from: Data(legacyProject.utf8))
         precondition(project.worktreeStartup == nil)
         precondition(project.conversationProvider == "codex" && project.delegationProvider == "codex")
+        let startupCases: [([String]?, String)] = [(nil, "codex"), ([], "codex"), (["shell"], "codex"), (["claude"], "claude"), (["shell", "claude"], "claude"), (["claude", "claude"], "claude"), (["codex"], "codex"), (["codex", "claude"], "codex"), (["shell", "claude", "codex"], "codex")]
+        for (startup, expected) in startupCases {
+            var inherited = project
+            inherited.worktreeStartup = startup
+            precondition(inherited.conversationProvider == expected && inherited.delegationProvider == expected)
+            inherited.defaultConversationProvider = "codex"
+            precondition(inherited.conversationProvider == "codex" && inherited.delegationProvider == expected)
+            inherited.defaultDelegationProvider = "claude"
+            precondition(inherited.conversationProvider == "codex" && inherited.delegationProvider == "claude")
+        }
         var configured = project
         configured.defaultConversationProvider = "claude"
         configured.defaultDelegationProvider = "codex"

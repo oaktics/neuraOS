@@ -7,7 +7,7 @@ import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {mkdir,readFile,writeFile,chmod,stat,realpath} from 'node:fs/promises';
 import {join,basename} from 'node:path';
 import {Store,hash} from './store.ts';
-import {Envelope,Fault,requireValue,daemonFeatures,type Workspace,type Project,type TerminalRecord,type Command,type PullRequestSource} from './contracts.ts';
+import {Envelope,Fault,requireValue,daemonFeatures,projectDefaultProvider,type Workspace,type Project,type TerminalRecord,type Command,type PullRequestSource} from './contracts.ts';
 import {Terminals,executable} from './terminals.ts';
 import {SessionNames} from './session-names.ts';
 import {ProviderUsageService} from './provider-usage.ts';
@@ -204,7 +204,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
         store.deleteWorkspace(record.id);
         return {ok:true};
       }
-      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider??store.get<Project>('projects',workspace(c.workspaceId).projectId)?.defaultConversationProvider??'codex',c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
+      case 'terminal.open':if(setupJobs.has(c.workspaceId))throw new Fault('setup_running','セットアップ完了後に起動してください。',409);return terminals.open(workspace(c.workspaceId),c.provider??projectDefaultProvider(store.get<Project>('projects',workspace(c.workspaceId).projectId),'conversation'),c.resume,{prompt:c.prompt,resumeId:c.resumeId,parentTaskId:c.parentTaskId});
       case 'agent.report':return agents.report(c.agentId,c.text,c.sourceTerminalId);
       case 'agent.ack':return agents.ack(c.agentId,c.reportIds);
       case 'agent.watch':return agents.watch(c.agentId,c.taskIds);
