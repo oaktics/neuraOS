@@ -3,6 +3,52 @@ import ServiceManagement
 @testable import NeuraOS
 
 final class SleepServiceRegistrationTests: XCTestCase {
+    @MainActor func testRepairWaitsForRemovalBeforeRegistering() async throws {
+        var events: [String] = []
+        try await SleepServiceRegistration.repair(status: {.enabled}, validate: {
+            events.append("validate")
+        }, unregister: {
+            await Task.yield()
+            events.append("unregister")
+        }, register: {events.append("register")})
+        XCTAssertEqual(events, ["validate", "unregister", "register"])
+    }
+
+    @MainActor func testRepairPreservesPendingApproval() async throws {
+        try await SleepServiceRegistration.repair(status: {.requiresApproval}, validate: {},
+            unregister: {XCTFail("Must preserve pending approval")},
+            register: {XCTFail("Must preserve pending approval")})
+    }
+
+    @MainActor func testRepairMissingRegistrationDoesNotUnregister() async throws {
+        for state in [SMAppService.Status.notFound, .notRegistered] {
+            var registered = false
+            try await SleepServiceRegistration.repair(status: {state}, validate: {},
+                unregister: {XCTFail("No registration to remove")},
+                register: {registered = true})
+            XCTAssertTrue(registered)
+        }
+    }
+
+    @MainActor func testRepairValidatesBeforeRemovingRegistration() async {
+        do {
+            try await SleepServiceRegistration.repair(status: {.enabled},
+                validate: {throw NSError(domain: "Bundle", code: 1)},
+                unregister: {XCTFail("Preserve registration for an invalid bundle")},
+                register: {XCTFail("Invalid bundle")})
+            XCTFail("Expected validation error")
+        } catch {XCTAssertEqual((error as NSError).domain, "Bundle")}
+    }
+
+    @MainActor func testRepairDoesNotRegisterAfterRemovalFailure() async {
+        do {
+            try await SleepServiceRegistration.repair(status: {.enabled}, validate: {},
+                unregister: {throw NSError(domain: "Removal", code: 1)},
+                register: {XCTFail("Must wait for successful removal")})
+            XCTFail("Expected removal error")
+        } catch {XCTAssertEqual((error as NSError).domain, "Removal")}
+    }
+
     func testMissingRecordAndFirstInstallRegisterThenRequestApproval() throws {
         for initial in [SMAppService.Status.notFound, .notRegistered] {
             var state = initial
