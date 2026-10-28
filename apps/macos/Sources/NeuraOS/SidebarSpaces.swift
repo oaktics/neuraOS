@@ -26,13 +26,18 @@ struct SidebarSpaces: Codable {
             return left == right ? $0.offset < $1.offset : left < right
         }.map(\.element)
     }
+    /// Insert at the displayed boundary, including after the final project (nil).
     @discardableResult
-    mutating func reorderProject(_ id: String, onto targetId: String, in spaceId: String, projects: [Project]) -> Bool {
+    mutating func insertProject(_ id: String, before targetId: String?, in spaceId: String, projects: [Project]) -> Bool {
         guard spaces.contains(where: {$0.id == spaceId}), id != targetId else {return false}
         var ids = self.projects(in: spaceId, from: projects).map(\.id)
-        guard let source = ids.firstIndex(of: id), let target = ids.firstIndex(of: targetId) else {return false}
+        guard let source = ids.firstIndex(of: id) else {return false}
+        if let targetId, !ids.contains(targetId) {return false}
+        let original = ids
         ids.remove(at: source)
-        ids.insert(id, at: target)
+        let destination = targetId.flatMap {ids.firstIndex(of: $0)} ?? ids.endIndex
+        ids.insert(id, at: destination)
+        guard ids != original else {return false}
         if projectOrder == nil {projectOrder = [:]}
         projectOrder?[spaceId] = ids
         return true
@@ -319,5 +324,22 @@ struct SidebarProjectDrag: Codable {
             return nil
         }
         return provider
+    }
+}
+
+/// Ordinary list rows accept drops; section headers are reserved by macOS for disclosure.
+struct SidebarProjectDropTarget: ViewModifier {
+    let perform: ([NSItemProvider]) -> Bool
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if isTargeted {
+                    Capsule().fill(Color.accentColor).frame(height: 2)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: [SidebarProjectDrag.typeIdentifier], isTargeted: $isTargeted, perform: perform)
     }
 }
