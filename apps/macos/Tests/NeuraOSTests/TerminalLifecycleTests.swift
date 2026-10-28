@@ -14,6 +14,16 @@ final class TerminalLifecycleTests: XCTestCase {
         coordinator.setVisible(true)
         return (coordinator, view)
     }
+    @MainActor func testTerminalLinksUseWorkspaceHandler() {
+        let (session, view) = renderer()
+        var opened: [URL] = []
+        session.openLink = {opened.append($0)}
+        for link in ["https://github.com/org/repo", "http://localhost:3000", "HTTPS://example.com/path", "file:///etc/passwd", "javascript:alert(1)"] {
+            session.requestOpenLink(source: view, link: link, params: [:])
+        }
+        XCTAssertEqual(opened.map(\.absoluteString), ["https://github.com/org/repo", "http://localhost:3000", "HTTPS://example.com/path"])
+    }
+
     private func output(_ text: String, cursor: Int) -> TerminalOutput {
         TerminalOutput(data: text, chunks: [TerminalChunk(data: text, cols: nil, rows: nil)], cursor: cursor, more: false, status: "running", cols: 100, rows: 30)
     }
