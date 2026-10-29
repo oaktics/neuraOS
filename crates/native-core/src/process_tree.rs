@@ -594,7 +594,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                             tree.exit.send_replace(Some(Ok(())));
                                         }
                                     }
-                                    _ if watched.get(&root.pid) == Some(&root.unique) => {
+                                    None if watched.get(&root.pid) == Some(&root.unique) => {
                                         // proc visibility can lag an already queued
                                         // NOTE_EXIT; keep its subscription and latch it.
                                     }
