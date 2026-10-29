@@ -15,3 +15,5 @@ mod pty_tests;
 pub mod mutation;
 
 pub mod diagnostics;
+
+pub mod process_tree;
