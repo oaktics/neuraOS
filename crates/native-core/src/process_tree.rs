@@ -29,15 +29,15 @@ impl Drop for Lease {
 impl ProcessTree {
     /// Ancestry only. Prefer new_with_token for processes that may detach.
     pub fn new(pid: u32) -> Result<Self> {
-        Self::attach(pid, None)
+        Self::attach(pid, None, None)
     }
     pub fn new_with_token(pid: u32, token: String) -> Result<Self> {
         if uuid::Uuid::parse_str(&token).is_err() {
             return Err("invalid process owner token".into());
         }
-        Self::attach(pid, Some(token))
+        Self::attach(pid, Some(token), None)
     }
-    fn attach(pid: u32, token: Option<String>) -> Result<Self> {
+    fn attach(pid: u32, token: Option<String>, group: Option<Identity>) -> Result<Self> {
         if pid <= 1 || pid == std::process::id() {
             return Err("refusing to own self/init".into());
         }
@@ -47,7 +47,7 @@ impl ProcessTree {
             .map_err(Clone::clone)?;
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::sync_channel(1);
-        monitor.send(Control::Add(id.clone(), pid, token, tx));
+        monitor.send(Control::Add(id.clone(), pid, token, group, tx));
         rx.recv().map_err(|_| "process monitor stopped")??;
         Ok(Self(Arc::new(Lease {
             id,
@@ -79,10 +79,17 @@ struct Monitor {
     kq: i32,
 }
 enum Control {
-    Add(String, u32, Option<String>, mpsc::SyncSender<Result<()>>),
+    Add(
+        String,
+        u32,
+        Option<String>,
+        Option<Identity>,
+        mpsc::SyncSender<Result<()>>,
+    ),
     Stop(String, Option<oneshot::Sender<Result<()>>>),
 }
 struct Tree {
+    group: Option<Identity>,
     token: Option<String>,
     owned: HashMap<u64, Identity>,
     stopping: Option<Instant>,
@@ -98,6 +105,7 @@ struct Identity {
     parent: u64,
     version: u32,
     uid: u32,
+    group: i32,
     zombie: bool,
 }
 #[repr(C)]
@@ -133,6 +141,7 @@ fn identity(pid: i32) -> Option<Identity> {
         parent: info.unique.parent,
         version: info.unique.version as u32,
         uid: info.bsd.pbi_uid,
+        group: info.bsd.pbi_pgid as i32,
         zombie: info.bsd.pbi_status == 5,
     })
 }
@@ -273,7 +282,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
     loop {
         for command in rx.try_iter() {
             match command {
-                Control::Add(id, pid, token, ack) => {
+                Control::Add(id, pid, token, group, ack) => {
                     let root = identity(pid as i32);
                     if root.is_none() && token.is_none() {
                         let _ = ack.send(Err("process already exited".into()));
@@ -286,6 +295,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                     trees.insert(
                         id,
                         Tree {
+                            group: group.or_else(|| root.filter(|r| r.pid == r.group)),
                             token,
                             owned,
                             stopping: None,
@@ -332,6 +342,16 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                         }
                     }
                     for tree in trees.values_mut() {
+                        // Claim group members only while its original dedicated leader
+                        // is alive. A cached numeric PGID alone is never ownership proof.
+                        let anchored_group = tree
+                            .group
+                            .filter(|leader| {
+                                rows.iter().any(|r| {
+                                    r.pid == leader.pid && r.unique == leader.unique && !r.zombie
+                                })
+                            })
+                            .map(|r| r.pid);
                         for row in &rows {
                             if let Some(previous) = tree.owned.get_mut(&row.unique) {
                                 if previous.version != row.version {
@@ -351,6 +371,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                     continue;
                                 }
                                 if tree.owned.contains_key(&row.parent)
+                                    || anchored_group == Some(row.group)
                                     || (tree.token.is_some()
                                         && tokens
                                             .get(&(row.unique, row.version))
@@ -498,6 +519,14 @@ pub async fn provider_host(program: String, args: Vec<String>) -> Result<i32> {
     let mut term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut hup = signal(SignalKind::hangup()).map_err(|e| e.to_string())?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    // Keep a dedicated group leader alive through cleanup, even after the
+    // program exits before its children can be observed. Never join caller PGID.
+    if unsafe { libc::getpgrp() } != std::process::id() as i32
+        && unsafe { libc::setpgid(0, 0) } != 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let group = identity(std::process::id() as i32).ok_or("missing host identity")?;
     let token = uuid::Uuid::new_v4().to_string();
     let mut child = tokio::process::Command::new(program)
         .args(args)
@@ -505,11 +534,14 @@ pub async fn provider_host(program: String, args: Vec<String>) -> Result<i32> {
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .process_group(0)
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| e.to_string())?;
-    let tree = match ProcessTree::new_with_token(child.id().ok_or("missing child pid")?, token) {
+    let tree = match ProcessTree::attach(
+        child.id().ok_or("missing child pid")?,
+        Some(token),
+        Some(group),
+    ) {
         Ok(tree) => tree,
         Err(e) => {
             let _ = child.kill().await;
