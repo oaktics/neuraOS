@@ -55,3 +55,38 @@ Observed on the development Mac (two alternating pairs, same Developer ID test b
 | Adaptive, run 2 | 218 | 0.391 | 0 |
 
 Actual timer delivery is affected by macOS coalescing and other work. The observed aggregate wake reduction is about 50%; CPU reduction varied from 8% to 19%. This short idle probe does not establish interactive latency or whole-machine power savings. Direct UI checks also covered native sheet Cancel, native input context-menu dismissal and subsequent editing, and Chrome extension-removal Cancel. The official Store installation permission sheet was exercised separately.
+
+## Browser MCP regression against a native daemon
+
+The extension/pump fixtures above do not start a daemon. The separate
+`scripts/native/chromium/browser-smoke.ts` can test an external daemon through
+its public API and the MCP configuration delivered by a legitimate Claude
+terminal launch:
+
+```sh
+NEURA_BROWSER_SMOKE_DAEMON=/absolute/path/to/neura-native-core \
+  NEURA_DEV_DATA_DIR=/tmp/neura-browser-native-smoke \
+  NEURA_DEV_PORT=44359 NEURA_APP_OUTPUT=/path/to/browser-fixture.app \
+  pnpm exec tsx scripts/native/chromium/browser-smoke.ts
+```
+
+Build the browser fixture with a `com.neuraos.browser-smoke.*` bundle ID and
+matching `NEURA_DEV_DATA_DIR` / `NEURA_DEV_PORT`, as required by `BrowserFixture`.
+The native executable receives those environment variables. Optional
+`NEURA_BROWSER_SMOKE_DAEMON_ARGS` is a JSON string array, not shell text.
+
+External mode creates only disposable project/workspaces through public
+commands, starts a fixture Claude via `terminal.open`, captures its own scoped
+browser credential in a mode-0600 file, and launches the exact MCP command/args
+from that session's configuration. The fixture provider only answers capability
+probes and waits; it never starts real Claude or accesses an account. The capture
+is removed during cleanup. No production credential endpoint or direct Store
+write is needed in external mode. Legacy in-process comparison (and optional
+real-CLI testing) remains available by omitting the external-daemon variable;
+real-CLI mode is explicitly rejected with external mode.
+
+External mode cannot collect the old Fastify `onSend` transport timing hook;
+its evidence marks that limitation and retains all browser behavior assertions.
+The external launch path was first checked against the Node daemon in a child
+process; run it against the finished Rust executable and integrated native app
+before treating native-daemon compatibility as verified.
