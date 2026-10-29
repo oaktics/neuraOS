@@ -19,6 +19,8 @@
 
 PTY出力の保存や所有プロセス処理に失敗した場合は、状態変更通知で待機中のUIを起こし、`terminal_runtime_failed`で状態・出力取得等を拒否する。未保存出力があるのに正常な入力処理／healthとして応答しない。単なる接続再試行で永続化障害が解消したとは扱わない。
 
+Git／workspace runner／providerは、leaderをreapしない終了通知を受けてから`tree.stop()`で所有子孫を停止し、最後に`wait`する。leaderの識別を先に失わず、pipeを保持する子が残ってもcleanupへ進む。`0a57023`のRust試験は短命restricted子を含む正常・失敗・timeout・cancelを確認するが、未観測double-forkからrestricted processへ移る場合などのOS境界は残る。詳細は[native process ownership](native-process-ownership.md)、検証数は[release checkpoint](development-release.md#native統合の検証checkpoint2026-10-29)を参照する。
+
 ## 毎週のレビュー
 
 保存した報告をまとめて集計する（重複した報告は除外する）。

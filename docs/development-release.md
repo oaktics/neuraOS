@@ -127,21 +127,24 @@ node scripts/native/release/smoke.mjs
 
 ## native統合の検証checkpoint（2026-10-29）
 
-[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`4ab24c9`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
+[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`0a57023`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
 
 | 検証 | 確認した結果 | 証跡／範囲 |
 | --- | --- | --- |
-| Rust core | library 59成功、integration 3成功 | `/tmp/neura-root-migration-fault-suite.log`。子プロセス内の部分再実行を重複加算しない |
-| 公開HTTP／MCP／ownership protocol | 20成功、失敗0 | `/tmp/neura-root-final-public-protocol.log`。10/20/32 MCP、共有予約、attach前crash、lifetime lockを含む合成fixture |
+| Rust core | library 68成功、integration 5成功 | `/tmp/neura-root-release-final-tests.log`。子プロセス内の部分再実行を重複加算しない |
+| 最適化版の公開protocol／移行／provider／ownership | 28成功、失敗0、skip 0 | `/tmp/neura-root-final-optimized-public-tests.log`。HTTP／MCP、Node→Rust→Node移行、fake CLI各10/20/32、共有予約、attach前crash、lifetime lockを含む。実モデル負荷や速度比較ではない |
 | 実daemon間データ移行 | Node→Rust→Node、1成功 | [保存証拠](architecture-evidence/legacy-native-data-migration-2026-10-29.json)、`/tmp/neura-root-migration-final.log`。同一の隔離DBでUnicode PTY/cursor、設定、通知、pending/reports/exact ACK、復旧状態、operation結果を確認。実LaunchAgent／installed appの更新ではない |
 | native ProviderService並列起動 | Claude／Codexのfake CLI各10/20/32、全7成功 | [保存証拠](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)、`/tmp/neura-root-provider-daemon-parallel.log`。全段階で指定数の同時active、登録、入力、turn event、exit、UI stream再接続/cursor replayを確認。終了後残存プロセス0 |
 | plist署名正規化のrelease回帰 | 13成功 | `/tmp/neura-root-plist-release-tests.log`。正式CI／公証とは別 |
+| 実Claude読取専用MCP | Claude 2.1.312、exit 0、`MCP_READONLY_OK` | `/tmp/neura-real-claude-5w7j1tvp/evidence.json`。実CLIがnative MCPの`task_list`を1回実行し、workspace／terminal context一致を確認。変更操作・並列モデル負荷の実証ではない |
 | 実Codex接続 | 対象integration 1成功 | `/tmp/neura-root-real-codex.log`。root実行報告では実CLIのApp Server起動・`thread/loaded/list`・close/reapのみ。model turn実行や相互委任の実証ではない。テスト自体の実CLI分岐は`NEURA_TEST_CODEX_PATH`指定時のみ |
 | Swift UI | 142成功 | `/tmp/neura-root-swift-all.log` |
 | Swift updater | 18成功 | `/tmp/neura-root-updater18-tests.log`。実LaunchAgent適用とは別 |
 | legacy互換テスト | 全体165件中164成功、1失敗後に対象1件再試験成功 | `/tmp/neura-root-legacy-contract-tests.log`、`/tmp/neura-root-client-capabilities-retest.log`。Swift source列挙漏れの修正後の対象再試験であり、全体を再実行して165成功したとは記さない |
 
-実モデルを使うClaudeの受入は別途確認する。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
+Git／workspace runner／providerの終了処理は、reapしないexit通知→`tree.stop()`→`wait`の順でleaderの識別をcleanupまで保持する。短命leaderとrestricted子を含む正常終了・失敗・timeout・cancelのcleanupを上記Rust試験で確認した。これは任意の子孫の完全回収保証ではなく、[macOSの所有追跡境界](native-process-ownership.md)は維持する。
+
+実Claudeの確認範囲は上記の読取専用MCP実行。実CodexはApp Server接続のみでmodel turnを実行していない。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
 
 ## Chromium browser
 

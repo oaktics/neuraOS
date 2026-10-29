@@ -200,3 +200,5 @@ CIはエージェント表示の左隣に、実行中・成功・失敗・キャ
 タイトルバーの虫アイコン、またはヘルプの「今おかしかった：診断情報を保存」からローカルの診断JSONを保存できます。操作履歴、無反応の検知、クラッシュ情報、週次集計と改善手順は [docs/reliability.md](docs/reliability.md) を参照してください。
 
 監督運用では進捗・完了を `task_report`、受領確認を `task_ack` で扱い、実行指示の待ち行列を埋めないようにします。検証・依頼されたマージ後は `workspace_delete` で不要なworktreeを安全に整理し、結果を確認します。保持指示、未完了作業、dirty/未追跡/ignoredや秘密情報を優先して保護します。詳細は[監督とcleanup](docs/codex-supervision.md)を参照してください。
+
+2026-10-29のnative統合ローカル検証はRust library 68件＋integration 5件、最適化版公開試験28件（skip 0）成功。[検証範囲と証跡](docs/development-release.md#native統合の検証checkpoint2026-10-29)を参照。性能比較値・正式release・実installed app確認とは区別する。
