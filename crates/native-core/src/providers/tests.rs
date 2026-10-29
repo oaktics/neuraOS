@@ -721,3 +721,53 @@ async fn codex_discovery_preserves_delegation_and_resume_ownership() {
         Some("parent")
     );
 }
+
+#[tokio::test]
+async fn report_unicode_lengths_match_wire_contract_and_preserve_text() {
+    let (_, agents) = fixture().await;
+    let (_, task) = claude(&agents, None).await;
+    for text in [
+        "日".repeat(6000),
+        "日".repeat(16384),
+        "🦀".repeat(8192),
+        format!("{}日", "🦀".repeat(8191)),
+        format!("{}日本", "🦀".repeat(8191)),
+    ] {
+        let command = crate::contracts::command(json!({
+            "type":"agent.report", "agentId":task, "text":text
+        }))
+        .unwrap();
+        let result = agents.command(&command).await.unwrap();
+        let agent = agents.get(&task).await.unwrap();
+        let report = agent
+            .reports
+            .iter()
+            .find(|r| r.id == result["reportId"])
+            .unwrap();
+        assert_eq!(report.text, text);
+    }
+    assert_eq!(agents.get(&task).await.unwrap().reports.len(), 5);
+}
+
+#[tokio::test]
+async fn report_rejects_over_limit_utf16_without_mutation() {
+    let (_, agents) = fixture().await;
+    let (_, task) = claude(&agents, None).await;
+    for text in [
+        "日".repeat(16385),
+        "🦀".repeat(8193),
+        format!("{}日", "🦀".repeat(8192)),
+        String::new(),
+        " \n\t".into(),
+    ] {
+        assert!(crate::contracts::command(json!({
+            "type":"agent.report", "agentId":task, "text":text
+        }))
+        .is_err());
+        assert_eq!(
+            agents.report(&task, &text, None).await.unwrap_err(),
+            "invalid_report"
+        );
+        assert!(agents.get(&task).await.unwrap().reports.is_empty());
+    }
+}

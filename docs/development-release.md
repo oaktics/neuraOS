@@ -146,6 +146,8 @@ Git／workspace runner／providerの終了処理は、reapしないexit通知→
 
 実Claudeの確認範囲は上記の読取専用MCP実行。実CodexはApp Server接続のみでmodel turnを実行していない。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load比較は同一PC・FULL/WAL・1/5/10/20/32 PTYで各2回実施し、[測定結果と限界](performance.md#optimized-comparison-2026-10-29)に記録した。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。正式CIと署名・公証はGitHubの実行結果、公開tagはReleasesで確認する。実installed appの更新・rollback成功はローカルfixtureやCIの成功とは区別する。
 
+Release PR #142の追加レビューでは、空のterminal入力を検証後のno-opとして扱い、後続入力の詰まりを修正した。またtask reportの長さをwire契約と同じUTF-16単位へ統一し、日本語・補助文字を誤って拒否しないようにした。統合後の`e405bee`ではRust library 90件＋integration 5件成功（`/tmp/neura-pr142-review-final-rust.log`）。上記性能比較は以前のcheckpointであり、この追加修正後の公開binary測定ではない。
+
 ## Chromium browser
 
 Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions share the Chromium profile. Chrome-style management windows provide extension installation and toolbar popups. See [browser extensions](browser-extensions.md) and [deferred 1Password investigation](1password-browser.md).

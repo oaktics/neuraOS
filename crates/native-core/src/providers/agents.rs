@@ -483,7 +483,7 @@ impl Agents {
         text: &str,
         source_terminal: Option<&str>,
     ) -> Result<Value> {
-        if text.trim().is_empty() || text.len() > 16384 {
+        if text.trim().is_empty() || text.encode_utf16().count() > 16384 {
             return Err("invalid_report".into());
         }
         let mut s = self.state.lock().await;
