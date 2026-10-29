@@ -23,7 +23,7 @@ async function fixture(){
  const start=async()=>{logs='';child=spawn(binary,[],{cwd:root,env:{...process.env,NEURA_DEV_DATA_DIR:data,NEURA_DEV_PORT:String(port)},stdio:['ignore','pipe','pipe'],detached:true});child.stdout.on('data',b=>logs=(logs+b).slice(-8000));child.stderr.on('data',b=>logs=(logs+b).slice(-8000));exit=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));let spawnError;child.once('error',e=>spawnError=e);for(let i=0;i<200;i++){if(spawnError)throw spawnError;if(child.exitCode!==null)throw Error(`Daemon exited ${logs}`);try{token=(await readFile(join(data,'daemon-token'),'utf8')).trim();const r=await request('/v1/state');if(r.status===200)return;}catch{}await sleep(50);}throw Error('Daemon startup timed out');};
  const stop=async()=>{if(!child||child.exitCode!==null||child.signalCode!==null)return;child.kill('SIGTERM');let timer;const ended=await Promise.race([exit,new Promise(r=>timer=setTimeout(()=>r(null),10000))]);clearTimeout(timer);if(!ended){process.kill(-child.pid,'SIGKILL');await exit;throw Error('Daemon shutdown timed out');}assert.equal(ended.code,0,logs);};
  try{await start();}catch(e){failure=true;try{await stop();}catch{}throw e;}
- return {root,data,repo,git,request,command,start,stop,async crash(){child.kill("SIGKILL");await exit;},stream(){return new WebSocket(base.replace('http:','ws:')+'/v1/stream',{headers:{authorization:`Bearer ${token}`}});},async crash(){child.kill('SIGKILL');await exit;},async close(error){failure||=Boolean(error);try{await stop();}finally{if(failure)console.error(`Native fixture retained: ${root}`);else await rm(root,{recursive:true,force:true});}}};
+ return {root,data,repo,git,request,command,start,stop,pid:()=>child?.pid,logs:()=>logs,stream(){return new WebSocket(base.replace('http:','ws:')+'/v1/stream',{headers:{authorization:`Bearer ${token}`}});},async crash(){child.kill('SIGKILL');await exit;},async close(error){failure||=Boolean(error);try{await stop();}finally{if(failure)console.error(`Native fixture retained: ${root}`);else await rm(root,{recursive:true,force:true});}}};
 }
 async function success(promise){const r=await promise;assert.equal(r.status,200,JSON.stringify(r.value));return r.value;}
 async function eventually(check){for(let i=0;i<100;i++){if(await check())return;await sleep(30);}assert.fail('Expected state did not arrive');}
@@ -51,5 +51,18 @@ while True:
   let pid;await eventually(async()=>{try{pid=Number(await readFile(pids,'utf8'));return pid>1&&alive(pid);}catch{return false;}});
   await f.crash();await f.start();const replacement=await success(f.request('/v1/state'));assert.notEqual(replacement.daemonInstanceId,initial.daemonInstanceId);assert.equal(replacement.runtime,'rust');assert.equal(alive(pid),false,'old detached writer must be gone before new health');
   const bytes=(await stat(writes)).size;await sleep(100);assert.equal((await stat(writes)).size,bytes);assert.equal(replacement.terminals.find(v=>v.id===t.id).status,'interrupted');
- }catch(e){failure=e;throw e;}finally{await f.close(failure);}
+ }catch(e){
+  failure=e;
+  // Preserve the stalled fixture's process state before shutdown changes it.
+  // No environment, arguments, credentials, or unrelated process rows are logged.
+  try {
+   const listing=(await exec('/bin/ps',['-axo','pid=,ppid=,pgid=,state=,comm='],{timeout:3000,maxBuffer:2*1024*1024})).stdout;
+   const rows=listing.split('\n').map(line=>({line,fields:line.trim().split(/\s+/)}));
+   const owned=new Set([f.pid()]);let changed=true;
+   while(changed){changed=false;for(const row of rows){const pid=Number(row.fields[0]),parent=Number(row.fields[1]);if(owned.has(parent)&&!owned.has(pid)){owned.add(pid);changed=true;}}}
+   console.error('Fixture failure before cleanup:', rows.filter(row=>owned.has(Number(row.fields[0]))).map(row=>row.line).join('\n'));
+   console.error('Fixture daemon log:',f.logs());
+  } catch(diagnostic){console.error('Fixture diagnostic failed:',diagnostic.message);}
+  throw e;
+ }finally{await f.close(failure);}
 });
