@@ -65,3 +65,9 @@ CIはPRごとに実行し、毎週の定期実行でも回帰を確認する。�
 - [#139 queued instructionの個別消費・撤回・置換](https://github.com/oaktics/neuraOS/issues/139)
 
 1Passwordの実用化保留は別の[#134](https://github.com/oaktics/neuraOS/issues/134)。各Issueでは観測事実と原因未確定の部分を分け、確認方法と完了条件を記載している。
+
+### Codex reconciliation
+
+Loaded-thread discovery registers ownership without changing the terminal's selected agent/session/name. Actual session selection remains tied to explicit registration and `thread/started`. Completion notifications are emitted only for accepted new completions; repeated reconciliation, stale turns and unknown completions do not create duplicate banners. Regression tests also preserve parent-report attribution. An isolated Codex 0.165.0 stdio probe resumed two loaded threads six times with no resume-induced `thread/started`; it did not run a model turn or verify interactive TUI selection.
+
+Final benchmark follow-up: [#141](https://github.com/oaktics/neuraOS/issues/141) adds threshold-triggered HTTP/queue/commit timing evidence for an observed but unreproduced latency outlier. See [the unfiltered measurements](performance.md#optimized-comparison-2026-10-29). Final review workers also reported the task-list volume problem already tracked by #136.

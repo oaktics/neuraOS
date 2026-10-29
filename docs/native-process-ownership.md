@@ -128,3 +128,14 @@ the leader before observation, nor to an unseen restricted child that has
 changed session with setsid. A persistent live anchor or stronger OS ownership
 mechanism is still needed for those cases. PTY processes establish their own
 session and cannot simply join a group in the supervisor's session.
+
+
+## Exit notification ordering
+
+XNU emits `NOTE_EXIT` before publishing the zombie process status in `kern_exit.c`. The supervisor therefore latches exit events with the registration's unique process generation in `udata`, rather than treating the event only as a prompt to reread a possibly stale live snapshot. An old event cannot complete a reused PID. Pending root subscriptions survive a missing process-list snapshot, and directly observed identity changes fail closed.
+
+Exited parents remain available during descendant discovery; only afterward are known-exited generations removed from signal/stop waits. The child handle is retained until cleanup and then reaped. Retained generation sets are bounded to current snapshot/lease identities. This adds no normal-idle polling.
+
+Regression coverage includes an all-live snapshot after an exit event, ancestry/PGID discovery, stale registration cookies, a root missing from a snapshot, and a real kqueue cookie round trip. The workspace fast-exit fixture keeps its two-second deadline. A macOS CI timeout prompted this investigation; its individual process trace was unavailable, so the exact failing interleaving was not directly observed.
+
+Source: [Apple XNU process exit implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c).

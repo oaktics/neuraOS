@@ -61,27 +61,29 @@ its cursor. When a daemon no longer advertises `state.stream`, it cancels the
 old stream generation and returns to the legacy fallback. Healthy native idle
 consumers still wait for events.
 
+Resize requests share the bounded output FIFO with already-read bytes and pending spill data. The target PTY pauses reads until its resize marker is durably committed; only then does the daemon apply the ioctl and resume reads. Input and other PTYs remain active. An accepted resize completes even if its HTTP caller disconnects. Storage failure fails the runtime closed, and replay retains the same data/resize order, including partial UTF-8 across a resize.
+
 ## Optimized comparison (2026-10-29)
 
-[Full results and build metadata](architecture-evidence/optimized-legacy-native-2026-10-29.json) use an Apple M1 / 8 CPU / 16 GiB Mac on macOS 26.6.2. The native optimized local binary was built from `300baa1`; the legacy daemon used Node 24.13.0 from the same checkout. Both use SQLite WAL with `synchronous=FULL`. Each terminal emits 1,024 ordered rows with a 2,048-byte payload and Unicode marker. Two runs per runtime were performed in native→legacy→legacy→native order, with heavy build/worker jobs stopped. Normal desktop background applications remained running. Values below are the min–max across the two runs, not confidence intervals.
+[Full results and build metadata](architecture-evidence/optimized-legacy-native-2026-10-29.json) use an Apple M1 / 8 CPU / 16 GiB Mac on macOS 26.6.2. The native optimized local binary was built from `a61effc`; the legacy daemon used Node 24.13.0 from the same checkout. Both use SQLite WAL with `synchronous=FULL`. Each terminal emits 1,024 ordered rows with a 2,048-byte payload and Unicode marker. Two runs per runtime were performed in native→legacy→legacy→native order, with heavy build/worker jobs stopped. Normal desktop background applications remained running. Values below are the min–max across the two runs, not confidence intervals.
 
 | PTYs | Completion ms: legacy | native | State p99 ms: legacy | native | Input p99 ms: legacy | native |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1201.37–1636.10 | 1221.14–1737.04 | 3.14–4.47 | 1.87–6.27 | 1.97–2.30 | 1.76–11.00 |
-| 5 | 1734.61–2253.98 | 1194.49–1769.90 | 19.12–62.85 | 1.85–2.39 | 3.52–3.92 | 2.58–4.28 |
-| 10 | 1741.99–2726.84 | 1374.67–1966.80 | 24.22–47.14 | 5.96–6.23 | 4.91–5.40 | 4.34–4.35 |
-| 20 | 2687.07–3422.42 | 1909.61–2466.65 | 53.09–111.09 | 14.23–15.46 | 8.23–8.39 | 8.66–13.86 |
-| 32 | 3700.29–4075.87 | 2749.86–3270.83 | 116.85–219.41 | 19.13–47.32 | 15.19–15.81 | 19.48–26.29 |
+| 1 | 1250.88–1847.56 | 1136.00–1196.56 | 1.51–192.25 | 2.36–3.96 | 2.36–10.20 | 2.44–2.56 |
+| 5 | 1677.42–1713.02 | 1251.30–13936.48 | 14.93–23.88 | 4.09–3323.22 | 3.99–10.44 | 3.87–48.56 |
+| 10 | 1855.96–1988.00 | 1374.66–1934.19 | 54.09–120.22 | 6.92–21.18 | 6.46–8.56 | 3.74–17.40 |
+| 20 | 2920.88–3011.46 | 1899.07–2202.94 | 85.80–110.67 | 21.25–28.60 | 8.08–8.44 | 11.22–12.20 |
+| 32 | 3723.99–3933.47 | 2784.93–2859.19 | 86.66–194.02 | 23.64–127.88 | 11.36–13.53 | 9.76–91.67 |
 
-The completion and state results improve under parallel output load, but input acceptance does **not** improve at every count. At 32 PTYs, native input p99 remains higher than legacy in both final runs. Each input percentile has only N samples (one simultaneous command per PTY); at N=1 it is a single observation. These values must not be presented as production latency distributions or an across-the-board speedup.
+Results are variable and do **not** establish an across-the-board latency improvement. Native completion at 10/20/32 PTYs was faster in these runs, while the first native 5-PTY run took 13.94s and had a 3.32s state p99; the reversed-order native run took 1.25s with 4.09ms state p99. The outlier is retained. Background applications remained active, but no trace established its cause, so it is not attributed to host contention. Input acceptance also regresses at some counts/runs. Each input percentile has only N samples (one simultaneous command per PTY); at N=1 it is a single observation. These values are not production latency distributions.
 
 | PTYs | Idle CPU ms/5s: legacy | native | Idle footprint MiB: legacy | native | Interrupt wakeups/5s: legacy | native |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 57.09–59.46 | 0.13–0.15 | 81.28–94.58 | 8.16–8.24 | 545.00–546.00 | 1.00–1.00 |
-| 5 | 65.39–65.80 | 0.20–0.24 | 87.91–102.10 | 17.30–17.37 | 517.00–541.00 | 1.00–1.00 |
-| 10 | 71.62–72.99 | 0.33–0.34 | 112.02–112.73 | 28.58–28.79 | 543.00–564.00 | 1.00–2.00 |
-| 20 | 114.53–126.94 | 0.55–0.59 | 129.29–137.52 | 51.09–51.21 | 535.00–542.00 | 1.00–1.00 |
-| 32 | 140.55–141.73 | 0.74–1.43 | 160.63–161.55 | 77.69–78.15 | 539.00–553.00 | 1.00–1.00 |
+| 1 | 59.46–61.23 | 0.16–0.18 | 91.00–92.98 | 8.36–8.49 | 505.00–541.00 | 1.00–1.00 |
+| 5 | 61.00–73.24 | 0.26–0.72 | 99.85–100.14 | 17.51–17.66 | 511.00–548.00 | 1.00–2.00 |
+| 10 | 71.74–100.41 | 0.31–0.37 | 101.59–101.62 | 28.43–28.84 | 524.00–593.00 | 1.00–2.00 |
+| 20 | 94.99–98.58 | 0.51–1.30 | 130.29–130.96 | 50.80–51.10 | 556.00–599.00 | 1.00–2.00 |
+| 32 | 148.20–175.44 | 0.77–1.20 | 160.49–160.91 | 77.71–78.19 | 612.00–633.00 | 1.00–2.00 |
 
 Every point recorded zero HTTP errors, missing or duplicate rows, intact Unicode, and identical durable replay after restart. Counters cover stable daemon descendants only; short-lived child costs are excluded. Footprint is measured after the 5-second idle window, not at peak load. Legacy idle readers follow the former UI cadence (state 1s, visible output 60ms, other output 500ms); native readers wait for events.
 
