@@ -16,7 +16,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     net::UnixListener,
-    sync::{mpsc, Mutex},
+    sync::Mutex,
     task::JoinHandle,
 };
 
@@ -41,14 +41,20 @@ impl ProviderRuntime for NativeRuntime {
         params: Value,
     ) -> FutureResult<'a, Value> {
         Box::pin(async move {
-            let rpc = self
-                .codex
-                .lock()
-                .await
-                .get(terminal)
-                .cloned()
-                .ok_or("agent_offline")?;
-            rpc.call(method, params).await
+            let live = self.codex.lock().await.get(terminal).cloned();
+            if let Some(rpc) = live {
+                return rpc.call(method, params).await;
+            }
+            if method != "thread/turns/list" {
+                return Err("agent_offline".into());
+            }
+            let (events, _) = super::event_queue::channel();
+            let rpc =
+                CodexRpc::start(&executable("codex").await?, &environment(), &[], events).await?;
+            let result = rpc.call(method, params).await;
+            let stopped = rpc.close().await;
+            stopped?;
+            result
         })
     }
     fn reply<'a>(&'a self, terminal: &'a str, id: Value, result: Value) -> FutureResult<'a, ()> {
@@ -139,6 +145,24 @@ impl ProviderService {
                 }
             }
         });
+        let weak = Arc::downgrade(&this);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let Some(service) = weak.upgrade() else { break };
+                let _ = service.agents.reconcile_channels().await;
+                let sessions = service.runtime.codex.lock().await.clone();
+                for (terminal, rpc) in sessions {
+                    if let Ok(Some(t)) = service.store.get("terminals", &terminal).await {
+                        if let Some(workspace) = t["workspaceId"].as_str() {
+                            if let Ok(Some(w)) = service.store.get("workspaces", workspace).await {
+                                let _ = reconcile_codex(&service.agents, &rpc, &terminal, &w).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
         Ok(this)
     }
     pub fn verify_channel(&self, terminal: &str, token: &str) -> bool {
@@ -194,8 +218,11 @@ impl ProviderService {
         } else if provider == "codex" {
             async {
     if let Some(task)=&resume{let a=self.agents.get(task).await?;if a.provider!="codex"||a.workspace_id!=workspace["id"]{return Err("agent_workspace_mismatch".into())}if self.runtime.codex.lock().await.contains_key(&a.terminal_id){return Err("agent_already_running".into())}}
-    let config=codex::mcp_config(&binary,&self.endpoint,&self.token_file,workspace["id"].as_str().ok_or("workspace id")?,terminal,&browser_token);let (events,mut rx)=mpsc::unbounded_channel();let rpc=CodexRpc::start(&program,&env,&codex::overrides(&config),events).await?;self.runtime.codex.lock().await.insert(terminal.into(),rpc.clone());
-    let agents=self.agents.clone();let terminal_id=terminal.to_string();let workspace_copy=workspace.clone();let title_rpc=rpc.clone();tokio::spawn(async move{let mut titled=std::collections::HashSet::new();while let Some(event)=rx.recv().await{let _=agents.codex_event(&terminal_id,&workspace_copy,&event).await;if event["method"]=="turn/completed"&&event["params"]["turn"]["status"]=="completed"{if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_ok()&&titled.insert(task.to_string()){let rpc=title_rpc.clone();let task=task.to_string();let cwd=workspace_copy["path"].as_str().unwrap_or("").to_string();tokio::spawn(async move{let _=codex::generate_title(rpc,task,cwd).await;});}}}}});
+    let config=codex::mcp_config(&binary,&self.endpoint,&self.token_file,workspace["id"].as_str().ok_or("workspace id")?,terminal,&browser_token);let (events,mut rx)=super::event_queue::channel();let rpc=CodexRpc::start(&program,&env,&codex::overrides(&config),events).await?;self.runtime.codex.lock().await.insert(terminal.into(),rpc.clone());
+    let agents=self.agents.clone();let terminal_id=terminal.to_string();let workspace_copy=workspace.clone();let title_rpc=rpc.clone();tokio::spawn(async move{let mut titled=std::collections::HashSet::new();while let Some(event)=rx.recv().await{
+     if event["method"]=="neura/overflow"{let _=agents.codex_event(&terminal_id,&workspace_copy,&json!({"method":"neura/disconnected"})).await;let _=reconcile_codex(&agents,&title_rpc,&terminal_id,&workspace_copy).await;continue;}
+     if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_err(){let _=reconcile_codex(&agents,&title_rpc,&terminal_id,&workspace_copy).await;}}
+     let _=agents.codex_event(&terminal_id,&workspace_copy,&event).await;if event["method"]=="turn/completed"&&event["params"]["turn"]["status"]=="completed"{if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_ok()&&titled.insert(task.to_string()){let rpc=title_rpc.clone();let task=task.to_string();let cwd=workspace_copy["path"].as_str().unwrap_or("").to_string();tokio::spawn(async move{let _=codex::generate_title(rpc,task,cwd).await;});}}}}});
     let task:Option<String>=if choose_history{None}else{
      let mut params=json!({"cwd":workspace["path"],"approvalPolicy":"never","sandbox":"danger-full-access","config":{"mcp_servers.neuraos":config},"developerInstructions":codex::session_instructions()});if let Some(id)=&resume{params["threadId"]=json!(id);params["excludeTurns"]=json!(true);}
      let result=rpc.call(if resume.is_some(){"thread/resume"}else{"thread/start"},params).await?;let thread=&result["thread"];let id=thread["id"].as_str().ok_or("invalid Codex thread")?;
@@ -264,8 +291,14 @@ impl ProviderService {
             .call("state", json!({}))
             .await
             .map_err(|e| e.to_string())?;
+        let current: HashMap<String, String> = state["terminals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|t| Some((t["id"].as_str()?.into(), t["agentId"].as_str()?.into())))
+            .collect();
         Ok(
-            json!({"agents":self.agents.list().await,"revision":state["revision"],"currentSessionIds":self.agents.current_sessions().await}),
+            json!({"agents":self.agents.list().await,"revision":state["revision"],"currentSessionIds":current}),
         )
     }
     pub async fn close(&self, terminal: &str) -> Result<()> {
@@ -354,4 +387,61 @@ pub async fn executable(provider: &str) -> Result<String> {
         }
     }
     Err("provider_missing".into())
+}
+
+async fn reconcile_codex(
+    agents: &Agents,
+    rpc: &CodexRpc,
+    terminal: &str,
+    workspace: &Value,
+) -> Result<()> {
+    let mut cursor = Value::Null;
+    loop {
+        let page = rpc
+            .call("thread/loaded/list", json!({"limit":100,"cursor":cursor}))
+            .await?;
+        for task in page["data"].as_array().ok_or("invalid loaded threads")? {
+            let Some(task) = task.as_str() else { continue };
+            let result = rpc.call("thread/read", json!({"threadId":task})).await?;
+            let thread = &result["thread"];
+            if thread["ephemeral"] == true || thread["parentThreadId"].is_string() {
+                continue;
+            }
+            if !agents
+                .register_codex(terminal, workspace, thread, None)
+                .await?
+            {
+                continue;
+            }
+            rpc.call("thread/resume",json!({"threadId":task,"excludeTurns":true,"developerInstructions":codex::session_instructions()})).await?;
+            let history = rpc
+                .call(
+                    "thread/turns/list",
+                    json!({"threadId":task,"limit":1,"itemsView":"full","sortDirection":"desc"}),
+                )
+                .await?;
+            if let Some(turn) = history["data"].as_array().and_then(|rows| rows.first()) {
+                if turn["status"] == "inProgress" {
+                    agents.codex_event(terminal,workspace,&json!({"method":"turn/started","params":{"threadId":task,"turn":turn}})).await?;
+                } else if matches!(
+                    turn["status"].as_str(),
+                    Some("completed" | "failed" | "interrupted")
+                ) {
+                    if let Some(items) = turn["items"].as_array() {
+                        for item in items {
+                            if item["type"] == "agentMessage" {
+                                agents.codex_event(terminal,workspace,&json!({"method":"item/completed","params":{"threadId":task,"turnId":turn["id"],"item":item}})).await?;
+                            }
+                        }
+                    }
+                    agents.codex_event(terminal,workspace,&json!({"method":"turn/completed","params":{"threadId":task,"turn":turn}})).await?;
+                }
+            }
+        }
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    Ok(())
 }

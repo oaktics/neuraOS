@@ -37,7 +37,7 @@ impl CodexRpc {
         program: &str,
         env: &HashMap<String, String>,
         args: &[String],
-        events: mpsc::UnboundedSender<Value>,
+        events: super::event_queue::EventSender,
     ) -> Result<Arc<Self>> {
         let directory = std::env::temp_dir().join(format!("neura-codex-{}", super::id()));
         tokio::fs::create_dir(&directory)
@@ -45,7 +45,13 @@ impl CodexRpc {
             .map_err(|e| e.to_string())?;
         let socket = directory.join("server.sock");
         let endpoint = format!("unix://{}", socket.display());
-        let binary = std::env::current_exe().map_err(|e| e.to_string())?;
+        let binary = match std::env::current_exe() {
+            Ok(binary) => binary,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&directory).await;
+                return Err(e.to_string());
+            }
+        };
         let mut command = Command::new(binary);
         command
             .arg("provider-host")
@@ -57,16 +63,29 @@ impl CodexRpc {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         command.process_group(0);
-        let mut child = command.spawn().map_err(|e| e.to_string())?;
+        command.kill_on_drop(true);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&directory).await;
+                return Err(e.to_string());
+            }
+        };
         let pid = child.id().ok_or("Codex did not start")?;
         let owner = child.stdin.take();
-        if let Some(mut out) = child.stdout.take() {
+        let mut guard = StartupGuard {
+            child: Some(child),
+            owner,
+            directory: directory.clone(),
+            pid,
+        };
+        if let Some(mut out) = guard.child.as_mut().unwrap().stdout.take() {
             tokio::spawn(async move {
                 let mut b = [0; 8192];
                 while out.read(&mut b).await.unwrap_or(0) > 0 {}
             });
         }
-        if let Some(mut err) = child.stderr.take() {
+        if let Some(mut err) = guard.child.as_mut().unwrap().stderr.take() {
             tokio::spawn(async move {
                 let mut b = [0; 8192];
                 while err.read(&mut b).await.unwrap_or(0) > 0 {}
@@ -77,7 +96,14 @@ impl CodexRpc {
                 if let Ok(stream) = UnixStream::connect(&socket).await {
                     break Ok(stream);
                 }
-                if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                if guard
+                    .child
+                    .as_mut()
+                    .unwrap()
+                    .try_wait()
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
                     break Err("Codex App Server exited during startup".into());
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
@@ -86,24 +112,34 @@ impl CodexRpc {
         let stream = match tokio::time::timeout(Duration::from_secs(5), startup).await {
             Ok(Ok(s)) => s,
             other => {
-                drop(owner);
-                let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-                let _ = tokio::fs::remove_dir_all(&directory).await;
+                guard.cleanup().await?;
                 return Err(match other {
                     Ok(Err(e)) => e,
                     _ => "Codex App Server startup timed out".into(),
                 });
             }
         };
-        let (ws, _) = tokio_tungstenite::client_async("ws://localhost/", stream)
-            .await
-            .map_err(|e| e.to_string())?;
+        let handshake = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio_tungstenite::client_async("ws://localhost/", stream),
+        )
+        .await;
+        let (ws, _) = match handshake {
+            Ok(Ok(ws)) => ws,
+            other => {
+                guard.cleanup().await?;
+                return Err(match other {
+                    Ok(Err(e)) => e.to_string(),
+                    _ => "Codex handshake timeout".into(),
+                });
+            }
+        };
         let (mut sink, mut source) = ws.split();
         let (writer, mut messages) = mpsc::channel::<Message>(64);
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let closed = Arc::new(AtomicBool::new(false));
-        let (notifications, _) = broadcast::channel(256);
+        let (notifications, _) = broadcast::channel(16);
         let publish = notifications.clone();
         let pending_reader = pending.clone();
         let closed_reader = closed.clone();
@@ -114,8 +150,17 @@ impl CodexRpc {
                         break;
                     };
                     if value["method"].is_string() {
-                        let _ = publish.send(value.clone());
-                        let _ = events.send(value);
+                        if let Some(value) = super::event_queue::supervision_event(value) {
+                            // Title jobs only need their small final message/turn marker.
+                            if matches!(
+                                value["method"].as_str(),
+                                Some("item/completed" | "turn/completed")
+                            ) && value.to_string().len() <= 64 * 1024
+                            {
+                                let _ = publish.send(value.clone());
+                            }
+                            events.send(value);
+                        }
                     } else if let Some(id) = value["id"].as_u64() {
                         if let Some(reply) = pending_reader.lock().await.remove(&id) {
                             let result = if value.get("error").is_some() {
@@ -136,11 +181,14 @@ impl CodexRpc {
         });
         tokio::spawn(async move {
             while let Some(message) = messages.recv().await {
-                if sink.send(message).await.is_err() {
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(12), sink.send(message)).await,
+                    Ok(Ok(()))
+                ) {
                     break;
                 }
             }
-            let _ = sink.close().await;
+            let _ = tokio::time::timeout(Duration::from_millis(200), sink.close()).await;
         });
         let rpc = Arc::new(Self {
             notifications,
@@ -151,11 +199,14 @@ impl CodexRpc {
             pending,
             sequence: AtomicU64::new(0),
             closed,
-            owner: Mutex::new(owner),
-            child: Mutex::new(child),
+            owner: Mutex::new(guard.owner.take()),
+            child: Mutex::new(guard.child.take().unwrap()),
         });
         if let Err(e)=rpc.call("initialize",json!({"clientInfo":{"name":"neuraos_supervision","title":"neuraOS","version":"0.2.0"}})).await{let _=rpc.close().await;return Err(e)}
-        rpc.notify("initialized", json!({})).await?;
+        if let Err(e) = rpc.notify("initialized", json!({})).await {
+            let _ = rpc.close().await;
+            return Err(e);
+        }
         Ok(rpc)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
@@ -208,13 +259,9 @@ impl CodexRpc {
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
         self.owner.lock().await.take();
-        let _ = self.writer.send(Message::Close(None)).await;
+        let _ = self.writer.try_send(Message::Close(None));
         let mut child = self.child.lock().await;
-        tokio::time::timeout(Duration::from_secs(6), child.wait())
-            .await
-            .map_err(|_| "codex_stop_timeout")?
-            .map_err(|e| e.to_string())?;
-        let _ = tokio::fs::remove_dir_all(&self.directory).await;
+        cleanup_child(&mut child, self.pid, &self.directory).await?;
         Ok(())
     }
 }
@@ -326,4 +373,133 @@ pub async fn generate_title(rpc: Arc<CodexRpc>, task: String, cwd: String) -> Re
         .call("thread/archive", json!({"threadId":ephemeral}))
         .await;
     result
+}
+
+struct StartupGuard {
+    child: Option<Child>,
+    owner: Option<ChildStdin>,
+    directory: PathBuf,
+    pid: u32,
+}
+impl StartupGuard {
+    async fn cleanup(&mut self) -> Result<()> {
+        self.owner.take();
+        if let Some(mut child) = self.child.take() {
+            cleanup_child(&mut child, self.pid, &self.directory).await?;
+        }
+        Ok(())
+    }
+}
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        self.owner.take();
+        if let Some(mut child) = self.child.take() {
+            let pid = self.pid;
+            let directory = self.directory.clone();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = cleanup_child(&mut child, pid, &directory).await;
+                });
+            } else if pid > 0 {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+                let _ = child.start_kill();
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+}
+async fn cleanup_child(child: &mut Child, pid: u32, directory: &std::path::Path) -> Result<()> {
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => {}
+        _ => {
+            if pid > 0 {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+            }
+            let _ = child.start_kill();
+            tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .map_err(|_| "codex_stop_timeout")?
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    tokio::fs::remove_dir_all(directory)
+        .await
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    async fn owner() -> (Child, ChildStdin, PathBuf, u32) {
+        let directory =
+            std::env::temp_dir().join(format!("neura-codex-cleanup-{}", crate::providers::id()));
+        tokio::fs::create_dir(&directory).await.unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "cat >/dev/null"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let stdin = child.stdin.take().unwrap();
+        (child, stdin, directory, pid)
+    }
+    #[tokio::test]
+    async fn startup_cancellation_closes_owner_and_reaps_before_removing_directory() {
+        let (child, stdin, directory, pid) = owner().await;
+        drop(StartupGuard {
+            child: Some(child),
+            owner: Some(stdin),
+            directory: directory.clone(),
+            pid,
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while directory.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+    #[tokio::test]
+    async fn close_does_not_wait_for_a_full_socket_writer_queue() {
+        let (child, stdin, directory, pid) = owner().await;
+        let (writer, _receiver) = mpsc::channel(1);
+        writer.try_send(Message::Text("occupied".into())).unwrap();
+        let (notifications, _) = broadcast::channel(1);
+        let rpc = CodexRpc {
+            notifications,
+            endpoint: String::new(),
+            pid,
+            directory: directory.clone(),
+            writer,
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            sequence: AtomicU64::new(0),
+            closed: Arc::new(AtomicBool::new(false)),
+            owner: Mutex::new(Some(stdin)),
+            child: Mutex::new(child),
+        };
+        tokio::time::timeout(Duration::from_secs(2), rpc.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!directory.exists());
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
 }

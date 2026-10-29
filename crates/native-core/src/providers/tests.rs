@@ -25,6 +25,15 @@ impl ProviderStore for MemoryStore {
                     .get(args["id"].as_str().unwrap())
                     .cloned()
                     .unwrap_or(Value::Null)),
+                "compare_put" => {
+                    let rows = db.entry(table).or_default();
+                    let key = args["id"].as_str().unwrap();
+                    if rows.get(key).cloned().unwrap_or(Value::Null) != args["expected"] {
+                        return Ok(json!(false));
+                    }
+                    rows.insert(key.into(), args["value"].clone());
+                    Ok(json!(true))
+                }
                 "put" => {
                     db.entry(table).or_default().insert(
                         args["value"]["id"].as_str().unwrap().into(),
@@ -327,5 +336,87 @@ fn incremental_transcripts_skip_idle_reads_and_keep_flush_inode_fences() {
     std::fs::write(&replacement, row("user", json!({}))).unwrap();
     std::fs::rename(&replacement, &path).unwrap();
     assert!(reader.read(&path, "s", 0).unwrap().is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn giant_append_uses_bounded_tail_and_keeps_exact_session_and_partial_flush_guards() {
+    let root = std::env::temp_dir().join(format!("neura-native-large-{}", id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("session.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"sessionId\":\"s\",\"timestamp\":\"2026-10-29T00:00:00Z\"}\n",
+    )
+    .unwrap();
+    let mut reader = claude::CompletionReader::default();
+    reader.read(&path, "s", 0).unwrap();
+    let before = reader.bytes_read;
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    write!(file,"{}\n{}\n{}\n",json!({"type":"tool","payload":"x".repeat(16*1024*1024)}),json!({"type":"assistant","sessionId":"s","timestamp":"2026-10-29T00:00:00Z","message":{"content":[{"type":"text","text":"bounded result"}]}}),json!({"type":"system","sessionId":"s","timestamp":"2026-10-29T00:00:00Z","subtype":"turn_duration"})).unwrap();
+    file.flush().unwrap();
+    assert_eq!(
+        reader.read(&path, "s", 0).unwrap().unwrap()["last_assistant_message"],
+        "bounded result"
+    );
+    assert!(reader.bytes_read - before <= 512 * 1024);
+    assert!(reader.read(&path, "other", 0).unwrap().is_none());
+    file.write_all(b"{\"type\":\"user\"").unwrap();
+    file.flush().unwrap();
+    assert!(reader.read(&path, "s", 0).unwrap().is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn native_file_notification_recovers_completion_after_append_without_polling() {
+    let (_, agents) = fixture().await;
+    let root = std::env::temp_dir().join(format!("neura-native-watch-{}", id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("session.jsonl");
+    std::fs::write(&path, "").unwrap();
+    let terminal = id();
+    let task = id();
+    agents
+        .prepare_claude(
+            json!({"id":"w","name":"w","path":root}),
+            &terminal,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    agents
+        .claude_event(
+            &terminal,
+            &json!({"hook_event_name":"SessionStart","session_id":task,"transcript_path":path}),
+        )
+        .await
+        .unwrap();
+    agents.claude_event(&terminal,&json!({"hook_event_name":"UserPromptSubmit","session_id":task,"transcript_path":path,"observed_at":"1"})).await.unwrap();
+    let monitor = claude::CompletionMonitor::start(agents.clone()).unwrap();
+    monitor.observe(&terminal, path.clone()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    std::fs::write(&path,format!("{}\n{}\n",json!({"type":"assistant","sessionId":task,"timestamp":"2026-10-29T00:00:00Z","message":{"content":[{"type":"text","text":"native notification"}]}}),json!({"type":"system","subtype":"turn_duration","sessionId":task,"timestamp":"2026-10-29T00:00:00Z"}))).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        loop {
+            if agents.get(&task).await.unwrap().status == "idle" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        agents.get(&task).await.unwrap().summary.as_deref(),
+        Some("native notification")
+    );
+    monitor.close();
+    monitor.remove(&terminal);
     std::fs::remove_dir_all(root).unwrap();
 }

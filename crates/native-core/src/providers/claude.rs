@@ -43,6 +43,7 @@ pub struct CompletionReader {
     summary: Option<String>,
     completed: Option<Value>,
     pub bytes_read: u64,
+    pub title: Option<(String, i64)>,
 }
 impl CompletionReader {
     pub fn read(&mut self, path: &Path, session: &str, after: i64) -> Result<Option<Value>> {
@@ -60,7 +61,11 @@ impl CompletionReader {
         if same && self.snapshot.as_ref() == Some(&before) {
             return Ok(None);
         }
-        let incremental = same && self.snapshot.as_ref().is_some_and(|s| s.size < before.size);
+        let incremental = same
+            && self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.size < before.size && before.size - s.size <= 512 * 1024);
         let start = if incremental {
             self.snapshot.as_ref().unwrap().size
         } else {
@@ -94,6 +99,11 @@ impl CompletionReader {
         } else {
             None
         };
+        let mut title = if incremental {
+            self.title.clone()
+        } else {
+            None
+        };
         for line in lines {
             let row: Value = match serde_json::from_str(line) {
                 Ok(v) => v,
@@ -101,6 +111,24 @@ impl CompletionReader {
             };
             if row["isSidechain"] == true || row["sessionId"] != session {
                 continue;
+            }
+            let name = match row["type"].as_str() {
+                Some("custom-title") => row["customTitle"].as_str(),
+                Some("ai-title") => row["aiTitle"].as_str(),
+                _ => None,
+            };
+            if let Some(name) = name {
+                let name = name
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(200)
+                    .collect::<String>();
+                if !name.is_empty() {
+                    title = Some((name, before.mtime * 1000 + before.mtime_ns / 1_000_000));
+                }
             }
             let Some(timestamp) = row["timestamp"]
                 .as_str()
@@ -143,6 +171,7 @@ impl CompletionReader {
         if before != current {
             return Ok(None);
         }
+        self.title = title;
         self.snapshot = Some(before);
         self.session = session.into();
         self.after = after;
@@ -195,11 +224,25 @@ impl CompletionMonitor {
                 let entries = worker.entries.lock().unwrap().clone();
                 readers.retain(|k, _| entries.contains_key(k));
                 for (terminal, path) in entries {
-                    if !sweep && !dirty.contains(&path) && !dirty.contains(&PathBuf::new()) {
+                    if !sweep
+                        && !dirty.iter().any(|changed| {
+                            path.starts_with(changed)
+                                || std::fs::canonicalize(&path)
+                                    .unwrap_or_else(|_| path.clone())
+                                    .starts_with(changed)
+                        })
+                    {
                         continue;
                     }
-                    let Some(boundary) = agents.completion_boundary(&terminal).await else {
-                        continue;
+                    let boundary = match agents.completion_boundary(&terminal).await {
+                        Some(boundary) => boundary,
+                        None => {
+                            let Some((session, path)) = agents.observed_transcript(&terminal).await
+                            else {
+                                continue;
+                            };
+                            (session, path, String::new(), i64::MAX)
+                        }
                     };
                     if Path::new(&boundary.1) != path {
                         continue;
@@ -214,6 +257,11 @@ impl CompletionMonitor {
                     })
                     .await;
                     if let Ok((reader, Ok(event))) = result {
+                        if let Some((name, at)) = &reader.title {
+                            let _ = agents
+                                .apply_claude_title(&terminal, &boundary.0, name, *at)
+                                .await;
+                        }
                         readers.insert(terminal.clone(), reader);
                         if let Some(event) = event {
                             if agents.completion_boundary(&terminal).await.as_ref()
@@ -232,11 +280,11 @@ impl CompletionMonitor {
         let mut entries = self.entries.lock().unwrap();
         let parent = path.parent().ok_or("transcript parent")?;
         if !entries.values().any(|p| p.parent() == Some(parent)) {
-            self.watcher
+            let _ = self
+                .watcher
                 .lock()
                 .unwrap()
-                .watch(parent, RecursiveMode::NonRecursive)
-                .map_err(|e| e.to_string())?;
+                .watch(parent, RecursiveMode::NonRecursive);
         }
         entries.insert(terminal.into(), path.clone());
         drop(entries);

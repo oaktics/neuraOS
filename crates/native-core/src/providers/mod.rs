@@ -4,6 +4,7 @@ pub use integration::ProviderService;
 pub mod agents;
 pub mod claude;
 pub mod codex;
+pub mod event_queue;
 pub mod mcp;
 
 use serde_json::Value;

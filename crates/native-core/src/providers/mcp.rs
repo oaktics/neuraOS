@@ -282,7 +282,7 @@ impl Client {
                 loop {
                     changes.borrow_and_update();
                     let snapshot = self.request("/v1/agents", None, None).await?;
-                    if snapshot["revision"].as_u64().unwrap_or(0) > after
+                    if snapshot["revision"].as_u64().unwrap_or(0) != after
                         || tokio::time::Instant::now() >= deadline
                     {
                         return Ok(snapshot);
@@ -433,7 +433,7 @@ pub async fn run() -> Result<()> {
     if channel {
         let c = client.clone();
         let out = out.clone();
-        tasks.spawn(async move{while !*ready.borrow(){if ready.changed().await.is_err(){return}}let mut changed=c.changes.clone();loop{changed.borrow_and_update();let event=c.request(&format!("/v1/claude/{}/channel",c.terminal),Some(json!({})),Some(("x-neura-channel-token",&c.channel_token))).await;if let Ok(event)=event{if event["content"].is_string(){let _=output(&out,json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":event})).await;}}if changed.changed().await.is_err(){break}}});
+        tasks.spawn(async move{while !*ready.borrow(){if ready.changed().await.is_err(){return}}let mut changed=c.changes.clone();let mut retry=Duration::from_secs(1);loop{changed.borrow_and_update();let event=c.request(&format!("/v1/claude/{}/channel",c.terminal),Some(json!({})),Some(("x-neura-channel-token",&c.channel_token))).await;let failed=event.is_err();if let Ok(event)=event{if event["content"].is_string(){let _=output(&out,json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":event})).await;}}if failed{tokio::select!{result=changed.changed()=>{if result.is_err(){break}},_=tokio::time::sleep(retry)=>{}}retry=(retry*2).min(Duration::from_secs(30));}else{retry=Duration::from_secs(1);if changed.changed().await.is_err(){break}}}});
     }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
