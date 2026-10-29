@@ -479,7 +479,16 @@ async fn events(
         json!({"events":s.store.call("events",json!({"after":after(&q)?})).await?}),
     ))
 }
-async fn agents(State(s): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+async fn agents(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(options) = q.get("options") {
+        let options: Value = serde_json::from_str(options).map_err(|_| invalid())?;
+        return Ok(Json(
+            s.providers.agents.query(options).await.map_err(provider_error)?,
+        ));
+    }
     Ok(Json(s.providers.snapshot().await.map_err(provider_error)?))
 }
 async fn agent(
@@ -718,6 +727,19 @@ async fn stream_session(socket: WebSocket, s: Arc<AppState>, native_id: Option<S
     let _ = tokio::time::timeout(Duration::from_secs(2), sink.close()).await;
 }
 async fn command(
+    State(s): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if body["command"]["type"] == "agent.instruction" {
+        // Keep the durable row, in-memory registry and operation journal in
+        // sync even if the MCP/HTTP caller disconnects during the write.
+        return tokio::spawn(command_inner(State(s), Json(body)))
+            .await
+            .map_err(|_| ApiError::storage())?;
+    }
+    command_inner(State(s), Json(body)).await
+}
+async fn command_inner(
     State(s): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
