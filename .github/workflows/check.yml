@@ -50,7 +50,7 @@ jobs:
       - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
       - run: pnpm install --frozen-lockfile
       - name: Verify native HTTP protocol and native provider MCP
-        run: node --test tests/native-rust/protocol.test.mjs tests/native-rust/setup-lifecycle.test.mjs tests/native-rust/pty-crash.test.mjs tests/native-rust/migration.test.mjs tests/native/provider-native-mcp.test.mjs tests/native/provider-process-tree.test.mjs
+        run: node --test tests/native-rust/protocol.test.mjs tests/native-rust/setup-lifecycle.test.mjs tests/native-rust/pty-crash.test.mjs tests/native-rust/migration.test.mjs tests/native/provider-native-mcp.test.mjs tests/native/provider-process-tree.test.mjs tests/native/provider-daemon-parallel.test.mjs
         env:
           NEURA_NATIVE_DAEMON: crates/native-core/target/release/neura-native-core
       - run: pnpm typecheck
