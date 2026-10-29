@@ -1,6 +1,8 @@
 // End-to-end loopback HTTP/PTY/durable replay benchmark in disposable data dirs.
 // Does not use the installed app, real providers, credentials or project state.
-import {spawn} from 'node:child_process';
+import {spawn,execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+const exec = promisify(execFile);
 import {mkdtemp,writeFile,readFile,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
@@ -47,9 +49,24 @@ for(const children of counts){
   const terminals=await Promise.all(Array.from({length:children},()=>execute({type:'terminal.open',workspaceId:workspace.id,provider:'shell',resume:false})));
   const snapshot=(await request('/v1/state')).value;const ids=snapshot.terminals.filter(t=>t.workspaceId===workspace.id).map(t=>t.id);if(ids.length!==children)throw Error(`Expected ${children} terminals, got ${ids.length}`);
   for(const [index,id]of ids.entries())records.set(id,{id,index,cursor:0,text:'',status:'running',pulse:new Pulse()});
+   const readers=[...records.values()].map(async r=>{while(r.status==='running'){await drain(r);if(r.status!=='running')break;if(legacy)await sleep(r.index===0?60:500);else {let timer;try{await Promise.race([r.pulse.wait(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`No terminal event ${r.index}`)),15000)})]);}finally{clearTimeout(timer);}}}await drain(r);});
+  for(const reader of readers)reader.catch(()=>{}); // Awaited below; avoid early unhandled rejection during idle sampling.
+  let idleMetrics;
+  if(process.env.NEURA_BENCH_METRICS){
+   const sample=async()=>JSON.parse((await exec(process.env.NEURA_BENCH_METRICS,[String(child.pid)],{timeout:5000})).stdout);
+   await sleep(1000); // Let startup and the initial cursor replay settle.
+   const before=await sample(),idleStart=performance.now();
+   let idleDone=false;
+   const legacyState=legacy?(async()=>{while(!idleDone){await request('/v1/state');await sleep(1000);}})():undefined;
+   await sleep(Number(process.env.NEURA_BENCH_IDLE_MS??5000));
+   const after=await sample(),elapsedMs=performance.now()-idleStart;
+   idleDone=true;await legacyState;
+   const stable=after.map(p=>({end:p,start:before.find(q=>q.pid===p.pid&&q.start===p.start)})).filter(p=>p.start);
+   const delta=key=>stable.reduce((sum,p)=>sum+Math.max(0,p.end[key]-p.start[key]),0);
+   idleMetrics={elapsedMs,stableProcesses:stable.length,endProcesses:after.length,cpuMs:delta('cpuNs')/1e6,idleWakeups:delta('idleWakeups'),interruptWakeups:delta('interruptWakeups'),endFootprintBytes:after.reduce((sum,p)=>sum+p.footprintBytes,0),transientChildCostsIncluded:false,legacyUIReadCadence:legacy?'state 1000ms; visible output 60ms; other output 500ms':'event driven'};
+  }
   stateTask=(async()=>{while(!stopping){const r=await request('/v1/state');latencies.push(r.elapsed);await sleep(50);}})();
   const start=performance.now();
-  const readers=[...records.values()].map(async r=>{while(r.status==='running'){await drain(r);if(r.status!=='running')break;if(legacy)await sleep(r.index===0?60:500);else {let timer;try{await Promise.race([r.pulse.wait(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`No terminal event ${r.index}`)),15000)})]);}finally{clearTimeout(timer);}}}await drain(r);});
   await Promise.all([...records.values()].map(async r=>{const response=await execute({type:'terminal.input',terminalId:r.id,clientId:randomUUID(),data:`/usr/bin/python3 '${producer}' ${r.index}; exit\n`});inputLatencies.push(response.elapsed);}));
   await Promise.all(readers);stopping=true;await stateTask;stateTask=undefined;
   for(const r of records.values()){
@@ -63,7 +80,7 @@ for(const children of counts){
   await stop();await launch();
   for(const r of records.values()){r.cursor=0;r.text='';await drain(r);if(r.text!==saved.get(r.id))throw Error('Durable cursor replay differs after restart');}
   await stop();child=undefined;
-  results.push({children,rowsPerTerminal:rows,bytesPerRow:payloadSize,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
+  results.push({children,idleMetrics,rowsPerTerminal:rows,bytesPerRow:payloadSize,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
  }catch(e){failed=true;throw e;}finally{
   stopping=true;await stateTask?.catch(()=>{});socket?.terminate();if(child&&child.exitCode===null){await Promise.allSettled([...records.keys()].map(terminalId=>execute({type:'terminal.stop',terminalId})));try{await stop();}catch{try{process.kill(-child.pid,'SIGKILL');}catch{}await exitPromise;}}
   // Preserve failing isolated evidence; never touch installed app data.
