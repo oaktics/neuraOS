@@ -10,9 +10,12 @@ use std::{
     sync::{mpsc, Arc, OnceLock},
     time::{Duration, Instant},
 };
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+#[path = "process_tree/owned_child.rs"]
+mod owned_child;
 #[path = "process_tree/supervisor.rs"]
 mod supervisor;
+pub use owned_child::OwnedChild;
 pub use supervisor::{ensure_supervisor, process_supervisor, reserve, ProcessReservation};
 pub const OWNER_ENV: &str = "NEURA_PROCESS_OWNER";
 type Result<T> = std::result::Result<T, String>;
@@ -23,6 +26,7 @@ struct Lease {
     id: String,
     monitor: &'static Monitor,
     stopped: Mutex<Option<Result<()>>>,
+    exit: watch::Receiver<Option<Result<()>>>,
 }
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -50,12 +54,14 @@ impl ProcessTree {
             .map_err(Clone::clone)?;
         let id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = mpsc::sync_channel(1);
-        monitor.send(Control::Add(id.clone(), pid, token, group, tx));
+        let (exit_tx, exit) = watch::channel(None);
+        monitor.send(Control::Add(id.clone(), pid, token, group, tx, exit_tx));
         rx.recv().map_err(|_| "process monitor stopped")??;
         Ok(Self(Arc::new(Lease {
             id,
             monitor,
             stopped: Mutex::new(None),
+            exit,
         })))
     }
     fn reserved(token: String) -> Result<Self> {
@@ -71,6 +77,19 @@ impl ProcessTree {
             .send(Control::Attach(self.0.id.clone(), pid, tx));
         rx.await
             .map_err(|_| "process monitor stopped".to_string())?
+    }
+    /// Observe leader exit without reaping it. Caller retains the child handle
+    /// until stop completes, preserving the original PGID identity as an anchor.
+    pub async fn wait_exit(&self) -> Result<()> {
+        let mut exit = self.0.exit.clone();
+        loop {
+            if let Some(result) = exit.borrow().clone() {
+                return result;
+            }
+            exit.changed()
+                .await
+                .map_err(|_| "process exit observer closed".to_owned())?;
+        }
     }
     /// Idempotent and cancellation-safe. TERM once, KILL after 1.5 seconds;
     /// resolves after every discovered identity has exited, or returns an error.
@@ -103,10 +122,13 @@ enum Control {
         Option<String>,
         Option<Identity>,
         mpsc::SyncSender<Result<()>>,
+        watch::Sender<Option<Result<()>>>,
     ),
     Stop(String, Option<oneshot::Sender<Result<()>>>),
 }
 struct Tree {
+    root: Option<Identity>,
+    exit: watch::Sender<Option<Result<()>>>,
     group: Option<Identity>,
     token: Option<String>,
     owned: HashMap<u64, Identity>,
@@ -147,9 +169,11 @@ extern "C" {
 fn identity(pid: i32) -> Option<Identity> {
     // XNU PROC_PIDT_BSDINFOWITHUNIQID=18 returns both atomically, avoiding
     // mismatched PID generation between two independent proc_pidinfo calls.
+    // arg=1 includes unreaped zombies (XNU proc_info.c findzomb). They cannot
+    // execute but their unique PID still safely anchors a private process group.
     let mut info: BsdUnique = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<BsdUnique>();
-    let n = unsafe { libc::proc_pidinfo(pid, 18, 0, &mut info as *mut _ as *mut _, size as i32) };
+    let n = unsafe { libc::proc_pidinfo(pid, 18, 1, &mut info as *mut _ as *mut _, size as i32) };
     if n != size as i32 {
         return None;
     }
@@ -300,7 +324,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
     loop {
         for command in rx.try_iter() {
             match command {
-                Control::Add(id, pid, token, group, ack) => {
+                Control::Add(id, pid, token, group, ack, exit) => {
                     let root = identity(pid as i32);
                     if root.is_none() && token.is_none() {
                         let _ = ack.send(Err("process already exited".into()));
@@ -313,6 +337,8 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                     trees.insert(
                         id,
                         Tree {
+                            root,
+                            exit,
                             group: group.or_else(|| root.filter(|r| r.pid == r.group)),
                             token,
                             owned,
@@ -331,12 +357,15 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                             Err("process lease already stopping".into())
                         } else {
                             if let Some(root) = identity(pid as i32) {
+                                tree.root = Some(root);
                                 if root.pid == root.group {
                                     tree.group = Some(root);
                                 }
                                 tree.owned.insert(root.unique, root);
+                                Ok(())
+                            } else {
+                                Err("process already reaped before attachment".into())
                             }
-                            Ok(())
                         }
                     } else {
                         Err("unknown process lease".into())
@@ -378,14 +407,12 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                         }
                     }
                     for tree in trees.values_mut() {
-                        // Claim group members only while its original dedicated leader
-                        // is alive. A cached numeric PGID alone is never ownership proof.
+                        // A retained zombie also anchors the PGID: its numeric PID
+                        // cannot be reused until the parent explicitly reaps it.
                         let anchored_group = tree
                             .group
                             .filter(|leader| {
-                                rows.iter().any(|r| {
-                                    r.pid == leader.pid && r.unique == leader.unique && !r.zombie
-                                })
+                                identity(leader.pid).is_some_and(|r| r.unique == leader.unique)
                             })
                             .map(|r| r.pid);
                         for row in &rows {
@@ -450,6 +477,24 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                         if kill { libc::SIGKILL } else { libc::SIGTERM },
                                     ) {
                                         tree.error = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        // Check after installing NOTE_EXIT: exit between the
+                        // snapshot and EV_ADD must not wait for reconciliation.
+                        if tree.exit.borrow().is_none() {
+                            if let Some(root) = tree.root {
+                                match identity(root.pid) {
+                                    Some(current) if current.unique == root.unique => {
+                                        if current.zombie {
+                                            tree.exit.send_replace(Some(Ok(())));
+                                        }
+                                    }
+                                    _ => {
+                                        tree.exit.send_replace(Some(Err(
+                                            "leader reaped before cleanup".into(),
+                                        )));
                                     }
                                 }
                             }
