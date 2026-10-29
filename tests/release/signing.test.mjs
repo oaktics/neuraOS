@@ -21,6 +21,8 @@ test('nested signing discovers arbitrary Mach-O files, skips symlinks, and seals
   const app = join(root, 'Example.app');
   const framework = join(app, 'Contents/Frameworks/Example.framework');
   const renderer = join(app, 'Contents/Frameworks/NeuraOS Helper (Renderer).app');
+  const generic = join(app, 'Contents/Frameworks/NeuraOS Helper.app');
+  mkdirSync(generic, {recursive: true});
   const paths = [join(framework, 'Versions/A/Libraries/unexpected-name'),
     join(renderer, 'Contents/MacOS/helper'), join(app, 'Contents/Resources/Runtime/bin/node'),
     join(app, 'Contents/MacOS/NeuraSleepService')];
@@ -42,6 +44,7 @@ test('nested signing discovers arbitrary Mach-O files, skips symlinks, and seals
   for (const args of signed) {assert.ok(args.includes('--timestamp')); assert.ok(!args.includes('--deep'));}
   const entitlement = target => signed.find(args => args.at(-1) === target)[signed.find(args => args.at(-1) === target).indexOf('--entitlements') + 1];
   assert.ok(entitlement(renderer).endsWith('/jit.entitlements.plist'));
+  assert.ok(entitlement(generic).endsWith('/jit.entitlements.plist'));
   assert.ok(entitlement(paths[2]).endsWith('/jit.entitlements.plist'));
   assert.ok(entitlement(paths[3]).endsWith('/empty.entitlements.plist'));
   assert.ok(entitlement(app).endsWith('/certified-client.entitlements.plist'));

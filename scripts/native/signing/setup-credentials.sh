@@ -23,7 +23,10 @@ read -r -s -p 'App-specific password (not your Apple Account login password): ' 
 printf '\n'
 test -n "$notary_password"
 trap 'unset certificate_password notary_password' EXIT
-printf '%s\n' "$certificate_password" | openssl pkcs12 -in "$certificate" -noout -passin stdin
+# Apple's Keychain export may use RC2, which Homebrew OpenSSL 3 disables by
+# default. macOS's bundled LibreSSL can validate these exports without loading
+# a legacy provider or changing the user's global crypto configuration.
+printf '%s\n' "$certificate_password" | /usr/bin/openssl pkcs12 -in "$certificate" -noout -passin stdin
 # Validate with Apple before changing repository secrets. The passwords are not
 # command history, source files or printed output. notarytool stores in Keychain.
 xcrun notarytool store-credentials neura-local --apple-id "$apple_id" --team-id "$team" --password "$notary_password"

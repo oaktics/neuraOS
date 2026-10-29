@@ -33,7 +33,7 @@ ad-hoc署名のdesignated requirementはビルドに依存する。証明書に�
 
 証明書を使う場合は、実ファイルのMach-Oヘッダーを調べて同梱コードを列挙する。CEF内のライブラリ、Helper、Node、native addon、Sleep serviceを内側から署名し、最後にアプリを署名する。symlinkをたどって同じコードを再署名しない。署名にはHardened Runtimeとsecure timestampを使用する。`--deep`は検証時だけ使う。
 
-Renderer/GPUとNode等のJIT実行プロセスだけに`allow-jit`を付ける。署名済みアプリと同梱ライブラリは同じTeam IDを使い、library validationを維持する。Sleep serviceにはJITやlibrary validation無効化の例外を付けない。
+Renderer/GPUとNode等のJIT実行プロセスに`allow-jit`を付ける。CEFの`browser_subprocess_path`が指す汎用のNeuraOS HelperもRendererを兼ねるため対象にする。署名済みアプリと同梱ライブラリは同じTeam IDを使い、library validationを維持する。Sleep serviceにはJITやlibrary validation無効化の例外を付けない。
 
 ## GitHub Actions
 

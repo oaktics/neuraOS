@@ -36,7 +36,10 @@ export function signCertifiedTree(app, identity, run = execFileSync) {
       if (entry.isDirectory()) {
         walk(file);
         if (entry.name.endsWith('.framework')) sign(file);
-        else if (entry.name.endsWith('.app')) sign(file, / \((Renderer|GPU)\)\.app$/.test(entry.name) ? 'jit' : 'empty');
+        // browser_subprocess_path uses the generic Helper for every CEF role,
+        // including V8 renderers. Role-specific bundles remain supported too.
+        else if (entry.name.endsWith('.app')) sign(file,
+          entry.name === 'NeuraOS Helper.app' || / \((Renderer|GPU)\)\.app$/.test(entry.name) ? 'jit' : 'empty');
       } else if (entry.isFile() && isMachO(file)) {
         sign(file, ['node', 'claude'].includes(entry.name) ? 'jit' : 'empty');
       }
