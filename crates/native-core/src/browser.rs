@@ -376,6 +376,11 @@ impl BrowserBroker {
                 .map(|(id, _)| id.clone())
                 .collect();
             if action == "stop" {
+                // A native bridge may keep its lease alive without ACKing a
+                // cancellation. Keep one stop per tab until that ACK arrives.
+                if matching.iter().any(|id| s.pending.get(id).is_some_and(|p| field(&p.command, "action") == "stop")) {
+                    return Err(error("browser_busy", 409));
+                }
                 for id in matching {
                     settle(&mut s, &id, None, Some("browser_cancelled"));
                 }
@@ -609,6 +614,26 @@ mod tests {
         let result = b.poll(poll.clone(), snapshot).unwrap();
         assert_eq!(result["requests"].as_array().unwrap().len(), 1);
         (task, result["requests"][0].clone())
+    }
+    #[tokio::test]
+    async fn repeated_stop_without_native_ack_keeps_pending_bounded() {
+        let (b, snapshot, poll, call, _lease) = fixture();
+        let (original, _) = dispatch(&b, &snapshot, &poll, &call).await;
+        let mut stop = call.clone();
+        stop["command"]["action"] = json!("stop");
+        let (stopping, request) = dispatch(&b, &snapshot, &poll, &stop).await;
+        assert_eq!(original.await.unwrap().unwrap_err().error, "browser_cancelled");
+        for _ in 0..100 {
+            assert_eq!(b.call(stop.clone(), &snapshot, true).await.unwrap_err().error, "browser_busy");
+            let update = b.poll(poll.clone(), &snapshot).unwrap();
+            assert!(update["requests"].as_array().unwrap().is_empty());
+            assert_eq!(update["cancelIds"].as_array().unwrap().len(), 1);
+            assert_eq!(b.state.lock().unwrap().pending.len(), 2);
+        }
+        let mut acknowledged = poll.clone();
+        acknowledged["results"] = json!([{"id":request["id"],"result":{}}]);
+        b.poll(acknowledged, &snapshot).unwrap();
+        assert!(stopping.await.unwrap().is_ok());
     }
     #[tokio::test]
     async fn stream_drop_cancels_immediately_and_old_connection_cannot_close_replacement() {
