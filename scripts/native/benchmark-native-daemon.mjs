@@ -11,6 +11,7 @@ import {randomUUID} from 'node:crypto';
 import {setTimeout as sleep} from 'node:timers/promises';
 import {performance} from 'node:perf_hooks';
 import WebSocket from 'ws';
+import {finishWorkload} from './benchmark-timing.mjs';
 const counts=(process.env.NEURA_BENCH_COUNTS??'1,5,10,20,32').split(',').map(Number);
 const rows=Number(process.env.NEURA_BENCH_ROWS??256),payloadSize=2048;
 const command=process.env.NEURA_BENCH_COMMAND?JSON.parse(process.env.NEURA_BENCH_COMMAND):[resolve('crates/native-core/target/release/neura-native-core')];
@@ -79,12 +80,14 @@ for(const children of counts){
   }})();pressureTask.catch(()=>{});
   const start=performance.now();
   await Promise.all([...records.values()].map(async r=>{const response=await execute({type:'terminal.input',terminalId:r.id,clientId:randomUUID(),data:`/usr/bin/python3 '${producer}' ${r.index}; exit\n`});inputLatencies.push(response.elapsed);}));
-  await Promise.all(readers);stopping=true;await stateTask;stateTask=undefined;await pressureTask;pressureTask=undefined;
+  const duration=await finishWorkload(readers,start,async()=>{
+   stopping=true;await stateTask;stateTask=undefined;await pressureTask;pressureTask=undefined;
+  });
   for(const r of records.values()){
    const matches=[...r.text.matchAll(/NEURA_ROW:(\d+):(\d+):(x+):日本語:END/g)];
    if(matches.length!==rows||matches.some((m,i)=>Number(m[1])!==r.index||Number(m[2])!==i||m[3].length!==payloadSize))throw Error(`PTY loss/order/UTF8 corruption terminal ${r.index}: ${matches.length}/${rows}`);
   }
-  const duration=performance.now()-start;const saved=new Map([...records].map(([id,r])=>[id,r.text]));
+  const saved=new Map([...records].map(([id,r])=>[id,r.text]));
   const idleBefore=changes;await sleep(1000);const idleChanges=changes-idleBefore;
   // Deliberate stream reconnect must produce ready then permit cursor recovery.
   if(!legacy){socket.close();await stream();}
