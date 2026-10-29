@@ -32,3 +32,18 @@ for(const mode of ['eof','sigterm','parent-crash','detached','exit','fast-group'
    if(mode==='exit')assert.equal(child.exitCode,7);
  }finally{for(const pid of pids)if(alive(pid))try{process.kill(pid,'SIGKILL');}catch{}if(child&&child.exitCode===null&&child.signalCode===null)child.kill('SIGKILL');await rm(dir,{recursive:true,force:true});}
 });
+for(const [count,mode]of [[10,'eof'],[20,'parent-crash'],[32,'timeout'],[1,'before-attach']])test(`shared native ownership: ${count} reservations, ${mode}`,{skip:!binary,timeout:20000},async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'neura-shared-owner-')),fixture=join(dir,'fixture');
+ execFileSync('/usr/bin/cc',['tests/native/fixtures/process-tree.c','-o',fixture]);
+ let parent,pids=[],helper,stderr='';
+ try{
+  parent=spawn(process.execPath,['tests/native/fixtures/process-supervisor-parent.mjs',binary,fixture,dir,String(count),mode],{stdio:['pipe','pipe','pipe']});
+  parent.stderr.on('data',b=>stderr+=b);
+  await until(async()=>{try{helper=Number(await readFile(dir+'/helper','utf8'));pids=(await Promise.all(Array.from({length:count},(_,i)=>readFile(dir+'/pids-'+i,'utf8')))).flatMap(s=>s.trim().split('\n').map(Number));return pids.length===count*2;}catch{return false;}});
+  if(mode==='parent-crash'||mode==='before-attach')parent.kill('SIGKILL');else parent.stdin.write('stop\n');
+  await until(()=>pids.every(pid=>!alive(pid))&&!alive(helper));
+  const before=await Promise.all(Array.from({length:count},(_,i)=>readFile(dir+'/writes-'+i).then(b=>b.length)));
+  await delay(100);assert.deepEqual(await Promise.all(Array.from({length:count},(_,i)=>readFile(dir+'/writes-'+i).then(b=>b.length))),before);
+  assert.equal(stderr,'');
+ }finally{for(const pid of [...pids,helper,parent?.pid])if(pid>1&&alive(pid))try{process.kill(pid,'SIGKILL');}catch{}await rm(dir,{recursive:true,force:true});}
+});
