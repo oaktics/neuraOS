@@ -30,7 +30,7 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 ## 配布と初回導入
 
-新規導入ではGitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時は同梱native helperがLaunchAgentを確認する。同じnative daemonパスでサービスが稼働中なら維持し、未登録・停止中・旧Nodeなど異なる起動設定なら再登録する。通常起動だけでも旧DaemonとPTYを停止し得るため、移行前に作業を保存する。既存Node版からの移行は、アプリだけを手動上書きして完了とせず、以下のnative updaterでアプリとLaunchAgentを一緒に移行する。
+新規導入ではGitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時は同梱native helperがLaunchAgentを確認する。既存LaunchAgentにrunning PIDがあれば、旧Node版や別パスのnative版でも温存する。停止中・未登録の場合だけ再登録する。新bundleを別場所から開くだけでは稼働サービスを置換しない。移行は明示的なupdater applyまたはservice installで行い、その前に作業を保存する。既存Node版からの移行は、アプリだけを手動上書きして完了とせず、以下のnative updaterでアプリとLaunchAgentを一緒に移行する。
 
 Runtimeは`bin/neura-native-core`（Rust daemon／PTY／SQLite／provider／MCP）と`bin/neura-updater`（Swift更新helper）の2実行ファイルだけで構成する。これはRuntimeディレクトリの構成であり、Swift UI・CEF framework/helper・Sleep serviceを含むアプリ全体が2プロセスだけという意味ではない。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Git／GitHub CLIなどの開発CLIは引き続き各自の環境を使う。
 
@@ -56,7 +56,7 @@ build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、
    "$HELPER" prepare native-N OLD_APP_PID
    ```
 
-   helperは公式Releaseを再ダウンロードするため、展開済みbundleだけのoffline installではない。最新tag一致・SHA-256・署名・Gatekeeper・bundle ID・build番号・native Runtimeを検証する。`{"ready":true}`は準備完了であり移行完了ではない。prepare中に先に旧UIを終了せず、この応答後60秒以内に通常終了する。終了しなければappを置き換える前に中止する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
+   helperは公式Releaseを再ダウンロードするため、展開済みbundleだけのoffline installではない。アーカイブはファイルへダウンロードし、SHA-256を1 MiBずつ読み込んで検証するため、CEFを含むZIP全体をメモリへ読み込まない。最新tag一致・署名・Gatekeeper・bundle ID・build番号・native Runtimeも検証する。`{"ready":true}`は準備完了であり移行完了ではない。prepare中に先に旧UIを終了せず、この応答後60秒以内に通常終了する。終了しなければappを置き換える前に中止する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
 
    旧UIが起動不能または既に完全終了している場合は、短命のshellの終了を待つ次の形を使う（`native-N`は実値へ置き換える）。旧UIがまだ動いている状態では使わない。sudoは不要。
 
@@ -64,12 +64,14 @@ build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、
    /bin/sh -c '"$1" prepare "$2" "$$"' sh "$HELPER" native-N
    ```
 
-4. helperが旧appを`~/Applications/neuraOS.app.previous`へ退避し、新appを配置する。旧LaunchAgent plistも`~/Library/Application Support/neuraOS/Updates/previous-launch-agent.plist`へ保存する。Daemonを停止・再登録し、認証付きHTTP health確認後に新appを開く。既存PTY／エージェントは終了する。
+4. helperが旧appを`~/Applications/neuraOS.app.previous`へ退避し、新appを配置する。旧LaunchAgent plistも`~/Library/Application Support/neuraOS/Updates/previous-launch-agent.plist`へ保存する。Daemonを停止・再登録し、認証付きHTTP health確認後に新appを開く。healthはHTTP 200に加え`runtime: "rust"`、有効なUUIDの`daemonInstanceId`、置換前と異なるinstanceであることを要求し、旧Nodeの200応答や旧native instanceを成功と誤認しない。既存PTY／エージェントは終了する。
 5. 新appのbuild番号、native daemonへの接続、履歴復元を確認する。これをRelease公開・署名公証・fixture成功とは別のinstalled-app受入として記録する。
 
 登録やhealth確認の失敗時は、helperが旧appと旧plistを戻して旧daemonの再登録を試みる。復元の成否はサービス状態と`Updates/last-error.txt`を確認する。旧プロセスの実行継続やDBの巻き戻しは保証しない。復元自体に失敗した場合は`.previous`と保存plistを保持し、進行中のhelperがないことを確認してから調査・復旧する。再実行は既存backupを置き換えるため、原因を確認せず連打しない。
 
 2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`／healthはmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。Developer ID署名済み検証bundle自体は未公証で、そのhelperの直接起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
+
+追加の`854cc25`では稼働サービス温存・新native instance判定・ファイルdownload／stream hashを実装し、Swift updater 17 testsが成功した（`/tmp/neura-native-review-fixes-tests-final.log`）。これも隔離fixtureの結果であり、最新の署名済み候補からの実サービス移行は別の未実施項目である。
 
 ## 更新の保証範囲
 
