@@ -420,3 +420,37 @@ async fn native_file_notification_recovers_completion_after_append_without_polli
     monitor.remove(&terminal);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn tail_skips_partial_utf8_before_decoding_valid_japanese_stop_and_title() {
+    let root = std::env::temp_dir().join(format!("neura-native-utf8-{}", id()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("session.jsonl");
+    let mut checked = false;
+    for session in ["s", "ss", "sss"] {
+        let content = format!(
+            "{}\n{}\n{}\n{}\n",
+            json!({"type":"tool","payload":"あ".repeat(300000)}),
+            json!({"type":"ai-title","sessionId":session,"aiTitle":"日本語の完了"}),
+            json!({"type":"assistant","sessionId":session,"timestamp":"2026-10-29T00:00:00Z","message":{"content":[{"type":"text","text":"検証済み"}]}}),
+            json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":"2026-10-29T00:00:00Z"})
+        );
+        let bytes = content.as_bytes();
+        let start = bytes.len() - 512 * 1024;
+        if bytes[start] & 0xc0 != 0x80 {
+            continue;
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let mut reader = claude::CompletionReader::default();
+        assert_eq!(
+            reader.read(&path, session, 0).unwrap().unwrap()["last_assistant_message"],
+            "検証済み"
+        );
+        assert_eq!(reader.title.as_ref().unwrap().0, "日本語の完了");
+        assert_eq!(reader.bytes_read, 512 * 1024);
+        checked = true;
+        break;
+    }
+    assert!(checked, "fixture must start inside a multibyte code point");
+    std::fs::remove_dir_all(root).unwrap();
+}
