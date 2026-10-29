@@ -493,3 +493,36 @@ async fn startup_recovery_persists_interruption_and_keeps_pending_reports() {
         persisted
     );
 }
+
+#[tokio::test]
+async fn snapshot_preserves_legacy_claude_session_ids_without_agent_id() {
+    let dir = std::env::temp_dir().join(format!("neura-legacy-session-map-{}", id()));
+    std::fs::create_dir(&dir).unwrap();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let store = crate::store::StoreHandle::open(&dir.join("test.sqlite"), events)
+        .await
+        .unwrap();
+    for terminal in [
+        json!({"id":"legacy","workspaceId":"w","provider":"claude","sessionId":"claude-session"}),
+        json!({"id":"current","workspaceId":"w","provider":"claude","sessionId":"current-session","agentId":"stale-agent"}),
+        json!({"id":"pending","workspaceId":"w","provider":"claude","agentId":"not-a-confirmed-session"}),
+        json!({"id":"codex","workspaceId":"w","provider":"codex","sessionId":"codex-thread","agentId":"codex-thread"}),
+    ] {
+        store.put("terminals", terminal, None).await.unwrap();
+    }
+    let pty = crate::pty::PtyRuntime::new(store.clone()).unwrap();
+    let providers = integration::ProviderService::new(
+        store,
+        pty.clone(),
+        "http://127.0.0.1:1".into(),
+        dir.join("token").display().to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        providers.snapshot().await.unwrap()["currentSessionIds"],
+        json!({"legacy":"claude-session","current":"current-session"})
+    );
+    providers.shutdown().await.unwrap();
+    pty.shutdown().await.unwrap();
+}

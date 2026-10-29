@@ -338,7 +338,10 @@ impl ProviderService {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|t| Some((t["id"].as_str()?.into(), t["agentId"].as_str()?.into())))
+            // Legacy Claude records may have sessionId without agentId. Keep
+            // the original HTTP contract: this map contains Claude sessions.
+            .filter(|t| t["provider"] == "claude")
+            .filter_map(|t| Some((t["id"].as_str()?.into(), t["sessionId"].as_str()?.into())))
             .collect();
         Ok(
             json!({"agents":self.agents.list().await,"revision":state["revision"],"currentSessionIds":current}),
