@@ -103,3 +103,15 @@ async fn read(store: &StoreHandle, id: &str) -> String {
         }
     }
 }
+
+#[tokio::test]
+async fn failed_output_commit_wakes_clients_and_never_acknowledges_input_as_healthy(){
+ let directory=std::env::temp_dir().join(format!("neura-pty-fault-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&directory).unwrap();
+ let(events,mut changes)=broadcast::channel::<Change>(32);let store=StoreHandle::open(&directory.join("state.sqlite"),events).await.unwrap();
+ store.call("transaction",json!([{"sql":"CREATE TRIGGER reject_output BEFORE INSERT ON output BEGIN SELECT RAISE(ABORT,'fixture storage fault'); END","args":[]}])).await.unwrap();
+ let id=uuid::Uuid::new_v4().to_string();store.put("terminals",json!({"id":id,"status":"running"}),None).await.unwrap();while changes.try_recv().is_ok(){}
+ let pty=PtyRuntime::new(store.clone()).unwrap();let pid=pty.spawn(&id,"/usr/bin/python3",vec!["-c".into(),"import sys,time;print('uncommitted');sys.stdout.flush();time.sleep(30)".into()],"/tmp",HashMap::new()).await.unwrap();
+ let event=tokio::time::timeout(Duration::from_secs(5),changes.recv()).await.unwrap().unwrap();assert!(event.state);assert!(pty.check_healthy().is_err());assert_eq!(pty.input(&id,"must not acknowledge").await.unwrap_err().error,"terminal_runtime_failed");
+ assert_eq!(store.call("output",json!({"terminalId":id,"after":0})).await.unwrap()["data"],"");assert!(pty.shutdown().await.is_err());
+ tokio::time::timeout(Duration::from_secs(5),async{while unsafe{libc::kill(pid as i32,0)}==0{tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();drop(pty);drop(store);let _=std::fs::remove_dir_all(directory);
+}

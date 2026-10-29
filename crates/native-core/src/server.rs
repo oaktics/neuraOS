@@ -218,6 +218,7 @@ impl AppState {
         Ok(())
     }
     pub async fn snapshot(&self) -> Result<Value, ApiError> {
+        self.pty.check_healthy()?;
         let mut s = self
             .store
             .call(
@@ -530,6 +531,7 @@ async fn output(
     Path(key): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
+    s.pty.check_healthy()?;
     id(&key)?;
     let t = s
         .store

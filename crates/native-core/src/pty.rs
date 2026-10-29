@@ -106,6 +106,7 @@ struct Inner {
 pub struct PtyRuntime {
     inner: Arc<Inner>,
 }
+fn fail(inner:&Inner){if !inner.fault.swap(true,Ordering::AcqRel){inner.store.signal_change(crate::events::Change{state:true,..Default::default()});}inner.sessions_changed.notify_waiters();}
 fn interest(s: &Session) -> Option<Interest> {
     match (s.pending.is_none() && !s.eof, !s.input.is_empty()) {
         (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
@@ -223,8 +224,7 @@ impl PtyRuntime {
                         .flatten();
                 }
                 if !rows.is_empty() && store.call("append", json!(rows)).await.is_err() {
-                    io.fault.store(true, Ordering::Release);
-                    io.sessions_changed.notify_waiters();
+                    fail(&io);
                     io.closed.store(true, Ordering::Release);
                     let _ = io.waker.wake();
                     break;
@@ -235,8 +235,7 @@ impl PtyRuntime {
                         .await
                         .is_err()
                     {
-                        io.fault.store(true, Ordering::Release);
-                        io.sessions_changed.notify_waiters();
+                        fail(&io);
                         continue;
                     }
                     let _ = io.exits.send(PtyExit {
@@ -518,8 +517,7 @@ impl PtyRuntime {
                     child.child.take();
                 }
                 if runtime.block_on(owner.stop()).is_err() {
-                    inner.fault.store(true, Ordering::Release);
-                    inner.sessions_changed.notify_waiters();
+                    fail(&inner);
                 }
                 if let Some(s) = inner.sessions.lock().unwrap().get_mut(&terminal_id) {
                     s.exit_code = Some(code);
