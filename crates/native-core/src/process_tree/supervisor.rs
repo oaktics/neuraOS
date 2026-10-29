@@ -3,6 +3,7 @@ use super::{ProcessTree, Result};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -17,6 +18,8 @@ use tokio::{
 
 type Replies = Arc<Mutex<HashMap<String, oneshot::Sender<Result<Value>>>>>;
 struct Supervisor {
+    binary: PathBuf,
+    lock_path: PathBuf,
     outgoing: mpsc::UnboundedSender<Value>,
     replies: Replies,
     alive: Arc<AtomicBool>,
@@ -66,10 +69,24 @@ impl ProcessReservation {
         result
     }
 }
+/// Initialize before opening the daemon store. Ready means this helper owns
+/// the lifetime flock, so a previous daemon's descendants have finished cleanup.
+pub async fn ensure_supervisor(binary: &Path, lock_path: &Path) -> Result<()> {
+    let supervisor = SHARED
+        .get_or_try_init(|| Supervisor::start(binary, lock_path))
+        .await?;
+    if supervisor.binary != binary || supervisor.lock_path != lock_path {
+        return Err("process supervisor profile already initialized".into());
+    }
+    supervisor.request(json!({"op":"ready"})).await.map(|_| ())
+}
 /// Reserve and acknowledge ownership before spawning. The returned lease's
 /// token must be injected using OWNER_ENV. Attach immediately after spawn.
 pub async fn reserve() -> Result<ProcessReservation> {
-    let supervisor = SHARED.get_or_try_init(Supervisor::start).await?.clone();
+    let supervisor = SHARED
+        .get()
+        .ok_or("process supervisor not initialized before spawn")?
+        .clone();
     let lease = ProcessReservation(Arc::new(Reservation {
         token: uuid::Uuid::new_v4().to_string(),
         supervisor,
@@ -84,24 +101,26 @@ pub async fn reserve() -> Result<ProcessReservation> {
     Ok(lease)
 }
 impl Supervisor {
-    async fn start() -> Result<Arc<Self>> {
+    async fn start(binary: &Path, lock_path: &Path) -> Result<Arc<Self>> {
         // Direct native dispatch; never put the helper inside provider-host.
-        let mut child =
-            tokio::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
-                .arg("process-supervisor")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .process_group(0)
-                .kill_on_drop(false)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+        let mut child = tokio::process::Command::new(binary)
+            .arg("process-supervisor")
+            .arg(lock_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .process_group(0)
+            .kill_on_drop(false)
+            .spawn()
+            .map_err(|e| e.to_string())?;
         let mut input = child.stdin.take().ok_or("supervisor stdin")?;
         let output = child.stdout.take().ok_or("supervisor stdout")?;
         let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
         let replies: Replies = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let service = Arc::new(Self {
+            binary: binary.to_owned(),
+            lock_path: lock_path.to_owned(),
             outgoing: tx,
             replies: replies.clone(),
             alive: alive.clone(),
@@ -149,6 +168,7 @@ impl Supervisor {
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
+        service.request(json!({"op":"ready"})).await?;
         Ok(service)
     }
     async fn request(&self, mut value: Value) -> Result<Value> {
@@ -215,14 +235,68 @@ pub async fn process_supervisor() -> Result<i32> {
             }
         }
     });
+    let lock_path = std::env::args_os()
+        .nth(2)
+        .map(PathBuf::from)
+        .ok_or("missing supervisor lifetime lock path")?;
+    let (locked_tx, mut locked_rx) = oneshot::channel();
+    // Blocking flock runs on a detached OS thread: pipe EOF can terminate this
+    // helper even while an old instance owns the lock. No startup polling.
+    std::thread::spawn(move || {
+        use std::os::unix::{
+            fs::{MetadataExt, OpenOptionsExt},
+            io::AsRawFd,
+        };
+        let result = (|| -> Result<std::fs::File> {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(lock_path)
+                .map_err(|e| e.to_string())?;
+            let metadata = file.metadata().map_err(|e| e.to_string())?;
+            if !metadata.is_file()
+                || metadata.uid() != unsafe { libc::geteuid() }
+                || metadata.nlink() != 1
+            {
+                return Err("unsafe supervisor lifetime lock".into());
+            }
+            loop {
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    return Ok(file);
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error.to_string());
+                }
+            }
+        })();
+        let _ = locked_tx.send(result);
+    });
+    let mut buffered = std::collections::VecDeque::new();
+    let _lifetime_lock = loop {
+        tokio::select! {
+            locked=&mut locked_rx=>break locked.map_err(|_|"supervisor lock thread stopped")??,
+            value=rx.recv()=>match value{Some(value) if buffered.len()<128=>buffered.push_back(value),None=>return Ok(0),_=>return Err("supervisor startup queue exceeded".into())},
+            _=term.recv()=>return Ok(0),_=hup.recv()=>return Ok(0),
+        }
+    };
     let trees: Arc<tokio::sync::Mutex<HashMap<String, ProcessTree>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let output = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     let mut tasks = tokio::task::JoinSet::new();
     loop {
-        let command = tokio::select! {value=rx.recv()=>match value{Some(value)=>value,None=>break},_=term.recv()=>break,_=hup.recv()=>break};
+        let command = match buffered.pop_front() {
+            Some(value) => value,
+            None => {
+                tokio::select! {value=rx.recv()=>match value{Some(value)=>value,None=>break},_=term.recv()=>break,_=hup.recv()=>break}
+            }
+        };
         let token = command["token"].as_str().unwrap_or("").to_owned();
         let result = match command["op"].as_str() {
+            Some("ready") => Ok(()),
             Some("reserve") if uuid::Uuid::parse_str(&token).is_ok() => {
                 let mut trees = trees.lock().await;
                 if trees.contains_key(&token) {

@@ -13,7 +13,7 @@ use std::{
 use tokio::sync::{oneshot, Mutex};
 #[path = "process_tree/supervisor.rs"]
 mod supervisor;
-pub use supervisor::{process_supervisor, reserve, ProcessReservation};
+pub use supervisor::{ensure_supervisor, process_supervisor, reserve, ProcessReservation};
 pub const OWNER_ENV: &str = "NEURA_PROCESS_OWNER";
 type Result<T> = std::result::Result<T, String>;
 
