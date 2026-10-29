@@ -305,6 +305,7 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
     let mut command = Command::new(program);
     command
         .current_dir(cwd)
+        .process_group(0)
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

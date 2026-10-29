@@ -152,6 +152,7 @@ pub async fn read_codex_usage(program: Option<PathBuf>) -> Result<Value> {
     };
     let mut command = Command::new(program);
     command
+        .process_group(0)
         .args(["app-server", "--listen", "stdio://"])
         .current_dir(home())
         .env_clear()
