@@ -59,7 +59,9 @@ setInterval(()=>{},1000);
     const terminal=await terminals.open({id:'w',projectId:'p',name:'w',path:dir,branch:'main',kind:'worktree',createdAt:''},mode==='interactive-shell'?'shell':'codex',false);
     if(mode==='interactive-shell')terminals.input(terminal.id,'test',`${JSON.stringify(program)}\n`);
     for(let i=0;i<100;i++){
-      try{childPid=Number(await readFile(ready,'utf8'));break;}catch{await new Promise(r=>setTimeout(r,25));}
+      try{const pid=Number(await readFile(ready,'utf8'));if(Number.isSafeInteger(pid)&&pid>0){childPid=pid;break;}}catch{}
+      // File creation can be observed before writeFileSync has written the PID.
+      await new Promise(r=>setTimeout(r,25));
     }
     assert.ok(childPid,'child installed its SIGHUP handler');
     let stopped=false;

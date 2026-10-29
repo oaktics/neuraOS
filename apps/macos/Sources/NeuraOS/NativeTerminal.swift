@@ -202,6 +202,32 @@ struct NativeTerminal: NSViewRepresentable {
             }
             if visible && !output.chunks.isEmpty {view.needsDisplay = true}
         }
+        // Replay can span megabytes after a busy background session. Yield between
+        // bounded UTF-8 feeds so input, connection updates and painting can run.
+        func applyResponsive(_ output: TerminalOutput, to view: TerminalView) async {
+            updateStatus(output.status)
+            for chunk in output.chunks {
+                guard !Task.isCancelled else {return}
+                applying = true
+                if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
+                applying = false
+                let bytes = Array(chunk.data.utf8)
+                var offset = 0
+                while offset < bytes.count {
+                    guard !Task.isCancelled else {return}
+                    let end = min(offset + 8192, bytes.count)
+                    applying = true
+                    view.feed(byteArray: bytes[offset..<end])
+                    applying = false
+                    offset = end
+                    await Task.yield()
+                }
+            }
+            // Finalize the cursor only once all chunks (including resize markers) apply.
+            apply(TerminalOutput(data: "", chunks: [], cursor: output.cursor, more: output.more,
+                                 status: output.status, cols: output.cols, rows: output.rows), to: view)
+            if visible && !output.chunks.isEmpty {view.needsDisplay = true}
+        }
         private func pause(milliseconds: Int) async {
             guard !Task.isCancelled else {return}
             let wait = Task<Void, Never> {try? await Task.sleep(for: .milliseconds(milliseconds))}
@@ -226,7 +252,7 @@ struct NativeTerminal: NSViewRepresentable {
                         }
                         let output: TerminalOutput = try await api.get("v1/terminals/\(terminal.id)/output", query: ["after": String(cursor)])
                         guard !Task.isCancelled, let view else {return}
-                        apply(output, to: view)
+                        await applyResponsive(output, to: view)
                         reportedError = false
                         await pause(milliseconds: output.more ? 10 : visible ? 60 : 500)
                     } catch {

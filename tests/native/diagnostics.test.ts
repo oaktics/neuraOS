@@ -38,3 +38,21 @@ test('diagnostic storage rotates and storage failures do not reject operations',
     invalid.record('daemon.start');await invalid.flush();
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test('performance monitoring emits bounded numeric telemetry and stops on close',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'neura-performance-diagnostics-'));
+  const log=new Diagnostics(root),stop=log.startPerformanceMonitoring(25);
+  try{
+    await new Promise(resolve=>setTimeout(resolve,80));stop();await log.flush();
+    const before=await readFile(join(root,'daemon.jsonl'),'utf8');
+    const rows=before.trim().split('\n').map(line=>JSON.parse(line));
+    assert.ok(rows.length>0);
+    for(const row of rows){
+      assert.equal(row.event,'daemon.performance');
+      for(const key of ['eventLoopP99Ms','eventLoopMaxMs','eventLoopUtilization','rssBytes','heapUsedBytes'])assert.ok(Number.isFinite(row[key]));
+      assert.deepEqual(Object.keys(row).sort(),['time','session','event','eventLoopP99Ms','eventLoopMaxMs','eventLoopUtilization','rssBytes','heapUsedBytes'].sort());
+    }
+    await new Promise(resolve=>setTimeout(resolve,60));await log.flush();
+    assert.equal(await readFile(join(root,'daemon.jsonl'),'utf8'),before);
+  }finally{stop();await log.flush();await rm(root,{recursive:true,force:true});}
+});

@@ -5,6 +5,20 @@ import type {Project, Workspace, TerminalRecord, AgentNotification} from './cont
 export const hash = (value:string) => createHash('sha256').update(value).digest('hex');
 export class Store {
   readonly db:DatabaseSync;
+  private pendingOutput:{terminalId:string;data:string}[]=[];
+  private pendingBytes=0;
+  private outputTimer?:NodeJS.Timeout;
+  // Bound the unsaved tail and amortize FULL durability across a burst of PTY output.
+  flushOutput(){
+    clearTimeout(this.outputTimer);this.outputTimer=undefined;
+    if(!this.pendingOutput.length)return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try{
+      const insert=this.db.prepare('INSERT INTO output(terminalId,data) VALUES(?,?)');
+      for(const row of this.pendingOutput)insert.run(row.terminalId,row.data);
+      this.db.exec('COMMIT');this.pendingOutput=[];this.pendingBytes=0;
+    }catch(error){this.db.exec('ROLLBACK');throw error;}
+  }
   constructor(path:string){
     this.db=new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
@@ -25,6 +39,7 @@ export class Store {
   list<T>(table:'projects'|'workspaces'|'terminals'|'agents'):T[]{return this.db.prepare(`SELECT data FROM ${table} ORDER BY rowid`).all().map(r=>JSON.parse(r.data as string));}
   get<T>(table:'projects'|'workspaces'|'terminals'|'agents',id:string):T|undefined {const r=this.db.prepare(`SELECT data FROM ${table} WHERE id=?`).get(id);return r?JSON.parse(r.data as string):undefined;}
   put<T extends {id:string}>(table:'projects'|'workspaces'|'terminals'|'agents',value:T,notification?:AgentNotification){
+    this.flushOutput();
     this.db.exec('BEGIN IMMEDIATE');try{
       this.db.prepare(`INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`).run(value.id,JSON.stringify(value));
       const event=this.db.prepare('INSERT INTO events(kind,entityId,at) VALUES(?,?,?)').run(table,value.id,new Date().toISOString());
@@ -33,6 +48,7 @@ export class Store {
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   putProjectWorkspace(project:Project,workspace:Workspace){
+    this.flushOutput();
     this.db.exec('BEGIN IMMEDIATE');try{
       for(const [table,value] of [['projects',project],['workspaces',workspace]] as const){
         this.db.prepare(`INSERT INTO ${table}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`).run(value.id,JSON.stringify(value));
@@ -42,6 +58,7 @@ export class Store {
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   deleteWorkspace(id:string){
+    this.flushOutput();
     this.db.exec('BEGIN IMMEDIATE');try{
       const terminals=this.list<TerminalRecord>('terminals').filter(t=>t.workspaceId===id);
       for(const terminal of terminals){
@@ -56,6 +73,7 @@ export class Store {
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
   removeProject(id:string){
+    this.flushOutput();
     this.db.exec('BEGIN IMMEDIATE');try{
       const workspaces=this.list<Workspace>('workspaces').filter(w=>w.projectId===id);
       const workspaceIds=new Set(workspaces.map(w=>w.id));
@@ -75,11 +93,17 @@ export class Store {
     const rows=this.db.prepare('SELECT sequence,data FROM notification_events WHERE sequence>? ORDER BY sequence LIMIT 256').all(after);
     return {events:rows.map(row=>({...JSON.parse(row.data as string),sequence:Number(row.sequence)})),cursor:rows.length?Number(rows.at(-1)!.sequence):after,more:rows.length===256};
   }
-  append(terminalId:string,data:string){this.db.prepare('INSERT INTO output(terminalId,data) VALUES(?,?)').run(terminalId,data);}
-  resize(terminalId:string,cols:number,rows:number){this.db.prepare('INSERT INTO output(terminalId,data,cols,rows) VALUES(?,?,?,?)').run(terminalId,'',cols,rows);}
+  append(terminalId:string,data:string){
+    if(!data)return;
+    this.pendingOutput.push({terminalId,data});this.pendingBytes+=Buffer.byteLength(data);
+    if(this.pendingBytes>=256*1024||this.pendingOutput.length>=256)this.flushOutput();
+    else if(!this.outputTimer){this.outputTimer=setTimeout(()=>{try{this.flushOutput();}catch{/* Retain the batch; the next read/write retries and surfaces failure. */}},16);this.outputTimer.unref();}
+  }
+  resize(terminalId:string,cols:number,rows:number){this.flushOutput();this.db.prepare('INSERT INTO output(terminalId,data,cols,rows) VALUES(?,?,?,?)').run(terminalId,'',cols,rows);}
   output(terminalId:string,after:number){
+    this.flushOutput();
     const rows=this.db.prepare('SELECT sequence,data,cols,rows FROM output WHERE terminalId=? AND sequence>? ORDER BY sequence LIMIT 256').all(terminalId,after);
     return {data:rows.map(r=>r.data).join(''),chunks:rows,cursor:rows.length?Number(rows.at(-1)!.sequence):after,more:rows.length===256};
   }
-  close(){this.db.close();}
+  close(){this.flushOutput();this.db.close();}
 }
