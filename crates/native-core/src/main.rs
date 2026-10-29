@@ -1,5 +1,6 @@
 use neura_native_core::{
-    browser, contracts, diagnostics, error, events, github, mutation, process_tree, providers, pty, store, usage, workspace,
+    browser, contracts, diagnostics, error, events, github, mutation, process_tree, providers, pty,
+    store, usage, workspace,
 };
 mod server;
 use std::{
@@ -17,7 +18,12 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let command = std::env::args().nth(1);
     match command.as_deref() {
-        Some("provider-host")=>{let mut args=std::env::args().skip(2);let program=args.next().ok_or("missing program")?;let code=process_tree::provider_host(program,args.collect()).await?;std::process::exit(code);},
+        Some("provider-host") => {
+            let mut args = std::env::args().skip(2);
+            let program = args.next().ok_or("missing program")?;
+            let code = process_tree::provider_host(program, args.collect()).await?;
+            std::process::exit(code);
+        }
         Some("mcp") => return providers::mcp::run().await.map_err(Into::into),
         Some("activity-hook") => return providers::claude::activity_hook().map_err(Into::into),
         Some(_) => return Err("unsupported native subcommand".into()),
@@ -65,7 +71,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| e.to_string())?;
     eprintln!("native daemon listening {endpoint}");
     let stop = state.clone();
-    let shutdown_failed=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let failed=shutdown_failed.clone();
+    let shutdown_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failed = shutdown_failed.clone();
     axum::serve(listener, server::router(state))
         .with_graceful_shutdown(async move {
             let mut term =
@@ -73,10 +80,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .expect("signal");
             tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
             if stop.shutdown().await.is_err() {
-                failed.store(true,std::sync::atomic::Ordering::Release);eprintln!("native shutdown durability check failed");
+                failed.store(true, std::sync::atomic::Ordering::Release);
+                eprintln!("native shutdown durability check failed");
             }
         })
         .await?;
-    if shutdown_failed.load(std::sync::atomic::Ordering::Acquire){return Err("shutdown incomplete".into());}
+    if shutdown_failed.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("shutdown incomplete".into());
+    }
     Ok(())
 }

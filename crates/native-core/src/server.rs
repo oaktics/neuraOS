@@ -1,4 +1,4 @@
-use crate::diagnostics::{Diagnostics,Phase};
+use crate::diagnostics::{Diagnostics, Phase};
 use crate::workspace::text;
 use crate::{
     browser::BrowserBroker, contracts, error::ApiError, events::Change, github::GitHub,
@@ -49,9 +49,12 @@ const FEATURES: &[&str] = &[
     "agent.claude-channels",
     "state.stream",
 ];
-struct SetupJob{cancel:tokio::sync::watch::Sender<bool>,task:tokio::task::JoinHandle<Result<(),ApiError>>}
+struct SetupJob {
+    cancel: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<Result<(), ApiError>>,
+}
 pub struct AppState {
-    diagnostics:Diagnostics,
+    diagnostics: Diagnostics,
     pub store: StoreHandle,
     pub events: broadcast::Sender<Change>,
     pub token: String,
@@ -107,7 +110,9 @@ impl AppState {
                 ..Default::default()
             });
         });
-        let diagnostics=Diagnostics::new(data_dir.join("diagnostics")).map_err(|_|ApiError::storage())?;diagnostics.record(Phase::Start,None,None,None);
+        let diagnostics =
+            Diagnostics::new(data_dir.join("diagnostics")).map_err(|_| ApiError::storage())?;
+        diagnostics.record(Phase::Start, None, None, None);
         let this = Arc::new(Self {
             diagnostics,
             store,
@@ -221,24 +226,60 @@ impl AppState {
             )
             .await?;
         s["features"] = json!(FEATURES);
+        s["runtime"] = json!("rust");
+        s["daemonInstanceId"] = json!(self.epoch);
         Ok(s)
     }
-    pub async fn shutdown(&self)->Result<(),ApiError>{
-      self.closing.send_replace(true);self.browser.shutdown();let mut failed=false;
-      let jobs:Vec<_>=self.setups.lock().await.drain().map(|(_,job)|job).collect();
-      for job in &jobs{job.cancel.send_replace(true);}
-      for job in jobs{if !matches!(tokio::time::timeout(Duration::from_secs(12),job.task).await,Ok(Ok(Ok(())))){failed=true;}}
-      if self.providers.shutdown().await.is_err(){failed=true;}
-      if self.pty.shutdown().await.is_err(){failed=true;}
-      self.usage.close().await;
-      if self.store.call("barrier",json!({})).await.is_err(){failed=true;}
-      if failed{self.diagnostics.record(Phase::Failure,None,None,None);}
-      self.diagnostics.record(Phase::End,None,None,None);self.diagnostics.flush().await;
-      if failed{Err(ApiError::new("shutdown_incomplete","所有プロセスまたは保存処理の完了を確認できません。",500))}else{Ok(())}
+    pub async fn shutdown(&self) -> Result<(), ApiError> {
+        self.closing.send_replace(true);
+        self.browser.shutdown();
+        let mut failed = false;
+        let jobs: Vec<_> = self
+            .setups
+            .lock()
+            .await
+            .drain()
+            .map(|(_, job)| job)
+            .collect();
+        for job in &jobs {
+            job.cancel.send_replace(true);
+        }
+        for job in jobs {
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(12), job.task).await,
+                Ok(Ok(Ok(())))
+            ) {
+                failed = true;
+            }
+        }
+        if self.providers.shutdown().await.is_err() {
+            failed = true;
+        }
+        if self.pty.shutdown().await.is_err() {
+            failed = true;
+        }
+        self.usage.close().await;
+        if self.store.call("barrier", json!({})).await.is_err() {
+            failed = true;
+        }
+        if failed {
+            self.diagnostics.record(Phase::Failure, None, None, None);
+        }
+        self.diagnostics.record(Phase::End, None, None, None);
+        self.diagnostics.flush().await;
+        if failed {
+            Err(ApiError::new(
+                "shutdown_incomplete",
+                "所有プロセスまたは保存処理の完了を確認できません。",
+                500,
+            ))
+        } else {
+            Ok(())
+        }
     }
     async fn claim(&self, id: &str, client: &str) -> Result<(), ApiError> {
         let mut owners = self.owners.lock().await;
-        owners.retain(|_,(_,until)|*until>tokio::time::Instant::now());
+        owners.retain(|_, (_, until)| *until > tokio::time::Instant::now());
         if let Some((old, until)) = owners.get(id) {
             if old != client && *until > tokio::time::Instant::now() {
                 return Err(ApiError::new(
@@ -394,9 +435,20 @@ async fn usage(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"providers":s.usage.read().await}))
 }
 fn after(q: &HashMap<String, String>) -> Result<u64, ApiError> {
-    q.get("after")
-        .map(|v| v.parse().map_err(|_| invalid()))
-        .unwrap_or(Ok(0))
+    let Some(raw) = q.get("after") else {
+        return Ok(0);
+    };
+    let raw = raw.trim();
+    let value = if raw.is_empty() {
+        0.0
+    } else {
+        raw.parse::<f64>().map_err(|_| invalid())?
+    };
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > 9_007_199_254_740_991.0
+    {
+        return Err(invalid());
+    }
+    Ok(value as u64)
 }
 async fn notifications(
     State(s): State<Arc<AppState>>,
@@ -462,6 +514,7 @@ async fn channel(
         match action.as_str() {
             "channel" => s.providers.agents.channel(&key).await,
             "channel-ack" => {
+                id(text(&body, "nonce")?)?;
                 s.providers
                     .agents
                     .acknowledge_channel(&key, text(&body, "nonce")?)
@@ -605,14 +658,28 @@ async fn browser_call(
     let snapshot = s.snapshot().await?;
     Ok(Json(s.browser.call(body, &snapshot, verified).await?))
 }
-async fn stream(State(s): State<Arc<AppState>>,Query(query):Query<HashMap<String,String>>, ws: WebSocketUpgrade) -> Result<Response,ApiError> {
-    let native_id=query.get("nativeId").cloned();if let Some(key)=&native_id{id(key)?;}
-    Ok(ws.max_message_size(1024)
+async fn stream(
+    State(s): State<Arc<AppState>>,
+    Query(query): Query<HashMap<String, String>>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let native_id = query.get("nativeId").cloned();
+    if let Some(key) = &native_id {
+        id(key)?;
+    }
+    Ok(ws
+        .max_message_size(1024)
         .max_frame_size(1024)
-        .on_upgrade(move |socket| stream_session(socket, s,native_id)))
+        .on_upgrade(move |socket| stream_session(socket, s, native_id)))
 }
-async fn stream_session(socket: WebSocket, s: Arc<AppState>,native_id:Option<String>) {
-    let _browser_lease=match native_id{Some(key)=>match s.browser.attach_stream(&key){Ok(lease)=>Some(lease),Err(_)=>return},None=>None};
+async fn stream_session(socket: WebSocket, s: Arc<AppState>, native_id: Option<String>) {
+    let _browser_lease = match native_id {
+        Some(key) => match s.browser.attach_stream(&key) {
+            Ok(lease) => Some(lease),
+            Err(_) => return,
+        },
+        None => None,
+    };
     let mut closing = s.closing.subscribe();
     if *closing.borrow() {
         return;
@@ -643,7 +710,12 @@ async fn command(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let (op, c) = contracts::envelope(body)?;
-    let started=std::time::Instant::now();let traced=!["terminal.input","terminal.resize"].contains(&c["type"].as_str().unwrap_or(""));if traced{s.diagnostics.record(Phase::Received,c["type"].as_str(),Some(&op),None);}
+    let started = std::time::Instant::now();
+    let traced = !["terminal.input", "terminal.resize"].contains(&c["type"].as_str().unwrap_or(""));
+    if traced {
+        s.diagnostics
+            .record(Phase::Received, c["type"].as_str(), Some(&op), None);
+    }
     let digest = work::hash(&c.to_string());
     let lock = {
         let mut locks = s.operations.lock().await;
@@ -687,9 +759,27 @@ async fn command(
     s.store
         .call("operation_start", json!({"id":op,"hash":digest}))
         .await?;
-    if traced{s.diagnostics.record(Phase::Executing,c["type"].as_str(),Some(&op),Some(started.elapsed().as_secs_f64()*1000.0));}
+    if traced {
+        s.diagnostics.record(
+            Phase::Executing,
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
     let result = execute(s.clone(), &c, &op).await;
-    if traced||result.is_err(){s.diagnostics.record(if result.is_ok(){Phase::Success}else{Phase::Failure},c["type"].as_str(),Some(&op),Some(started.elapsed().as_secs_f64()*1000.0));}
+    if traced || result.is_err() {
+        s.diagnostics.record(
+            if result.is_ok() {
+                Phase::Success
+            } else {
+                Phase::Failure
+            },
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+    }
     let (status, value) = match &result {
         Ok(value) => ("done", value.clone()),
         Err(e) => (
@@ -1033,7 +1123,9 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                 w["setup"] = json!({"status":"running","script":p["worktreeSetup"],"output":""});
             } else {
                 for provider in startup {
-                if *s.closing.borrow(){return Err(ApiError::new("setup_cancelled","終了処理中です。",500));}
+                    if *s.closing.borrow() {
+                        return Err(ApiError::new("setup_cancelled", "終了処理中です。", 500));
+                    }
                     if let Some(provider) = provider.as_str() {
                         if s.open(w.clone(), provider, false, &json!({}))
                             .await
@@ -1212,7 +1304,15 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
         "terminal.input" => {
             let key = text(c, "terminalId")?;
             s.claim(key, text(c, "clientId")?).await?;
-            s.pty.input(key, text(c, "data")?).await?;
+            let data = text(c, "data")?;
+            s.pty.input(key, data).await?;
+            if data == "\x03" || data == "\x1b" {
+                s.providers
+                    .agents
+                    .claude_interrupted(key, false)
+                    .await
+                    .map_err(provider_error)?;
+            }
             Ok(json!({"ok":true}))
         }
         "terminal.resize" => {
@@ -1427,7 +1527,7 @@ async fn start_setup(
     )
     .await?;
     let (begin, wait) = tokio::sync::oneshot::channel();
-    let(cancel,mut cancelled)=tokio::sync::watch::channel(false);
+    let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
     let task_key = key.clone();
     let owner = s.clone();
     let task = tokio::spawn(async move {
@@ -1551,16 +1651,29 @@ async fn start_setup(
             Ok(())
         }
         .await;
-        let cleanup_error=result.as_ref().err().filter(|e|!["setup_cancelled","setup_failed"].contains(&e.error.as_str())).cloned();
+        let cleanup_error = result
+            .as_ref()
+            .err()
+            .filter(|e| !["setup_cancelled", "setup_failed"].contains(&e.error.as_str()))
+            .cloned();
         let setup = match result {
             Ok(()) => json!({"status":"succeeded","script":script,"output":output}),
             Err(e) => json!({"status":"failed","script":script,"output":output,"error":e.message}),
         };
-        let persisted=setup_update(&s, &task_key, setup).await;
+        let persisted = setup_update(&s, &task_key, setup).await;
         s.setups.lock().await.remove(&task_key);
-        persisted?;if let Some(e)=cleanup_error{Err(e)}else{Ok(())}
+        persisted?;
+        if let Some(e) = cleanup_error {
+            Err(e)
+        } else {
+            Ok(())
+        }
     });
-    owner.setups.lock().await.insert(key, SetupJob{cancel,task});
+    owner
+        .setups
+        .lock()
+        .await
+        .insert(key, SetupJob { cancel, task });
     let _ = begin.send(());
     Ok(())
 }
