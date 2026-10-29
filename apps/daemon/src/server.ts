@@ -300,7 +300,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     if(!await validChannelCredential(tokenPath,terminalId,req.headers['x-neura-channel-token']))throw new Fault('channel_forbidden','このターミナルのChannels認証が必要です。',403);
     return agents.acknowledgeChannel(terminalId,z.object({nonce:z.uuid()}).parse(req.body).nonce);
   });
-  app.get('/v1/agents',async()=>({agents:agents.list(),revision:store.state().revision}));
+  app.get('/v1/agents',async()=>({agents:agents.list(),currentSessionIds:Object.fromEntries(store.list<TerminalRecord>('terminals').filter(t=>t.provider==='claude'&&t.sessionId).map(t=>[t.id,t.sessionId])),revision:store.state().revision}));
   app.get('/v1/agents/:id',async req=>agents.read(z.uuid().parse((req.params as {id:string}).id),z.string().max(4096).optional().parse((req.query as {cursor?:string}).cursor)));
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);

@@ -40,7 +40,12 @@ async function launchContext(a,workspaceId){
 async function startupStatus(terminal){
   if(terminal.provider!=='claude')return terminal;
   let agent,channelState='unknown';
-  try{const {agents}=await request('/v1/agents');agent=agents.find(a=>a.terminalId===terminal.id);channelState=agent?.channelState??'pending';}catch{}
+  try{
+    const {agents,currentSessionIds}=await request('/v1/agents');
+    // /clear retains historical agents on the same terminal. Read identity and receipt state together.
+    agent=agents.find(a=>a.terminalId===terminal.id&&a.id===currentSessionIds?.[terminal.id]);
+    channelState=currentSessionIds?(agent?.channelState??'pending'):'unknown';
+  }catch{}
   const confirmed=channelState==='connected';
   const recovery=channelState==='unavailable'
     ? 'Claude has started, but its Channels receipt probe was not acknowledged within 60 seconds. Instructions remain queued. Inspect this terminal and its MCP connection, account and organization Channels policy; the startup banner alone does not prove a connection failure.'

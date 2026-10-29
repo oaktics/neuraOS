@@ -109,6 +109,9 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
       assert.match(started.recovery,/Do not create another worker/);
       const claudeId=randomUUID();
       const registration={id:claudeId,terminalId:started.id,workspaceId:workspace.id,provider:'claude',name:'receipt test',status:'idle',updatedAt:'',pending:[{id:randomUUID(),text:'queued'}],requests:[]};
+      const historicalId=randomUUID();
+      d.store.put('agents',{...registration,id:historicalId,channelState:'unavailable',status:'interrupted'});
+      d.store.put('terminals',{...d.store.get<any>('terminals',started.id),agentId:claudeId,sessionId:claudeId});
       // Retry the same launch without creating another terminal; read fresh receipt state.
       for(const channelState of ['pending','unavailable','connected']){
         d.store.put('agents',{...registration,channelState});
@@ -122,6 +125,10 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
         }
         assert.equal(d.store.get<any>('agents',claudeId).pending[0].text,'queued','diagnostics must not consume queued work');
       }
+      // Switching back must select the current session, even when a newer one was connected.
+      d.store.put('terminals',{...d.store.get<any>('terminals',started.id),agentId:historicalId,sessionId:historicalId});
+      const switched=JSON.parse((await tool('task_start',startArgs)).content[0].text);
+      assert.equal(switched.channelState,'unavailable');assert.equal(switched.registrationPending,true);
       failStatusLookup=true;
       const unknown=JSON.parse((await tool('task_start',startArgs)).content[0].text);
       assert.equal(unknown.id,started.id);assert.equal(unknown.channelState,'unknown');
