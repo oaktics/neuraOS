@@ -267,7 +267,7 @@ impl Monitor {
 fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
     let mut trees: HashMap<String, Tree> = HashMap::new();
     let mut watched: HashMap<i32, u64> = HashMap::new();
-    let mut tokens: HashMap<u64, Option<String>> = HashMap::new();
+    let mut tokens: HashMap<(u64, u32), Option<String>> = HashMap::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut events: [libc::kevent; 128] = unsafe { std::mem::zeroed() };
     loop {
@@ -317,14 +317,16 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                         .filter(|r| !r.zombie)
                         .map(|r| r.unique)
                         .collect();
-                    tokens.retain(|id, _| live.contains(id));
+                    let generations: HashSet<(u64, u32)> =
+                        rows.iter().map(|row| (row.unique, row.version)).collect();
+                    tokens.retain(|key, _| generations.contains(key));
                     let uid = unsafe { libc::geteuid() };
                     let scan_tokens = trees.values().any(|t| t.token.is_some());
                     if scan_tokens {
                         for row in &rows {
                             if row.uid == uid && !row.zombie {
                                 tokens
-                                    .entry(row.unique)
+                                    .entry((row.unique, row.version))
                                     .or_insert_with(|| owner(row.pid, &mut buffer));
                             }
                         }
@@ -350,7 +352,9 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                 }
                                 if tree.owned.contains_key(&row.parent)
                                     || (tree.token.is_some()
-                                        && tokens.get(&row.unique).and_then(|x| x.as_ref())
+                                        && tokens
+                                            .get(&(row.unique, row.version))
+                                            .and_then(|x| x.as_ref())
                                             == tree.token.as_ref())
                                 {
                                     tree.owned.insert(row.unique, *row);
@@ -478,7 +482,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
             for ev in &events[..n as usize] {
                 if ev.filter == libc::EVFILT_PROC && ev.fflags & libc::NOTE_EXEC != 0 {
                     if let Some(id) = watched.get(&(ev.ident as i32)) {
-                        tokens.remove(id);
+                        tokens.retain(|(unique, _), _| unique != id);
                     }
                 }
             }
@@ -589,6 +593,60 @@ mod tests {
                 child.wait().await.unwrap();
             }
         }
+    }
+    #[test]
+    fn exec_cache_fixture() {
+        if std::env::var("NEURA_EXEC_FIXTURE").as_deref() == Ok("1") {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+    #[test]
+    fn exec_generation_refreshes_negative_ownership_cache() {
+        use std::io::Write;
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "read gate; exec /usr/bin/env NEURA_PROCESS_OWNER=$1 NEURA_EXEC_FIXTURE=1 \"$2\" process_tree::tests::exec_cache_fixture --exact",
+                "fixture",
+                &token,
+                std::env::current_exe().unwrap().to_str().unwrap(),
+            ])
+            .env_remove(OWNER_ENV)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut buffer = vec![0; 1024 * 1024];
+        let before = identity(child.id() as i32).unwrap();
+        let mut cache = HashMap::new();
+        cache.insert(
+            (before.unique, before.version),
+            owner(before.pid, &mut buffer),
+        );
+        assert_eq!(cache[&(before.unique, before.version)], None);
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let after = identity(child.id() as i32).unwrap();
+            let cached = cache
+                .entry((after.unique, after.version))
+                .or_insert_with(|| owner(after.pid, &mut buffer));
+            if cached.as_deref() == Some(&token) {
+                assert_ne!(
+                    (before.unique, before.version),
+                    (after.unique, after.version)
+                );
+                break;
+            }
+            if Instant::now() > deadline {
+                let uncached = owner(after.pid, &mut buffer);
+                let _ = child.kill();
+                panic!("exec generation retained stale ownership cache: before={before:?} after={after:?} uncached={:?}", uncached);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
     }
     #[test]
     fn audit_generation_rejects_reused_pid_without_signalling_live_process() {

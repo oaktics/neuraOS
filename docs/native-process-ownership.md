@@ -31,7 +31,10 @@ at 3.5s. New descendants discovered during shutdown are included.
 
 This is cooperative process ownership, not a sandbox. Deliberately removing the
 token before an unobserved fork, changing credentials to an unreadable process,
-or killing the provider-host itself with SIGKILL can escape it. macOS offers no
+or killing the provider-host itself with SIGKILL can escape it. macOS also hides
+environment variables of cs_restricted executables (including Apple system
+binaries) from unentitled callers: if such a child has already lost its ancestry
+before discovery, its inherited environment token cannot recover ownership. macOS offers no
 supported unprivileged equivalent of a Linux cgroup for arbitrary hostile trees.
 Ancestry-only `new(pid)` cannot promise recovery of already-reparented children.
 These limits must not be represented as an unconditional ownership guarantee.
@@ -46,3 +49,5 @@ Primary API definitions and behavior:
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/event.h
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info_private.h
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c
+
+- https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c (environment visibility)
