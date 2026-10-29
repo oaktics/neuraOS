@@ -131,7 +131,9 @@ async fn bounded_native_runner_reaps_children_on_limit_timeout_and_cancel() {
         for attempt in 0..6 {
             let pidfile = dir.join(format!("fast-{status}-{attempt}.pid"));
             let script=format!("/bin/sleep 60 & echo $! > '{}'; printf 'fast-output\\n'; printf 'fixture-error\\n' >&2; exit {status}",pidfile.display());
+            let started = std::time::Instant::now();
             let result = workspace::run("/tmp", "/bin/sh", &["-c", &script], 2).await;
+            let elapsed = started.elapsed();
             let pid = std::fs::read_to_string(&pidfile)
                 .unwrap()
                 .trim()
@@ -151,10 +153,10 @@ async fn bounded_native_runner_reaps_children_on_limit_timeout_and_cancel() {
             }
             assert!(!alive,"restricted child survived fast leader exit: status={status}, attempt={attempt}, result={result:?}");
             if status == 0 {
-                assert_eq!(result.unwrap(), "fast-output\n");
+                assert_eq!(result.unwrap(), "fast-output\n", "status={status}, attempt={attempt}, elapsed={elapsed:?}");
             } else {
                 let error = result.unwrap_err();
-                assert_eq!(error.error, "git_failed");
+                assert_eq!(error.error, "git_failed", "status={status}, attempt={attempt}, elapsed={elapsed:?}, message={}", error.message);
                 assert!(error.message.contains("fixture-error"));
             }
         }
