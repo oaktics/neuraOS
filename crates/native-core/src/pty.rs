@@ -657,6 +657,9 @@ impl PtyRuntime {
         let s = all.get_mut(id).ok_or_else(|| {
             ApiError::new("terminal_stopped", "ターミナルは停止しています。", 409)
         })?;
+        if data.is_empty() {
+            return Ok(());
+        }
         let pending: usize = s.input.iter().map(Vec::len).sum();
         if pending + data.len() > 1024 * 1024 {
             return Err(ApiError::new(
@@ -1074,5 +1077,88 @@ mod resize_tests {
     #[tokio::test]
     async fn partial_utf8_survives_resize_and_exit_with_replay() {
         scenario(true, 0, true).await;
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn empty_input_preserves_validation_and_does_not_block_following_input() {
+        let directory = std::env::temp_dir().join(format!("neura-input-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("state.sqlite");
+        let (events, mut changes) = broadcast::channel(32);
+        let store = StoreHandle::open(&database, events.clone()).await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .put("terminals", json!({"id":id,"status":"running"}), None)
+            .await
+            .unwrap();
+        let runtime = PtyRuntime::new(store.clone()).unwrap();
+        assert_eq!(
+            runtime.input("missing", "").await.unwrap_err().error,
+            "terminal_stopped"
+        );
+        runtime.spawn(&id, "/bin/sh", vec!["-c".into(),
+            "stty -echo; printf READY; while IFS= read -r line; do printf 'ACK:%s;' \"$line\"; done".into()],
+            directory.to_str().unwrap(), HashMap::from([("PATH".into(), "/usr/bin:/bin".into())])).await.unwrap();
+        let progress = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = store
+                    .call("output", json!({"terminalId":id,"after":0}))
+                    .await
+                    .unwrap();
+                if output["data"] == "READY" {
+                    break;
+                }
+                changes.recv().await.unwrap();
+            }
+            for line in ["first", "second"] {
+                runtime.input(&id, "").await.unwrap();
+                runtime.input(&id, &format!("{line}\n")).await.unwrap();
+                loop {
+                    let output = store
+                        .call("output", json!({"terminalId":id,"after":0}))
+                        .await
+                        .unwrap();
+                    if output["data"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with(&format!("ACK:{line};"))
+                    {
+                        break;
+                    }
+                    changes.recv().await.unwrap();
+                }
+            }
+        })
+        .await;
+        let queue_empty = runtime.inner.sessions.lock().unwrap()[&id].input.is_empty();
+        // Clean up the real child even when the regression stalls input.
+        let shutdown = runtime.shutdown().await;
+        let closed = runtime.input(&id, "").await.unwrap_err().error;
+        runtime.inner.fault.store(true, Ordering::Release);
+        let faulted = runtime.input(&id, "").await.unwrap_err().error;
+        drop(runtime);
+        drop(store);
+        let reopened = StoreHandle::open(&database, events).await.unwrap();
+        let replay = reopened
+            .call("output", json!({"terminalId":id,"after":0}))
+            .await
+            .unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            progress.is_ok(),
+            "empty input blocked subsequent real input/output"
+        );
+        assert!(queue_empty, "consumed input remained queued");
+        shutdown.unwrap();
+        assert_eq!(closed, "terminal_runtime_closed");
+        assert_eq!(faulted, "terminal_runtime_failed");
+        assert_eq!(replay["data"], "READYACK:first;ACK:second;");
     }
 }
