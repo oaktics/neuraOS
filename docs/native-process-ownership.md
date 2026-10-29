@@ -6,7 +6,19 @@ the parent; EOF, SIGTERM/HUP/INT or leader exit triggers cleanup. The program's
 stdin is `/dev/null`; stdout/stderr are inherited. Exit status is preserved.
 No Node runtime or `ps` subprocess is involved.
 
-For daemon-owned external commands, first call `reserve().await` to receive a
+Before opening the daemon DB/store, call
+`ensure_supervisor(binary: &Path, lock_path: &Path).await`. It launches the real
+native executable and waits for ready after the helper acquires the profile's
+exclusive lifetime flock. The helper keeps that lock through descendant cleanup;
+a restarted daemon cannot become ready against the same profile before cleanup.
+A helper waiting for the lock still exits on parent EOF/termination, without
+polling. Lock files are regular, same-user, single-link files opened with
+O_NOFOLLOW and mode 0600, and are never unlinked as a locking mechanism.
+Integration tests pass `CARGO_BIN_EXE_neura-native-core` and an isolated profile
+lock path explicitly; a test-harness executable is never silently substituted.
+`reserve()` before initialization is an error.
+
+For daemon-owned external commands, call `reserve().await` to receive a
 `ProcessReservation` from the single shared native `process-supervisor` helper.
 This waits for the reservation ACK **before spawn**. Inject
 `OWNER_ENV=reservation.token()`, spawn while retaining the unreaped child handle,
