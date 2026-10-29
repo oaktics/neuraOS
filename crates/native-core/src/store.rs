@@ -1,3 +1,4 @@
+use crate::performance;
 use crate::{error::ApiError, events::Change};
 use rusqlite::{params, types::Value as SqlValue, Connection};
 use serde::Deserialize;
@@ -120,9 +121,18 @@ fn delete_workspace(db: &Connection, id: &str) -> Result<(), String> {
     db.execute("INSERT INTO events(kind,entityId,at) VALUES('workspaces',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",[id]).map_err(|e|e.to_string())?;
     Ok(())
 }
+#[cfg(test)]
+static TEST_COMMIT_GATE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
 fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
     let a = &r.args;
     match r.op.as_str() {
+        #[cfg(test)]
+        "test_slow_commit" => {
+            let tx=db.transaction().map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO agents(id,data) VALUES('injected','{}')",[]).map_err(|e|e.to_string())?;
+            performance::commit(|| { let (lock,cv)=&TEST_COMMIT_GATE; let mut released=lock.lock().unwrap(); while !*released { released=cv.wait(released).unwrap(); } tx.commit() }).map_err(|e|e.to_string())?;
+            Ok(Value::Null)
+        },
         "barrier" => Ok(json!({})),
         "list" => records(db, table(a)?, None),
         "get" => Ok(records(db, table(a)?, a["id"].as_str())?
@@ -137,7 +147,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
         "put" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             put(&tx, table(a)?, &a["value"], a.get("notification"))?;
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "compare_put" => {
@@ -158,20 +168,20 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                 return Ok(json!(false));
             }
             put(&tx, t, &a["value"], a.get("notification"))?;
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(json!(true))
         }
         "put_pair" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             put(&tx, "projects", &a["project"], None)?;
             put(&tx, "workspaces", &a["workspace"], None)?;
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "delete_workspace" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             delete_workspace(&tx, a["id"].as_str().ok_or("id")?)?;
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "remove_project" => {
@@ -188,7 +198,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
             tx.execute("DELETE FROM projects WHERE id=?", [id])
                 .map_err(|e| e.to_string())?;
             tx.execute("INSERT INTO events(kind,entityId,at) VALUES('projects',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",[id]).map_err(|e|e.to_string())?;
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "recover" => {
@@ -201,7 +211,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                     put(&tx, "terminals", &value, None)?;
                 }
             }
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "notifications" => {
@@ -258,7 +268,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                 v["exitCode"] = a["exitCode"].clone();
                 v.as_object_mut().unwrap().remove("activity");
                 put(&tx, "terminals", &v, None)?;
-                tx.commit().map_err(|e| e.to_string())?;
+                performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             }
             Ok(Value::Null)
         }
@@ -291,7 +301,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                 )
                 .map_err(|e| e.to_string())?;
             }
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         "append" => {
@@ -311,7 +321,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                         .map_err(|e| e.to_string())?;
                 }
             }
-            tx.commit().map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(json!({}))
         }
         "output" => {
@@ -352,6 +362,7 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
 }
 
 struct Job {
+    trace: Option<String>,
     request: Request,
     reply: oneshot::Sender<Result<Value, ApiError>>,
     _credit: Option<OwnedSemaphorePermit>,
@@ -375,6 +386,7 @@ fn ready_group(first: Job, rx: &mut mpsc::Receiver<Job>, pending: &mut Option<Jo
     jobs
 }
 fn complete(job: Job, result: Result<Value, ApiError>, changes: &broadcast::Sender<Change>) {
+    if let Some(id)=&job.trace { performance::event(id,"store.sqlite.end"); }
     if result.is_ok() && (job.request.op != "compare_put" || result.as_ref().ok() == Some(&Value::Bool(true))) {
         if let Some(change) = change(&job.request) { let _ = changes.send(change); }
     }
@@ -383,9 +395,13 @@ fn complete(job: Job, result: Result<Value, ApiError>, changes: &broadcast::Send
 // Returns false only if rollback could not restore autocommit. The writer then
 // closes its queues rather than processing further jobs in an uncertain tx.
 fn execute_group(db: &mut Connection, jobs: Vec<Job>, changes: &broadcast::Sender<Change>) -> bool {
+    let _scope = performance::StoreScope::enter(jobs.iter().filter_map(|j|j.trace.clone()).collect());
     if jobs.len() == 1 {
         let job = jobs.into_iter().next().unwrap();
+        let implicit=groupable(&job)&&db.is_autocommit();
+        if implicit { performance::mark("store.autocommit.begin"); }
         let result = handle(db, &job.request).map_err(|_| ApiError::storage());
+        if implicit { performance::mark("store.autocommit.end"); }
         complete(job, result, changes);
         return db.is_autocommit();
     }
@@ -399,7 +415,7 @@ fn execute_group(db: &mut Connection, jobs: Vec<Job>, changes: &broadcast::Sende
         Ok(results) => {
             // Never replay a failed COMMIT: its durability outcome may be unknown.
             // No successful reply or event is published before the FULL commit.
-            let committed = db.execute_batch("COMMIT").is_ok();
+            let committed = performance::commit(|| db.execute_batch("COMMIT")).is_ok();
             if !committed && !db.is_autocommit() { let _ = db.execute_batch("ROLLBACK"); }
             for (job, result) in jobs.into_iter().zip(results) {
                 complete(job, if committed { Ok(result) } else { Err(ApiError::storage()) }, changes);
@@ -442,7 +458,7 @@ impl StoreHandle {
         std::thread::Builder::new().name("native-store".into()).spawn(move||{
    let init=(||->Result<(Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;Ok((writer,reader))})();
    let Ok((mut writer,mut reader))=init else {let _=ready.send(false);return;};
-   std::thread::Builder::new().name("native-output-read".into()).spawn(move||{while let Some(job)=read_rx.blocking_recv(){let result=handle(&mut reader,&job.request).map_err(|_|ApiError::storage());let _=job.reply.send(result);}}).ok();
+   std::thread::Builder::new().name("native-output-read".into()).spawn(move||{while let Some(job)=read_rx.blocking_recv(){let _scope=performance::StoreScope::enter(job.trace.iter().cloned().collect());let result=handle(&mut reader,&job.request).map_err(|_|ApiError::storage());if let Some(id)=&job.trace{performance::event(id,"store.sqlite.end");}let _=job.reply.send(result);}}).ok();
    let _=ready.send(true);
    let runtime=tokio::runtime::Builder::new_current_thread().build().expect("store executor");
    runtime.block_on(async {
@@ -480,6 +496,8 @@ impl StoreHandle {
     }
     pub fn signal_change(&self,change:Change){let _=self.events.send(change);}
     pub async fn call(&self, op: &str, args: Value) -> Result<Value, ApiError> {
+        let trace=performance::context();
+        if let Some(id)=&trace { performance::event(id,"store.queue.begin"); }
         if op == "barrier" {
             // Exclude new enqueues while FIFO fences pass through both lanes. Jobs already
             // awaiting credits are not accepted yet and therefore fall after this barrier.
@@ -487,6 +505,7 @@ impl StoreHandle {
             for tx in [&self.bulk, &self.writes] {
                 let (reply, rx) = oneshot::channel();
                 tx.send(Job {
+                    trace: trace.clone(),
                     request: Request {
                         op: "barrier".into(),
                         args: Value::Null,
@@ -524,6 +543,7 @@ impl StoreHandle {
             .map_err(|_| ApiError::storage())?;
         let (reply, rx) = oneshot::channel();
         let job = Job {
+            trace,
             request: Request {
                 op: op.into(),
                 args,
@@ -877,7 +897,7 @@ mod operation_group_tests {
     use super::*;
     fn job(op: &str, args: Value) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         let (reply, rx) = oneshot::channel();
-        (Job { request: Request { op: op.into(), args }, reply, _credit: None }, rx)
+        (Job { trace: None, request: Request { op: op.into(), args }, reply, _credit: None }, rx)
     }
     fn start(id: &str) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         job("operation_start", json!({"id":id,"hash":"h"}))
@@ -994,5 +1014,54 @@ mod operation_group_tests {
         let row=store.call("operation",json!({"id":"0"})).await.unwrap();
         assert_eq!(row["status"],"pending");
         assert_eq!(store.call("query",json!({"sql":"SELECT COUNT(*) AS n FROM operations","args":[]})).await.unwrap()[0]["n"],32);
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::*;
+    #[tokio::test]
+    async fn injected_commit_and_queue_have_separate_correlated_intervals() {
+        if std::env::var_os("NEURA_TRACE_TEST_CHILD").is_none() {
+            let dir=std::env::temp_dir().join(format!("neura-trace-{}",uuid::Uuid::new_v4()));
+            let result=std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact","store::trace_tests::injected_commit_and_queue_have_separate_correlated_intervals","--nocapture"])
+                .env("NEURA_TRACE_TEST_CHILD","1").env("NEURA_PERF_TRACE_DIR",&dir).output().unwrap();
+            assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+            std::fs::remove_dir_all(dir).unwrap();
+            return;
+        }
+        let dir=std::path::PathBuf::from(std::env::var_os("NEURA_PERF_TRACE_DIR").unwrap());
+        std::fs::create_dir_all(&dir).unwrap();
+        let (changes,_)=broadcast::channel(16);
+        let store=StoreHandle::open(&dir.join("fixture.sqlite"),changes).await.unwrap();
+        let a=uuid::Uuid::new_v4().to_string();let b=uuid::Uuid::new_v4().to_string();
+        let writer=store.clone();let id=a.clone();
+        let slow=tokio::spawn(async move{performance::REQUEST.scope(id,writer.call("test_slow_commit",json!({}))).await.unwrap()});
+        async fn wait_event(dir:&std::path::Path,id:&str,event:&str) {
+            for _ in 0..500 {
+                performance::flush().await;
+                if std::fs::read_to_string(dir.join("daemon.jsonl")).unwrap_or_default().lines().any(|l|{
+                    let r:Value=serde_json::from_str(l).unwrap();r["requestId"]==id&&r["event"]==event
+                }) { return; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            panic!("trace stage did not arrive");
+        }
+        wait_event(&dir,&a,"store.commit.begin").await;
+        let reader=store.clone();let id=b.clone();
+        let queued=tokio::spawn(async move{performance::REQUEST.scope(id,reader.call("list",json!({"table":"agents"}))).await.unwrap()});
+        wait_event(&dir,&b,"store.queue.begin").await;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        *TEST_COMMIT_GATE.0.lock().unwrap()=true;TEST_COMMIT_GATE.1.notify_one();
+        queued.await.unwrap();slow.await.unwrap();performance::flush().await;
+        let text=std::fs::read_to_string(dir.join("daemon.jsonl")).unwrap();
+        let rows:Vec<Value>=text.lines().map(|l|serde_json::from_str(l).unwrap()).collect();
+        let at=|id:&str,event:&str|rows.iter().find(|r|r["requestId"]==id&&r["event"]==event).unwrap()["monotonicMs"].as_f64().unwrap();
+        assert!(at(&a,"store.commit.end")-at(&a,"store.commit.begin")>=100.);
+        assert!(at(&b,"store.sqlite.begin")-at(&b,"store.queue.begin")>=100.);
+        assert!(!rows.iter().any(|r|r["requestId"]==b&&r["event"]=="store.commit.begin"));
+        assert!(!text.contains("injected"));assert!(!text.contains("SELECT"));
+        drop(store);
     }
 }

@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {createInterface} from 'node:readline';
 import {randomUUID} from 'node:crypto';
+import {DatabaseSync} from 'node:sqlite';
 import {setTimeout as delay} from 'node:timers/promises';
 const binary=process.env.NEURA_NATIVE_DAEMON;
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
@@ -18,7 +19,7 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
  const fixture=fileURLToPath(new URL('./fixtures/provider-daemon-cli.mjs',import.meta.url));
  await writeFile(join(bin,'codex'),`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(fixture)} codex "$@"\n`,{mode:0o700});
  const listener=createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));const port=listener.address().port;await new Promise(r=>listener.close(r));
- const base=`http://127.0.0.1:${port}`,env={HOME:home,PATH:bin+':/usr/bin:/bin',LANG:'en_US.UTF-8',TMPDIR:root,NEURA_DEV_DATA_DIR:data,NEURA_DEV_PORT:String(port),NEURA_CODEX_PATH:join(bin,'codex')};
+ const base=`http://127.0.0.1:${port}`,env={HOME:home,PATH:bin+':/usr/bin:/bin',LANG:'en_US.UTF-8',TMPDIR:root,NEURA_DEV_DATA_DIR:data,NEURA_DEV_PORT:String(port),NEURA_PERF_TRACE_DIR:join(data,'performance'),NEURA_CODEX_PATH:join(bin,'codex')};
  let daemon,daemonEnd,mcp,token,logs='';
  async function start(){daemon=spawn(resolve(binary),[],{cwd:root,env,stdio:['ignore','pipe','pipe']});daemonEnd=new Promise(r=>daemon.once('exit',code=>r(code)));for(const s of [daemon.stdout,daemon.stderr])s.on('data',b=>logs=(logs+b).slice(-8192));await until(async()=>{assert.equal(daemon.exitCode,null,logs);try{token=(await readFile(join(data,'daemon-token'),'utf8')).trim();return (await request('/v1/state')).runtime==='rust';}catch{return false;}});}
  async function stop(){
@@ -27,8 +28,9 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   if(result==='timeout'){daemon.kill('SIGKILL');await daemonEnd;}
   assert.equal(result,0,logs);
  }
- async function request(path,body,status=200){const r=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});const value=await r.json();assert.equal(r.status,status,JSON.stringify(value));return value;}
- const command=(c,operationId=randomUUID())=>request('/v1/commands',{operationId,command:c});
+ async function request(path,body,status=200,traceId){const r=await fetch(base+path,{method:body===undefined?'GET':'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json',...(traceId?{'x-neura-perf-id':traceId}:{})},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});const value=await r.json();assert.equal(r.status,status,JSON.stringify(value));return value;}
+ const command=(c,operationId=randomUUID(),traceId)=>request('/v1/commands',{operationId,command:c},200,traceId);
+ const trace=async id=>(await readFile(join(data,'performance','daemon.jsonl'),'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse).filter(row=>row.requestId===id);
  try{
   await start();
   const project=await command({type:'project.add',path:folder});const workspace=(await request('/v1/state')).workspaces.find(w=>w.projectId===project.id);
@@ -69,7 +71,37 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   for(let i=0;i<130;i++){
    const queued=await command({type:'agent.send',agentId:task.id,text:`retention ${i}`});
    const current=(await request('/v1/agents')).agents.find(a=>a.id===task.id);
-   await command({type:'agent.instruction',agentId:task.id,sourceTerminalId:terminal.id,instructionId:queued.messageId,expectedRevision:current.revision,expectedTurnId:current.turnId,expectedState:'queued',action:'cancel'});
+   const cancel={type:'agent.instruction',agentId:task.id,sourceTerminalId:terminal.id,instructionId:queued.messageId,expectedRevision:current.revision,expectedTurnId:current.turnId,expectedState:'queued',action:'cancel'};
+   if(i===0){
+    // A real SQLite writer gate holds the detached command before its journal
+    // starts. Abort HTTP only after its correlated store stage is observed.
+    // No runtime injection, grace sleep or retry is used to manufacture success.
+    const db=new DatabaseSync(join(data,'developer.sqlite'));
+    const operationId=randomUUID(),traceId=randomUUID(),controller=new AbortController();
+    try{
+     db.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
+     try{
+      const response=fetch(base+'/v1/commands',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','x-neura-perf-id':traceId},body:JSON.stringify({operationId,command:cancel}),signal:controller.signal}).then(()=>null,error=>error);
+      await until(async()=>(await trace(traceId)).some(e=>e.event==='store.autocommit.begin'));
+      controller.abort();assert.equal((await response)?.name,'AbortError');
+      assert.equal(db.prepare('SELECT status FROM operations WHERE id=?').get(operationId),undefined,'journal is still blocked when HTTP disconnects');
+     }finally{controller.abort();db.exec('ROLLBACK');}
+     await until(()=>db.prepare('SELECT status FROM operations WHERE id=?').get(operationId)?.status==='done');
+     const persisted=JSON.parse(db.prepare('SELECT data FROM agents WHERE id=?').get(task.id).data);
+     assert.equal(persisted.instructions.find(m=>m.id===queued.messageId).state,'cancelled');
+     assert.ok(!persisted.pending.some(m=>m.id===queued.messageId));
+     await until(async()=>(await trace(traceId)).some(e=>e.event==='store.commit.end'));
+     const stages=(await trace(traceId)).map(e=>e.event);
+     for(const phase of ['http.received','store.queue.begin','store.sqlite.begin','store.commit.begin','store.commit.end'])assert.ok(stages.includes(phase),phase);
+    }finally{db.close();}
+   }else if(i===1){
+    const traceId=randomUUID();await command(cancel,randomUUID(),traceId);
+    await until(async()=>(await trace(traceId)).some(e=>e.event==='http.response'));
+    const rows=await trace(traceId),stages=rows.map(e=>e.event);
+    for(const phase of ['http.received','store.queue.begin','store.sqlite.begin','store.commit.begin','store.commit.end','http.response'])assert.ok(stages.includes(phase),phase);
+    assert.ok(stages.indexOf('store.commit.end')<stages.indexOf('http.response'));
+    assert.ok(!JSON.stringify(rows).includes(token));assert.ok(!JSON.stringify(rows).includes('retention 1'));
+   }else await command(cancel);
   }
   const bounded=(await tool('task_read',{taskId:task.id})).value.agent;
   assert.equal(bounded.instructions.length,128);assert.equal(bounded.instructionHistoryPruned,3);
@@ -102,6 +134,6 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   const {operationId,taskId,...args}=replacement;
   assert.deepEqual(await command({...args,type:'agent.instruction',agentId:taskId,sourceTerminalId:terminal.id},operationId),changed.value);
   const expired=await request('/v1/agents?options='+encodeURIComponent(JSON.stringify({sinceRevision:lite.revision,sinceEpoch:lite.epoch,sinceFilter:lite.filter})));assert.equal(expired.fullRefreshRequired,true);
-  t.diagnostic(`native tools/list UUID descriptions, validation, operation replay, read-only read, list delta, supersede and SQLite restart passed; full bytes=${JSON.stringify(full).length}, summary bytes=${JSON.stringify(lite).length}`);
+  t.diagnostic(`native tools/list UUID descriptions, validation, operation replay, read-only read, list delta, supersede, detached instruction request/store correlation, HTTP-abort durability and SQLite restart passed; full bytes=${JSON.stringify(full).length}, summary bytes=${JSON.stringify(lite).length}`);
  }finally{mcp?.kill();if(daemon?.exitCode===null){await stop();}await rm(root,{recursive:true,force:true});}
 });

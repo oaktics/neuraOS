@@ -1,0 +1,264 @@
+{
+  "issues": [
+    141,
+    145
+  ],
+  "date": "2026-10-30",
+  "kind": "functional-smoke-not-speedup",
+  "nativeBuild": "debug",
+  "rowsPerTerminal": 32,
+  "order": [
+    "native",
+    "legacy",
+    "legacy",
+    "native"
+  ],
+  "realProvider": false,
+  "realBatteryMeasurement": false,
+  "runs": [
+    {
+      "run": "1-native",
+      "points": [
+        {
+          "children": 1,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 5,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 10,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 20,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 32,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        }
+      ]
+    },
+    {
+      "run": "2-legacy",
+      "points": [
+        {
+          "children": 1,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 5,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 10,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 20,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 32,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        }
+      ]
+    },
+    {
+      "run": "3-legacy",
+      "points": [
+        {
+          "children": 1,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 5,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 10,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 20,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 32,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        }
+      ]
+    },
+    {
+      "run": "4-native",
+      "points": [
+        {
+          "children": 1,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 5,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 10,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 20,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        },
+        {
+          "children": 32,
+          "rowsPerTerminal": 32,
+          "loss": 0,
+          "duplicates": 0,
+          "httpErrors": 0,
+          "unicodeIntact": true,
+          "restartReplay": true
+        }
+      ]
+    }
+  ],
+  "initialAttempt": {
+    "status": "failed in third run legacy",
+    "cause": "unconfirmed; original runner did not retain child stderr",
+    "retained": true,
+    "fix": "runner now saves stderr and each count result independently"
+  },
+  "tests": {
+    "rustLibrary": 91,
+    "nativeMcp": {
+      "passed": 7,
+      "clients": [
+        10,
+        20,
+        32
+      ],
+      "readyDelayMs": [
+        0,
+        800
+      ],
+      "initialAndReconnectIdleWindowMs": 1600,
+      "httpGrowth": 0,
+      "targetChangeHttp": 1,
+      "unrelatedStateHttp": 0,
+      "duplicateInstructions": 0
+    },
+    "nativeProtocol": 3,
+    "httpCorrelationAndPrivacy": 2
+  },
+  "limitations": [
+    "Synthetic PTYs; debug and short fixture output, not optimized performance comparison",
+    "Background desktop and concurrent development load uncontrolled",
+    "No installed app restart or real provider usage",
+    "Pressure indicators and timestamps do not establish a causal diagnosis",
+    "Original historical tail latency and battery effects remain unproven"
+  ],
+  "finalSmoke": {
+    "children": 1,
+    "loss": 0,
+    "duplicates": 0,
+    "httpErrors": 0,
+    "restartReplay": true,
+    "perCountResultSaved": true,
+    "runtimeTraceExported": true
+  }
+}
