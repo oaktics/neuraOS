@@ -18,6 +18,7 @@ async fn main() {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let command = std::env::args().nth(1);
     match command.as_deref() {
+        Some("process-supervisor")=>{let code=process_tree::process_supervisor().await?;std::process::exit(code);},
         Some("provider-host") => {
             let mut args = std::env::args().skip(2);
             let program = args.next().ok_or("missing program")?;
@@ -37,6 +38,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     std::fs::create_dir_all(&data)?;
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700))?;
+    process_tree::ensure_supervisor(&std::env::current_exe()?,&data.join("process-supervisor.lock")).await?;
     let token_file = data.join("daemon-token");
     match std::fs::OpenOptions::new()
         .write(true)

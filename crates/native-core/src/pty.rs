@@ -18,7 +18,11 @@ pub struct PtyExit {
     pub terminal_id: String,
     pub exit_code: u32,
 }
+#[derive(Clone)]
+enum Ownership{Local(crate::process_tree::ProcessTree),Shared(crate::process_tree::ProcessReservation)}
+impl Ownership{async fn stop(&self)->Result<(),String>{match self{Self::Local(tree)=>tree.stop().await,Self::Shared(lease)=>lease.stop().await}}}
 struct Session {
+    owner:Ownership,
     master: Box<dyn MasterPty + Send>,
     fd: RawFd,
     pid: u32,
@@ -38,6 +42,7 @@ struct Output {
     exit_code: Option<u32>,
 }
 struct Inner {
+    supervised:bool,
     sessions: Mutex<HashMap<String, Session>>,
     tokens: Mutex<HashMap<usize, String>>,
     dirty: Mutex<HashSet<String>>,
@@ -116,7 +121,9 @@ fn decode(s: &mut Session, bytes: &[u8], finish: bool) -> String {
     text
 }
 impl PtyRuntime {
-    pub fn new(store: StoreHandle) -> Result<Self, ApiError> {
+    pub fn new(store: StoreHandle) -> Result<Self, ApiError> {Self::create(store,false)}
+    pub fn new_supervised(store:StoreHandle)->Result<Self,ApiError>{Self::create(store,true)}
+    fn create(store:StoreHandle,supervised:bool)->Result<Self,ApiError>{
         let mut poll = Poll::new().map_err(|_| ApiError::storage())?;
         let registry = poll
             .registry()
@@ -126,6 +133,7 @@ impl PtyRuntime {
             Arc::new(Waker::new(poll.registry(), Token(0)).map_err(|_| ApiError::storage())?);
         let (exits, _) = broadcast::channel(256);
         let inner = Arc::new(Inner {
+            supervised,
             sessions: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashSet::new()),
@@ -333,38 +341,23 @@ impl PtyRuntime {
         cwd: &str,
         env: HashMap<String, String>,
     ) -> Result<u32, ApiError> {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 30,
-                cols: 100,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|_| ApiError::new("terminal_spawn_failed", "PTYを作成できません。", 500))?;
-        let mut command = CommandBuilder::new(program);
-        command.args(args);
-        command.cwd(cwd);
-        command.env_clear();
-        for (k, v) in env {
-            command.env(k, v);
-        }
-        let mut child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|_| ApiError::new("terminal_spawn_failed", "CLIを起動できません。", 500))?;
-        drop(pair.slave);
-        let pid = child.process_id().ok_or_else(ApiError::storage)?;
-        let fd = pair.master.as_raw_fd().ok_or_else(ApiError::storage)?;
-        unsafe {
-            libc::fcntl(
-                fd,
-                libc::F_SETFL,
-                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
-            );
-        }
+        self.check_healthy()?;
+        let shared=if self.inner.supervised{Some(crate::process_tree::reserve().await.map_err(|_|ApiError::new("process_supervisor_failed","プロセス監督に接続できません。",503))?)}else{None};
+        let owner_token=shared.as_ref().map(|v|v.token().to_owned()).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
+        let program=program.to_owned();let cwd=cwd.to_owned();let runtime=tokio::runtime::Handle::current();
+        let (master,mut child,owner,pid,fd)=tokio::task::spawn_blocking(move||->Result<_,ApiError>{
+          let pair=native_pty_system().openpty(PtySize{rows:30,cols:100,pixel_width:0,pixel_height:0}).map_err(|_|ApiError::new("terminal_spawn_failed","PTYを作成できません。",500))?;
+          let mut command=CommandBuilder::new(program);command.args(args);command.cwd(cwd);command.env_clear();for(k,v)in env{command.env(k,v);}command.env(crate::process_tree::OWNER_ENV,&owner_token);
+          let mut child=pair.slave.spawn_command(command).map_err(|_|ApiError::new("terminal_spawn_failed","CLIを起動できません。",500))?;drop(pair.slave);
+          let pid=child.process_id().ok_or_else(ApiError::storage)?;
+          let owner=match shared{Some(lease)=>{runtime.block_on(lease.attach(pid)).map_err(|_|ApiError::new("process_monitor_failed","CLIの所有確認に失敗しました。",500))?;Ownership::Shared(lease)},None=>match crate::process_tree::ProcessTree::new_with_token(pid,owner_token){Ok(tree)=>Ownership::Local(tree),Err(_)=>{let _=child.kill();let _=child.wait();return Err(ApiError::new("process_monitor_failed","CLIの所有確認に失敗しました。",500));}}};
+          let fd=pair.master.as_raw_fd().ok_or_else(ApiError::storage)?;unsafe{libc::fcntl(fd,libc::F_SETFL,libc::fcntl(fd,libc::F_GETFL)|libc::O_NONBLOCK);}
+          Ok((pair.master,child,owner,pid,fd))
+        }).await.map_err(|_|ApiError::storage())??;
         let token = Token(self.inner.sequence.fetch_add(1, Ordering::Relaxed));
         let mut session = Session {
-            master: pair.master,
+            master,
+            owner:owner.clone(),
             fd,
             pid,
             token,
@@ -388,11 +381,13 @@ impl PtyRuntime {
         let _ = self.inner.waker.wake();
         let inner = self.inner.clone();
         let terminal_id = id.to_owned();
+        let runtime=tokio::runtime::Handle::current();
         std::thread::Builder::new()
             .name("native-pty-exit".into())
             .stack_size(128 * 1024)
             .spawn(move || {
                 let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
+                if runtime.block_on(owner.stop()).is_err(){inner.fault.store(true,Ordering::Release);inner.sessions_changed.notify_waiters();}
                 if let Some(s) = inner.sessions.lock().unwrap().get_mut(&terminal_id) {
                     s.exit_code = Some(code);
                 }
@@ -403,6 +398,7 @@ impl PtyRuntime {
         Ok(pid)
     }
     pub async fn input(&self, id: &str, data: &str) -> Result<(), ApiError> {
+        self.check_healthy()?;
         let mut all = self.inner.sessions.lock().unwrap();
         let s = all.get_mut(id).ok_or_else(|| {
             ApiError::new("terminal_stopped", "ターミナルは停止しています。", 409)
@@ -422,6 +418,7 @@ impl PtyRuntime {
         Ok(())
     }
     pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), ApiError> {
+        self.check_healthy()?;
         if self.pid(id).is_none() {
             return Err(ApiError::new(
                 "terminal_stopped",
@@ -449,30 +446,11 @@ impl PtyRuntime {
             .map_err(|_| ApiError::storage())?;
         Ok(())
     }
-    pub async fn stop(&self, id: &str) -> Result<(), ApiError> {
-        if let Some(pid) = self.pid(id) {
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGHUP);
-            }
-            let inner = self.inner.clone();
-            let id = id.to_owned();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                if inner
-                    .sessions
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .is_some_and(|s| s.pid == pid)
-                {
-                    unsafe {
-                        libc::kill(-(pid as i32), libc::SIGKILL);
-                    }
-                }
-            });
-        }
-        Ok(())
+    pub async fn stop(&self,id:&str)->Result<(),ApiError>{
+      let owner=self.inner.sessions.lock().unwrap().get(id).map(|s|s.owner.clone());
+      if let Some(owner)=owner{owner.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","CLI子孫の終了を確認できません。",500))?;}Ok(())
     }
+    pub fn check_healthy(&self)->Result<(),ApiError>{if self.inner.fault.load(Ordering::Acquire){return Err(ApiError::new("terminal_runtime_failed","PTY保存または所有プロセスの処理に失敗しました。",503));}if self.inner.closed.load(Ordering::Acquire){return Err(ApiError::new("terminal_runtime_closed","PTYは終了処理中です。",503));}Ok(())}
     pub async fn shutdown(&self) -> Result<(), ApiError> {
         let ids: Vec<_> = self
             .inner
@@ -482,9 +460,8 @@ impl PtyRuntime {
             .keys()
             .cloned()
             .collect();
-        for id in ids {
-            self.stop(&id).await?;
-        }
+        let results=futures_util::future::join_all(ids.iter().map(|id|self.stop(id))).await;
+        let stop_failed=results.iter().any(Result::is_err);
         let drain = async {
             loop {
                 let changed = self.inner.sessions_changed.notified();
@@ -515,7 +492,7 @@ impl PtyRuntime {
             self.inner.store.call("barrier", json!({})).await?;
             Ok(())
         };
-        tokio::time::timeout(std::time::Duration::from_secs(15), drain)
+        let drained=tokio::time::timeout(std::time::Duration::from_secs(15), drain)
             .await
             .map_err(|_| {
                 ApiError::new(
@@ -523,6 +500,7 @@ impl PtyRuntime {
                     "PTYの保存完了を確認できません。",
                     500,
                 )
-            })?
+            })?;
+        if stop_failed{return Err(ApiError::new("process_cleanup_failed","CLI子孫の終了を確認できません。",500));}drained
     }
 }

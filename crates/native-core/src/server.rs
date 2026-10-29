@@ -94,7 +94,7 @@ impl AppState {
     ) -> Result<Arc<Self>, ApiError> {
         let (events, _) = broadcast::channel(256);
         let store = StoreHandle::open(&data_dir.join("developer.sqlite"), events.clone()).await?;
-        let pty = PtyRuntime::new(store.clone())?;
+        let pty = PtyRuntime::new_supervised(store.clone())?;
         let providers = ProviderService::new(
             store.clone(),
             pty.clone(),
@@ -512,7 +512,7 @@ async fn channel(
     }
     Ok(Json(
         match action.as_str() {
-            "channel" => s.providers.agents.channel(&key).await,
+            "channel" => s.providers.channel(&key).await,
             "channel-ack" => {
                 id(text(&body, "nonce")?)?;
                 s.providers

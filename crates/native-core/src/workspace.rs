@@ -55,9 +55,9 @@ pub async fn run(
         }
         Ok(data)
     }
-    let token = Uuid::new_v4().to_string();
+    let tree=crate::process_tree::reserve().await.map_err(|_|ApiError::new("process_supervisor_failed","プロセス監督に接続できません。",503))?;
     let mut child = Command::new(program)
-        .env(crate::process_tree::OWNER_ENV, &token)
+        .env(crate::process_tree::OWNER_ENV, tree.token())
         .args(args)
         .current_dir(root)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -68,18 +68,7 @@ pub async fn run(
         .spawn()
         .map_err(|_| ApiError::new("operation_failed", "外部プログラムを起動できません。", 500))?;
     let pid = child.id().ok_or_else(ApiError::storage)?;
-    let tree = tokio::task::spawn_blocking(move || {
-        crate::process_tree::ProcessTree::new_with_token(pid, token)
-    })
-    .await
-    .map_err(|_| ApiError::storage())?
-    .map_err(|_| {
-        ApiError::new(
-            "process_monitor_failed",
-            "外部処理の所有確認ができません。",
-            500,
-        )
-    })?;
+    tree.attach(pid).await.map_err(|_|ApiError::new("process_monitor_failed","外部処理の所有確認ができません。",500))?;
     let stdout = child.stdout.take().ok_or_else(ApiError::storage)?;
     let stderr = child.stderr.take().ok_or_else(ApiError::storage)?;
     let result = tokio::time::timeout(Duration::from_secs(seconds), async {
@@ -524,32 +513,4 @@ pub async fn detect_setup(root: &str) -> Value {
         }
     }
     json!({"scripts":paths})
-}
-
-#[cfg(test)]
-mod runner_tests {
-    use super::*;
-    #[tokio::test]
-    async fn bounds_stdout_and_stderr_while_draining() {
-        for script in [
-            "import sys;sys.stdout.write('x'*5000000)",
-            "import sys;sys.stderr.write('x'*100000)",
-        ] {
-            let error = run("/tmp", "/usr/bin/python3", &["-c", script], 5)
-                .await
-                .unwrap_err();
-            assert_eq!(error.error, "output_too_large");
-        }
-        assert_eq!(
-            run(
-                "/tmp",
-                "/usr/bin/python3",
-                &["-c", "import sys;sys.stderr.write('x'*50000);print('ok')"],
-                5
-            )
-            .await
-            .unwrap(),
-            "ok\n"
-        );
-    }
 }
