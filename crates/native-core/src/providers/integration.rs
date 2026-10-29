@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     net::UnixListener,
     sync::Mutex,
     task::JoinHandle,
@@ -92,6 +92,7 @@ pub struct ProviderService {
     endpoint: String,
     token_file: String,
     credentials: StdMutex<HashMap<String, (String, String)>>,
+    supported: Mutex<HashMap<String, Result<()>>>,
     hooks: Mutex<HashMap<String, (PathBuf, JoinHandle<()>)>>,
 }
 impl ProviderService {
@@ -116,6 +117,7 @@ impl ProviderService {
             endpoint,
             token_file,
             credentials: StdMutex::new(HashMap::new()),
+            supported: Mutex::new(HashMap::new()),
             hooks: Mutex::new(HashMap::new()),
         });
         let weak = Arc::downgrade(&this);
@@ -199,6 +201,7 @@ impl ProviderService {
                 agent_id: None,
             });
         }
+        self.check_support(provider, &program).await?;
         let binary = std::env::current_exe().map_err(|e| e.to_string())?;
         let channel_token = credential();
         let browser_token = credential();
@@ -208,7 +211,6 @@ impl ProviderService {
         );
         let result = if provider == "claude" {
             async {
-    let help=tokio::time::timeout(Duration::from_secs(3),tokio::process::Command::new(&program).arg("--help").output()).await.map_err(|_|"claude_mcp_unsupported")?.map_err(|e|e.to_string())?;let help=String::from_utf8_lossy(&help.stdout);if !help.contains("--mcp-config")||!help.contains("--append-system-prompt"){return Err("claude_mcp_unsupported".into())}
     self.agents.prepare_claude(workspace.clone(),terminal,resume.clone(),parent,prompt).await?;
     let socket=self.hook_socket(terminal).await?;env.insert("NEURA_ACTIVITY_SOCKET".into(),socket.display().to_string());
     let mut config=codex::mcp_config(&binary,&self.endpoint,&self.token_file,workspace["id"].as_str().ok_or("workspace id")?,terminal,&browser_token);config["type"]=json!("stdio");config["env"]["NEURA_CHANNEL_TOKEN"]=json!(channel_token);config["env"]["NEURA_SUPERVISION_CHANNEL"]=json!("claude");
@@ -241,6 +243,51 @@ impl ProviderService {
         }
         result
     }
+    async fn check_support(&self, provider: &str, program: &str) -> Result<()> {
+        let mut supported = self.supported.lock().await;
+        if let Some(result) = supported.get(program) {
+            return result.clone();
+        }
+        let result = async {
+            let help = probe(program, "--help").await?;
+            if provider == "codex" {
+                if !help.contains("--remote") || !help.contains("app-server") {
+                    return Err("codex_managed_unsupported".into());
+                }
+            } else {
+                if !help.contains("--mcp-config")
+                    || !help.contains("--append-system-prompt")
+                    || !help.contains("--settings")
+                {
+                    return Err("claude_mcp_unsupported".into());
+                }
+                let version = probe(program, "--version").await?;
+                let version = version.split_whitespace().next().unwrap_or("");
+                let parts: Vec<u64> = version.split('.').map(|v| v.parse().unwrap_or(0)).collect();
+                if parts.len() < 3 || (parts[0], parts[1], parts[2]) < (2, 1, 306) {
+                    return Err("claude_channels_unsupported".into());
+                }
+            }
+            Ok(())
+        }
+        .await;
+        supported.insert(program.into(), result.clone());
+        result
+    }
+    pub async fn channel(self: &Arc<Self>, terminal: &str) -> Result<Value> {
+        let event = self.agents.channel(terminal).await?;
+        if event["meta"]["kind"] == "probe" {
+            let weak = Arc::downgrade(self);
+            let terminal = terminal.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(60001)).await;
+                if let Some(service) = weak.upgrade() {
+                    let _ = service.agents.channel(&terminal).await;
+                }
+            });
+        }
+        Ok(event)
+    }
     async fn hook_socket(self: &Arc<Self>, terminal: &str) -> Result<PathBuf> {
         let directory = super::socket_dir::create()?;
         let path = directory.join("activity.sock");
@@ -258,7 +305,7 @@ impl ProviderService {
                     let mut line = String::new();
                     let read = tokio::time::timeout(
                         Duration::from_secs(5),
-                        BufReader::new(socket).read_line(&mut line),
+                        BufReader::new(socket.take(16385)).read_line(&mut line),
                     )
                     .await;
                     if !matches!(read, Ok(Ok(_))) || line.len() > 16384 {
@@ -300,6 +347,22 @@ impl ProviderService {
     pub async fn close(&self, terminal: &str) -> Result<()> {
         self.credentials.lock().unwrap().remove(terminal);
         self.monitor.remove(terminal);
+        if let Some((session, path)) = self.agents.observed_transcript(terminal).await {
+            let read_path = PathBuf::from(path);
+            let read_session = session.clone();
+            if let Ok(Some((name, at))) = tokio::task::spawn_blocking(move || {
+                let mut reader = claude::CompletionReader::default();
+                let _ = reader.read(&read_path, &read_session, i64::MAX);
+                reader.title
+            })
+            .await
+            {
+                let _ = self
+                    .agents
+                    .apply_claude_title(terminal, &session, &name, at)
+                    .await;
+            }
+        }
         if let Some((directory, task)) = self.hooks.lock().await.remove(terminal) {
             task.abort();
             let _ = tokio::fs::remove_dir_all(directory).await;
@@ -440,4 +503,26 @@ async fn reconcile_codex(
         }
     }
     Ok(())
+}
+
+async fn probe(program: &str, arg: &str) -> Result<String> {
+    use std::process::Stdio;
+    let lease = crate::process_tree::reserve().await?;
+    let mut child = tokio::process::Command::new(program).arg(arg)
+        .env(crate::process_tree::OWNER_ENV,lease.token())
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .process_group(0).kill_on_drop(true).spawn().map_err(|e|e.to_string())?;
+    lease.attach(child.id().ok_or("provider probe pid")?).await?;
+    let stdout=child.stdout.take().ok_or("provider probe stdout")?;
+    let result=tokio::time::timeout(Duration::from_secs(3),async {
+        let read=async {let mut bytes=Vec::new();stdout.take(256*1024+1).read_to_end(&mut bytes).await.map_err(|e|e.to_string())?;
+            if bytes.len()>256*1024{return Err("provider_probe_too_large".into());}Ok(bytes)};
+        let wait=async {child.wait().await.map_err(|e|e.to_string())};
+        let(bytes,status)=tokio::try_join!(read,wait)?;
+        if !status.success(){return Err("provider_probe_failed".into());}
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }).await.map_err(|_|"provider_probe_timeout".to_string()).and_then(|result|result);
+    let stopped=lease.stop().await;
+    if result.is_err(){let _=child.kill().await;}
+    stopped?;result
 }

@@ -27,13 +27,13 @@ test('native MCP 10/20/32 clients stay idle, deliver one channel event, replay s
    const rpc=(method,params={})=>new Promise(resolve=>{const id=++next;waiters.set(id,resolve);process_.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
    return {process:process_,messages,rpc,stderr:()=>stderr};
   });
-  const change=()=>{for(const client of ws.clients)client.send(JSON.stringify({type:'changed',state:true,terminals:[]}));};
+  const change=(agentTerminals)=>{for(const client of ws.clients)client.send(JSON.stringify({type:'changed',state:true,terminals:[],...(agentTerminals?{agentTerminals}:{})}));};
   try{
    await Promise.all(clients.map(async c=>{const init=await c.rpc('initialize');assert.ok(init.result.capabilities.experimental['claude/channel']);c.process.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');}));
    await until(()=>connections===count);await delay(300);const idle=requests;await delay(1600);assert.equal(requests,idle,'healthy idle bridge makes zero HTTP requests');
    const tools=(await clients[0].rpc('tools/list')).result.tools;for(const name of ['task_list','task_read','task_wait','task_watch','task_report','task_ack','task_start','task_spawn','task_send','task_interrupt','task_respond','workspace_create','workspace_delete','workspace_list','browser_screenshot','channel_ack'])assert.ok(tools.some(t=>t.name===name),name);
    assert.equal(tools.find(t=>t.name==='task_watch').inputSchema.properties.taskIds.maxItems,undefined);
-   pending.set('0',{content:'exactly once',meta:{kind:'instruction',task_id:'fixture'}});revision++;change();await until(()=>clients[0].messages.length===1);change();await delay(100);assert.equal(clients[0].messages.length,1);
+   const beforeTarget=requests;pending.set('0',{content:'exactly once',meta:{kind:'instruction',task_id:'fixture'}});revision++;change(['0']);await until(()=>clients[0].messages.length===1);await delay(100);assert.equal(requests-beforeTarget,1,'one targeted change wakes only its MCP');const beforeOther=requests;change([]);await delay(100);assert.equal(requests,beforeOther,'unrelated state does not wake Channels');change(['0']);await delay(100);assert.equal(clients[0].messages.length,1);
    const waiting=clients.map(c=>c.rpc('tools/call',{name:'task_wait',arguments:{after:revision}}));await delay(100);revision++;change();for(const reply of await Promise.all(waiting))assert.equal(JSON.parse(reply.result.content[0].text).revision,revision);
    const before=connections;for(const socket of ws.clients)socket.terminate();await until(()=>connections===before+count);await delay(200);assert.equal(clients[0].messages.length,1,'reconnect does not replay consumed channel instructions');
    const ends=clients.map(c=>once(c.process,'exit'));clients.forEach(c=>c.process.stdin.end());for(const ended of await Promise.all(ends))assert.equal(ended[0],0);assert.ok(clients.every(c=>!c.stderr()));
