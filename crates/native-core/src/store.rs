@@ -132,7 +132,7 @@ fn handle(db:&mut Connection,r:&Request)->Result<Value,String>{
                 chunks.push(json!({"sequence":cursor,"data":data,"cols":row.get::<_,Option<i64>>(2).map_err(|e|e.to_string())?,"rows":row.get::<_,Option<i64>>(3).map_err(|e|e.to_string())?}));
             }
             more|=chunks.len()==256;
-            let data:String=chunks.iter().map(|c|c["data"].as_str().unwrap()).collect();
+            let data:String=if a["chunksOnly"]==true {String::new()}else{chunks.iter().map(|c|c["data"].as_str().unwrap()).collect()};
             Ok(json!({"data":data,"chunks":chunks,"cursor":cursor,"more":more}))
         },
         "query"=>query(db,a["sql"].as_str().ok_or("invalid sql")?,a["args"].as_array().ok_or("invalid args")?),
@@ -140,28 +140,61 @@ fn handle(db:&mut Connection,r:&Request)->Result<Value,String>{
     }
 }
 
-struct Job { request:Request, reply:oneshot::Sender<Result<Value,ApiError>>, _credit:OwnedSemaphorePermit }
+struct Job { request:Request, reply:oneshot::Sender<Result<Value,ApiError>>, _credit:Option<OwnedSemaphorePermit> }
 #[derive(Clone)]
-pub struct StoreHandle { writes:mpsc::Sender<Job>, reads:mpsc::Sender<Job>, credit:Arc<Semaphore> }
+pub struct StoreHandle { writes:mpsc::Sender<Job>, bulk:mpsc::Sender<Job>, reads:mpsc::Sender<Job>, credit:Arc<Semaphore>, bulk_credit:Arc<Semaphore>, enqueue:Arc<tokio::sync::RwLock<()>> }
 impl StoreHandle {
  pub async fn open(path:&Path,events:broadcast::Sender<Change>)->Result<Self,ApiError>{
-  let path=path.to_owned();let (writes,mut rx)=mpsc::channel::<Job>(64);let (reads,mut read_rx)=mpsc::channel::<Job>(16);let (ready,ready_rx)=oneshot::channel();
+  let path=path.to_owned();let (writes,mut rx)=mpsc::channel::<Job>(64);let (bulk,mut bulk_rx)=mpsc::channel::<Job>(128);let (reads,mut read_rx)=mpsc::channel::<Job>(16);let (ready,ready_rx)=oneshot::channel();
   std::thread::Builder::new().name("native-store".into()).spawn(move||{
    let init=(||->Result<(Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;Ok((writer,reader))})();
    let Ok((mut writer,mut reader))=init else {let _=ready.send(false);return;};
    std::thread::Builder::new().name("native-output-read".into()).spawn(move||{while let Some(job)=read_rx.blocking_recv(){let result=handle(&mut reader,&job.request).map_err(|_|ApiError::storage());let _=job.reply.send(result);}}).ok();
    let _=ready.send(true);
-   while let Some(job)=rx.blocking_recv(){let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=events.send(change);}}let _=job.reply.send(result);}
+   let runtime=tokio::runtime::Builder::new_current_thread().build().expect("store executor");
+   runtime.block_on(async {
+    let mut control_run=0;
+    loop {
+     // A busy control lane gets at most eight consecutive jobs while bulk is ready.
+     let job=if control_run>=8 {match bulk_rx.try_recv(){Ok(job)=>Some((job,false)),Err(_)=>None}}else{None};
+     let next=if let Some(job)=job {Some(job)}else{tokio::select!{biased;
+      job=rx.recv(),if !rx.is_closed()||!rx.is_empty()=>job.map(|j|(j,true)),
+      job=bulk_rx.recv(),if !bulk_rx.is_closed()||!bulk_rx.is_empty()=>job.map(|j|(j,false)),
+      else=>break,
+     }};
+     let Some((job,control))=next else{continue;};
+     control_run=if control{control_run+1}else{0};
+     let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());
+     if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=events.send(change);}}
+     let _=job.reply.send(result);
+    }
+   });
   }).map_err(|_|ApiError::storage())?;
   if !ready_rx.await.unwrap_or(false){return Err(ApiError::storage());}
-  let store=Self{writes,reads,credit:Arc::new(Semaphore::new(16*1024*1024))};store.call("recover",json!({})).await?;Ok(store)
+  let store=Self{writes,bulk,reads,credit:Arc::new(Semaphore::new(4*1024*1024)),bulk_credit:Arc::new(Semaphore::new(12*1024*1024)),enqueue:Arc::new(tokio::sync::RwLock::new(()))};store.call("recover",json!({})).await?;Ok(store)
  }
  pub async fn call(&self,op:&str,args:Value)->Result<Value,ApiError>{
+  if op=="barrier" {
+   // Exclude new enqueues while FIFO fences pass through both lanes. Jobs already
+   // awaiting credits are not accepted yet and therefore fall after this barrier.
+   let _gate=self.enqueue.write().await;
+   for tx in [&self.bulk,&self.writes] {
+    let(reply,rx)=oneshot::channel();
+    tx.send(Job{request:Request{op:"barrier".into(),args:Value::Null},reply,_credit:None}).await.map_err(|_|ApiError::storage())?;
+    rx.await.map_err(|_|ApiError::storage())??;
+   }
+   return Ok(json!({}));
+  }
   let bytes=serde_json::to_vec(&args).map_err(|_|ApiError::storage())?.len().max(1);if bytes>4*1024*1024{return Err(ApiError::new("payload_too_large","保存要求が大きすぎます。",413));}
-  let credit=self.credit.clone().acquire_many_owned(bytes as u32).await.map_err(|_|ApiError::storage())?;
-  let (reply,rx)=oneshot::channel();let job=Job{request:Request{op:op.into(),args},reply,_credit:credit};
-  let tx=if op=="output" {&self.reads}else{&self.writes};tx.send(job).await.map_err(|_|ApiError::storage())?;rx.await.map_err(|_|ApiError::storage())?
+  let bulk=op=="append"||op=="pty_exit";
+  let credit=if bulk{&self.bulk_credit}else{&self.credit};
+  let credit=credit.clone().acquire_many_owned(bytes as u32).await.map_err(|_|ApiError::storage())?;
+  let (reply,rx)=oneshot::channel();let job=Job{request:Request{op:op.into(),args},reply,_credit:Some(credit)};
+  let tx=if op=="output" {&self.reads}else if bulk {&self.bulk}else{&self.writes};
+  {let _gate=self.enqueue.read().await;tx.send(job).await.map_err(|_|ApiError::storage())?;}
+  rx.await.map_err(|_|ApiError::storage())?
  }
+
  pub async fn get(&self,table:&str,id:&str)->Result<Option<Value>,ApiError>{let v=self.call("get",json!({"table":table,"id":id})).await?;Ok(if v.is_null(){None}else{Some(v)})}
  pub async fn list(&self,table:&str)->Result<Vec<Value>,ApiError>{Ok(self.call("list",json!({"table":table})).await?.as_array().cloned().unwrap_or_default())}
  pub async fn put(&self,table:&str,value:Value,notification:Option<Value>)->Result<(),ApiError>{self.call("put",json!({"table":table,"value":value,"notification":notification})).await?;Ok(())}
@@ -187,5 +220,26 @@ mod cas_tests {
   assert_eq!(query(&db,"SELECT MAX(sequence) AS n FROM events",&[]).unwrap(),revision);
   assert_eq!(records(&db,"workspaces",Some("w")).unwrap()[0]["title"],"manual");
   assert!(handle(&mut db,&Request{op:"compare_put".into(),args:json!({"table":"workspaces","id":"w","expected":null,"value":{"id":"other"}})}).is_err());
+ }
+}
+
+#[cfg(test)]
+mod lane_tests {
+ use super::*;
+ #[tokio::test]
+ async fn bulk_credit_pressure_does_not_block_control_or_barrier() {
+  let dir=std::env::temp_dir().join(format!("neura-store-lanes-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&dir).unwrap();
+  let(events,_)=broadcast::channel(8);let store=StoreHandle::open(&dir.join("test.sqlite"),events).await.unwrap();
+  // Exhaust only bulk credits, exactly as queued output can do under pressure.
+  let pressure=store.bulk_credit.clone().acquire_many_owned(12*1024*1024).await.unwrap();
+  let producer=store.clone();let pending=tokio::spawn(async move{producer.call("append",json!([{"terminalId":"t","data":"日本語"}])).await});
+  tokio::task::yield_now().await;
+  tokio::time::timeout(std::time::Duration::from_secs(2),store.put("projects",json!({"id":"p"}),None)).await.unwrap().unwrap();
+  tokio::time::timeout(std::time::Duration::from_secs(2),store.call("barrier",json!({}))).await.unwrap().unwrap();
+  assert!(!pending.is_finished());drop(pressure);pending.await.unwrap().unwrap();
+  store.call("barrier",json!({})).await.unwrap();
+  let output=store.call("output",json!({"terminalId":"t","after":0})).await.unwrap();assert_eq!(output["data"],"日本語");
+  let chunks=store.call("output",json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();assert_eq!(chunks["data"],"");assert_eq!(chunks["chunks"],output["chunks"]);assert_eq!(chunks["cursor"],output["cursor"]);
+  drop(store);let _=std::fs::remove_dir_all(dir);
  }
 }
