@@ -84,7 +84,7 @@ impl Diagnostics {
         operation_id: Option<&str>,
         duration_ms: Option<f64>,
     ) {
-        let mut row = json!({"time":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"session":self.session,"event":phase.name()});
+        let mut row = json!({"time":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"session":self.session,"runtime":"rust","event":phase.name()});
         // Fields identify known commands and correlation only; omit arbitrary strings.
         if let Some(op) = operation.filter(|s| {
             s.len() <= 64
