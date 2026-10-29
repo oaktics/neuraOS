@@ -59,6 +59,19 @@ missing lines or duplicates and matching cursor replay. The native sample used
 a debug build while other builds/agents ran. It does **not** establish optimized
 release performance, real Claude throughput, battery life or a fair speedup.
 
+The [native provider launch fixture](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)
+uses the real native daemon and ProviderService with fake Claude/Codex CLIs at
+10/20/32 each. All six cases reached the requested simultaneous active count;
+seven tests including the parent passed, with zero remaining fixture processes.
+Its elapsed times are functional-test timings, not model throughput or a fair
+legacy/native performance comparison. Reconnection here means the UI event
+stream plus output cursor replay, not provider App Server reconnect.
+
+The [Node/Rust/Node migration fixture](architecture-evidence/legacy-native-data-migration-2026-10-29.json)
+checks real daemons against one isolated database, including Unicode output,
+settings, notifications, operation results and task inboxes. It does not apply
+an update to the installed app or switch the real user's LaunchAgent.
+
 [The architecture investigation](architecture-concurrency-energy-2026-10-29.md)
 separates the current integration from proposed UDS/shared-memory transport,
 segmented journals and a separate browser host. Those proposals are not shipped

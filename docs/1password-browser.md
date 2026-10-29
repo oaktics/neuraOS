@@ -31,6 +31,20 @@ The dedicated window is outside browser MCP. Embedded tabs remain automatable: u
 - In an embedded Alloy test form, the input accessibility tree offered the 1Password menu after typing a dummy username. CDP observed the official `inline/inject-content-scripts.js`, `inline/injected.js` and extension isolated execution context. This proves injection, **not** credential suggestions or autofill.
 - A separate sample MV3 extension executed content → service worker → persistent storage across restart and round-tripped to a disposable native host through CEF's standard profile manifest search path. This proves the native messaging transport, **not** 1Password trust acceptance.
 
-Remaining acceptance gates are actual 1Password desktop connection, unlock/lock, suggestions, filling, saving a new/changed test login, and authenticated restart. They require desktop unlock and explicit custom-browser trust. Real desktop connection after the user adds the browser is still being verified; no authenticated fill/save success is claimed here. An unsupported extension API has not been identified as a blocker for these gates. APIs requiring full Chrome tab/window UI remain limited to the dedicated window; the embedded tab alone cannot supply the toolbar popup.
+Remaining acceptance gates are actual 1Password desktop connection, unlock/lock, suggestions, filling, saving a new/changed test login, and authenticated restart. They require desktop unlock and explicit custom-browser trust. A Connected indication after the user adds the browser has been reported, but account sync and authenticated fill/save success remain unverified; see the dated acceptance status below. An unsupported extension API has not been identified as a blocker for these gates. APIs requiring full Chrome tab/window UI remain limited to the dedicated window; the embedded tab alone cannot supply the toolbar popup.
 
 These extension observations are independent of the Rust daemon migration. Native daemon protocol/Swift UI fixtures, signed and notarized release publication, installation/rollback on the real app, and authenticated 1Password acceptance must be recorded separately. Neither a release nor a browser MCP fixture authenticates a vault.
+
+## Desktop acceptance in progress (2026-10-29)
+
+The integration coordinator reports a Connected indication after the user's
+additional-browser registration, but this does not establish account sync,
+unlock, saving or filling. The popup remains at its logo; the official remote
+overview returned HTTP 500 during investigation. These observations do not yet
+prove a single root cause. The local fixture CSP was adjusted and is being
+retested; authenticated acceptance remains incomplete.
+
+Bundle Info.plist normalization has been fixed before signing. The coordinator
+reports status 0 for main/helper raw and Foundation-serialized dynamic signature
+checks. This removes the observed signature-validation failure, not the remaining
+popup or vault acceptance gates. See [signing scope](macos-signing.md).

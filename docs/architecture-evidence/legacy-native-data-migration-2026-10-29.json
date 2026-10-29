@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "recordedDate": "2026-10-29",
+  "scope": "Real legacy Node daemon to Rust daemon to legacy Node daemon using one isolated data directory.",
+  "provenance": {
+    "sourceEvidencePath": "/private/tmp/neura-migration-qKdwe4/evidence.json",
+    "sourceEvidenceSha256": "74c55888f5243b8675f82a902368623da94c2ad4f832ce77acd2eac1c8d97b16",
+    "sourceLogPath": "/tmp/neura-root-migration-final.log",
+    "sourceLogSha256": "53f039d8add309b6f08890caeb8d6eb5c3ce2e6a4e0b66e3452aebb7293fa929",
+    "reviewedSourceCommit": "4ab24c9920982c3bb4dcc91b94aa54d8b94337bb",
+    "harness": "tests/native-rust/migration.test.mjs",
+    "binaryCommitVerification": "Not independently recorded in the source JSON; root reported these runs against the integration checkpoint.",
+    "transformation": "Copied result fields; omitted temporary root/fixture path and token digest. Original evidence unchanged."
+  },
+  "limitations": [
+    "Not installed-app or LaunchAgent migration; no signed-release download/apply tested.",
+    "Seeded task records and real shell PTYs; not live model work."
+  ],
+  "result": {
+    "sequence": [
+      "node",
+      "rust",
+      "node"
+    ],
+    "checks": [
+      "Unicode PTY+cursor/chunks",
+      "project/settings/workspace",
+      "notifications",
+      "agent pending/reports/exact ACK",
+      "durable running recovery",
+      "operation hash/result/conflict/pending_unknown",
+      "native writes read by legacy",
+      "token retained",
+      "strict stop-before-start"
+    ],
+    "ok": true
+  }
+}

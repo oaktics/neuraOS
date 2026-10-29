@@ -14,6 +14,8 @@ UDS binary、shared memory、segmented journal、別browser hostは以下に残�
 
 [旧daemonのHTTP/PTY測定](architecture-evidence/legacy-daemon-pty-2026-10-29.json)と[ネイティブ開発checkpoint](architecture-evidence/native-debug-pty-2026-10-29.json)では、10・20・32個の実PTYへ各1024行の約2KiB出力を流し、HTTP error・行欠落・重複0、Unicode保持、終了後のcursor replay一致を確認した。後者は最適化前debug binary、同時に別build/agentが稼働した単発標本であり、実Claude仕事量・電池寿命・最適化版の公平比較を示さない。開発checkpointには未統合の操作が残るため、この証拠だけでリリース完了にはしない。
 
+実native ProviderServiceからfake Claude／Codexを各10/20/32起動した[並列fixture](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)では、全指定数の同時active、登録・入力・turn event・exit、UI stream切断後のcursor replayを確認した。これは実モデル負荷でも公平な性能比較でもなく、provider App Server再接続の証明ではない。[Node→Rust→Nodeデータ移行](architecture-evidence/legacy-native-data-migration-2026-10-29.json)も隔離DBで成功したが、実installed app／LaunchAgentの更新とは区別する。最適化版idle/load比較とrelease受入は保留。
+
 ## 判断
 
 **推奨はRust/native core＋Swift UI＋薄いprovider adapter＋分離したブラウザ実行環境**。実装コスト、既存資産再利用、移行容易性は性能ランキングから除外する。目的は、PCの資源が許す限り有用な仕事を並列実行し、最大持続throughputとp99応答性を両立させ、CPU・起床・IO・メモリ・energyの管理overheadを最小化すること。4/10/20 activeや同時起動2件などの人為的な製品上限は設けない。20は測定点であり上限ではない。

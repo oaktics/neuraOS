@@ -83,7 +83,7 @@ Workspaceはプロジェクトを用途別にまとめるサイドバーのグ�
 - エクスプローラーのフォルダ名（ルートは上部の名前）を右クリックすると新規ファイル・フォルダを作成できます。各項目の右クリックで名前変更・移動先の指定・複製・ゴミ箱への移動・パスのコピー・Finder表示を行えます。操作はローカルのFileManagerを使用し、既存の移動先への上書き、作業フォルダ外・`.git`・シンボリックリンク経由の変更を拒否します。未保存の編集がある項目とその親は移動・削除できません。名前変更・移動は開いているタブにも反映されます。
 - ファイル編集は1MB以下のUTF-8テキスト。保存時のハッシュ照合で外部更新を検知します。未保存の編集はUI端末へ自動退避し、通常の終了・再起動後に復元します。強制終了時は直近約0.5秒分が失われる可能性があります。
 - Git操作のうちworktree作成・状態取得・差分表示をUIから利用できます。GitHubへのpush・PR作成・PRマージは右サイドバーの「GitHub」から利用できます。commit、ローカルのmergeはターミナルで行います。
-- ブラウザはCEF（Chromium）のネイティブ埋込みです。ページ自体にDaemonの資格情報や端末操作APIを渡しません。[browser MCP](docs/browser-mcp.md)で実タブを操作でき、[拡張機能](docs/browser-extensions.md)は専用のChrome形式ウィンドウから導入します。[1Password](docs/1password-browser.md)は公式Store導入・再起動・content script/menu・host登録まで隔離環境で確認済みですが、実vault認証後の保存・自動入力・desktop trustは未確認です。
+- ブラウザはCEF（Chromium）のネイティブ埋込みです。ページ自体にDaemonの資格情報や端末操作APIを渡しません。[browser MCP](docs/browser-mcp.md)で実タブを操作でき、[拡張機能](docs/browser-extensions.md)は専用のChrome形式ウィンドウから導入します。[1Password](docs/1password-browser.md)は公式Store導入・再起動・content script/menu・host登録まで隔離環境で確認済みですが、desktop連携のConnected表示も報告されています。ただしpopupの不具合が残り、実アカウント同期・保存・自動入力の成功は未確認です。
 
 左サイドバー下部にはCodex／Claudeのアカウント共通の利用枠使用率を小さく表示します。約1分ごとに更新し、ホバーでリセット日時を確認できます。返された枠だけを表示し、取得失敗・未ログイン・情報なしは0%と区別します。2分半以上更新できない値は「更新待ち」に切り替えます。Claudeの取得先はCLIの`/usage`と同じ非公開APIのため、仕様変更時は取得できない場合があります。対応Daemon（`provider.usage`機能）が必要で、旧Daemonには「更新が必要」を表示します。
 

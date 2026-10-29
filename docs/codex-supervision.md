@@ -73,6 +73,8 @@ NEURA_LIVE_CODEX_TEST=1 node --import tsx scripts/native/supervision-smoke.ts
 
 この検証は、先に起動したworktreeのCodexを後から起動したメインがMCPで発見すること、指示の重複排除、子の応答終了後に待機中のメインがtool outputで自動再開すること、Daemon再起動後の履歴読み取りと同一会話の再開を実際のCodexで確認します。モデルの会話履歴はCodex側に保存されます。
 
+2026-10-29の[native ProviderService fixture](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)は実Rust daemonからfake Claude／Codexを各10/20/32起動し、指定数の同時active、登録・入力・turn event・exitとUI event stream再接続後のcursor replayを確認しました。実モデル負荷・provider App Serverの切断再接続・実CLIの相互委任を証明する試験ではありません。[検証checkpoint](development-release.md)で他の結果と区別します。
+
 仕様参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
 ## Claude Codeと相互委任する

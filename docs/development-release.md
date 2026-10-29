@@ -108,7 +108,8 @@ pnpm install --frozen-lockfile
 cargo test --manifest-path crates/native-core/Cargo.toml
 cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
 NEURA_NATIVE_DAEMON="$PWD/crates/native-core/target/release/neura-native-core" \
-  node --test tests/native-rust/protocol.test.mjs tests/native/provider-native-mcp.test.mjs
+  node --test tests/native-rust/protocol.test.mjs tests/native-rust/migration.test.mjs \
+  tests/native/provider-native-mcp.test.mjs tests/native/provider-daemon-parallel.test.mjs
 pnpm typecheck
 pnpm test
 node --test tests/release/*.test.mjs
@@ -124,18 +125,21 @@ node scripts/native/release/smoke.mjs
 
 ## native統合の検証checkpoint（2026-10-29）
 
-[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`f2912e9`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
+[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`4ab24c9`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
 
 | 検証 | 確認した結果 | 証跡／範囲 |
 | --- | --- | --- |
-| Rust core | library 56成功、integration 3成功 | `/tmp/neura-root-fault-complete-tests.log`。子プロセス内の部分再実行を重複加算しない |
+| Rust core | library 59成功、integration 3成功 | `/tmp/neura-root-migration-fault-suite.log`。子プロセス内の部分再実行を重複加算しない |
 | 公開HTTP／MCP／ownership protocol | 20成功、失敗0 | `/tmp/neura-root-final-public-protocol.log`。10/20/32 MCP、共有予約、attach前crash、lifetime lockを含む合成fixture |
+| 実daemon間データ移行 | Node→Rust→Node、1成功 | [保存証拠](architecture-evidence/legacy-native-data-migration-2026-10-29.json)、`/tmp/neura-root-migration-final.log`。同一の隔離DBでUnicode PTY/cursor、設定、通知、pending/reports/exact ACK、復旧状態、operation結果を確認。実LaunchAgent／installed appの更新ではない |
+| native ProviderService並列起動 | Claude／Codexのfake CLI各10/20/32、全7成功 | [保存証拠](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)、`/tmp/neura-root-provider-daemon-parallel.log`。全段階で指定数の同時active、登録、入力、turn event、exit、UI stream再接続/cursor replayを確認。終了後残存プロセス0 |
+| plist署名正規化のrelease回帰 | 13成功 | `/tmp/neura-root-plist-release-tests.log`。正式CI／公証とは別 |
 | 実Codex接続 | 対象integration 1成功 | `/tmp/neura-root-real-codex.log`。root実行報告では実CLIのApp Server起動・`thread/loaded/list`・close/reapのみ。model turn実行や相互委任の実証ではない。テスト自体の実CLI分岐は`NEURA_TEST_CODEX_PATH`指定時のみ |
 | Swift UI | 142成功 | `/tmp/neura-root-swift-all.log` |
 | Swift updater | 18成功 | `/tmp/neura-root-updater18-tests.log`。実LaunchAgent適用とは別 |
 | legacy互換テスト | 全体165件中164成功、1失敗後に対象1件再試験成功 | `/tmp/neura-root-legacy-contract-tests.log`、`/tmp/neura-root-client-capabilities-retest.log`。Swift source列挙漏れの修正後の対象再試験であり、全体を再実行して165成功したとは記さない |
 
-実Claude／fake CLIの並列検証は進行中。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。公式1Password拡張の導入・再起動保持と、ユーザーによるadditional-browser登録後の実desktop接続・保存・自動入力も別の受入である。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
+実モデルを使うClaudeの受入は別途確認する。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。公式1Password拡張の導入・再起動保持、Connected表示、実アカウント同期・保存・自動入力も別の受入である。現在popupのロゴ停止と公式overviewのHTTP 500が報告され、fixture CSP修正後の再試験中であり、Connectedだけでは受入完了としない。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
 
 ## Chromium browser
 
