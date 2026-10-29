@@ -94,6 +94,12 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.equal(JSON.parse((await tool('workspace_create',createArgs)).content[0].text).id,own.id);
     assert.equal(d.store.state().workspaces.filter(w=>w.id===own.id).length,1);
     assert.equal(d.store.state().terminals.length,beforeTerminals,'startup provider must never start an agent for workspace_create');
+    const oldClaude=process.env.NEURA_CLAUDE_PATH;process.env.NEURA_CLAUDE_PATH=probe;
+    try{
+      const started=JSON.parse((await tool('task_start',{operationId:randomUUID(),workspaceId:workspace.id,provider:'claude',prompt:'queued'})).content[0].text);
+      assert.equal(started.registrationPending,true);assert.match(started.recovery,/startup confirmation/);
+      assert.match(started.recovery,/Do not create another worker/);
+    }finally{if(oldClaude===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=oldClaude;}
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
   }finally{child.kill();lines.close();await d.app.close();if(old===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=old;await rm(root,{recursive:true,force:true});}
 });
