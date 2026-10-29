@@ -33,6 +33,7 @@ import ChromiumBridge
 struct NeuraOSApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @State private var model = AppModel()
+    @State private var daemonRestart = DaemonRestart()
     @StateObject private var updater = AppUpdater()
     @Environment(\.openWindow) private var openWindow
     init() {
@@ -52,6 +53,9 @@ struct NeuraOSApp: App {
             RootView().environment(model).frame(minWidth: 900, minHeight: 580)
                 .sheet(isPresented: $updater.presented) {AppUpdateView(updater: updater)}
                 .task {await updater.bootstrap()}
+                .alert("Daemon", isPresented: Binding(get: {daemonRestart.message != nil}, set: {if !$0 {daemonRestart.message = nil}})) {
+                    Button("OK") {daemonRestart.message = nil}
+                } message: {Text(daemonRestart.message ?? "")}
         }
         .defaultSize(width: 1380, height: 880)
         .windowStyle(.hiddenTitleBar)
@@ -60,7 +64,9 @@ struct NeuraOSApp: App {
                 Button("今おかしかった：診断情報を保存…") {DiagnosticReport.save()}
             }
             CommandGroup(after: .appInfo) {
-                Button("アップデートを確認…") {updater.check()}.disabled(updater.busy)
+                Button("アップデートを確認…") {updater.check()}.disabled(updater.busy || daemonRestart.busy)
+                Button(daemonRestart.busy ? "Daemonを再起動中…" : "Daemonを再起動…") {openWindow(id: "main"); daemonRestart.request(model: model)}
+                    .disabled(daemonRestart.busy || updater.busy)
             }
             CommandGroup(replacing: .newItem) {
                 Button("新しいWorkspace…") {model.showNewSpace = true}.keyboardShortcut("n", modifiers: [.command, .shift])

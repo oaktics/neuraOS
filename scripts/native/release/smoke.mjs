@@ -1,3 +1,4 @@
+import {uiFailureSummary} from './ui-phase-summary.mjs';
 import {smokeRuntime} from './runtime-smoke.mjs';
 import {mkdtemp, rm, mkdir, cp, readFile, writeFile, access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -86,7 +87,7 @@ try {
     spawnSync('/usr/bin/sample', [String(ui.pid), '1', '-file', join(data, 'ui-timeout.sample.txt')], {timeout: 5000});
     stopUI();
   }, 30000);
-  try {const [code, signal] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: code=${code} signal=${signal}; evidence=${data}`);}
+  try {const [code, signal] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: code=${code} signal=${signal}; ${JSON.stringify(await uiFailureSummary(data))}`);}
   finally {clearTimeout(uiTimeout); stopUI();}
   const diagnostic = JSON.parse(await readFile(report, 'utf8'));
   if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
