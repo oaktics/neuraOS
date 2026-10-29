@@ -37,5 +37,6 @@ exit 15
         .await
         .unwrap();
     assert!(read_codex_usage(Some(path)).await.is_err());
-    tokio::fs::remove_dir_all(dir).await.unwrap();
+    // The runtime closes the helper pipe after this function returns. Keep its
+    // lifetime lock inode until then; the isolated test profile is disposable.
 }
