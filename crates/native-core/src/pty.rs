@@ -13,16 +13,60 @@ use std::{
     },
 };
 use tokio::sync::{broadcast, mpsc};
+type NativeChild = Box<dyn portable_pty::Child + Send + Sync>;
+static CANCEL_REAPER: std::sync::OnceLock<Result<std::sync::mpsc::Sender<NativeChild>, String>> =
+    std::sync::OnceLock::new();
+fn cancel_reaper() -> Result<std::sync::mpsc::Sender<NativeChild>, ApiError> {
+    CANCEL_REAPER
+        .get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<NativeChild>();
+            std::thread::Builder::new()
+                .name("native-cancel-reaper".into())
+                .stack_size(128 * 1024)
+                .spawn(move || {
+                    while let Ok(mut child) = rx.recv() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(tx)
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|_| ApiError::storage())
+}
+struct ChildGuard {
+    child: Option<NativeChild>,
+    reaper: std::sync::mpsc::Sender<NativeChild>,
+}
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.take() {
+            let _ = self.reaper.send(child);
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct PtyExit {
     pub terminal_id: String,
     pub exit_code: u32,
 }
 #[derive(Clone)]
-enum Ownership{Local(crate::process_tree::ProcessTree),Shared(crate::process_tree::ProcessReservation)}
-impl Ownership{async fn stop(&self)->Result<(),String>{match self{Self::Local(tree)=>tree.stop().await,Self::Shared(lease)=>lease.stop().await}}}
+enum Ownership {
+    Local(crate::process_tree::ProcessTree),
+    Shared(crate::process_tree::ProcessReservation),
+}
+impl Ownership {
+    async fn stop(&self) -> Result<(), String> {
+        match self {
+            Self::Local(tree) => tree.stop().await,
+            Self::Shared(lease) => lease.stop().await,
+        }
+    }
+}
 struct Session {
-    owner:Ownership,
+    owner: Ownership,
     master: Box<dyn MasterPty + Send>,
     fd: RawFd,
     pid: u32,
@@ -42,7 +86,7 @@ struct Output {
     exit_code: Option<u32>,
 }
 struct Inner {
-    supervised:bool,
+    supervised: bool,
     sessions: Mutex<HashMap<String, Session>>,
     tokens: Mutex<HashMap<usize, String>>,
     dirty: Mutex<HashSet<String>>,
@@ -121,9 +165,14 @@ fn decode(s: &mut Session, bytes: &[u8], finish: bool) -> String {
     text
 }
 impl PtyRuntime {
-    pub fn new(store: StoreHandle) -> Result<Self, ApiError> {Self::create(store,false)}
-    pub fn new_supervised(store:StoreHandle)->Result<Self,ApiError>{Self::create(store,true)}
-    fn create(store:StoreHandle,supervised:bool)->Result<Self,ApiError>{
+    pub fn new(store: StoreHandle) -> Result<Self, ApiError> {
+        Self::create(store, false)
+    }
+    pub fn new_supervised(store: StoreHandle) -> Result<Self, ApiError> {
+        Self::create(store, true)
+    }
+    fn create(store: StoreHandle, supervised: bool) -> Result<Self, ApiError> {
+        cancel_reaper()?;
         let mut poll = Poll::new().map_err(|_| ApiError::storage())?;
         let registry = poll
             .registry()
@@ -342,22 +391,99 @@ impl PtyRuntime {
         env: HashMap<String, String>,
     ) -> Result<u32, ApiError> {
         self.check_healthy()?;
-        let shared=if self.inner.supervised{Some(crate::process_tree::reserve().await.map_err(|_|ApiError::new("process_supervisor_failed","プロセス監督に接続できません。",503))?)}else{None};
-        let owner_token=shared.as_ref().map(|v|v.token().to_owned()).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
-        let program=program.to_owned();let cwd=cwd.to_owned();let runtime=tokio::runtime::Handle::current();
-        let (master,mut child,owner,pid,fd)=tokio::task::spawn_blocking(move||->Result<_,ApiError>{
-          let pair=native_pty_system().openpty(PtySize{rows:30,cols:100,pixel_width:0,pixel_height:0}).map_err(|_|ApiError::new("terminal_spawn_failed","PTYを作成できません。",500))?;
-          let mut command=CommandBuilder::new(program);command.args(args);command.cwd(cwd);command.env_clear();for(k,v)in env{command.env(k,v);}command.env(crate::process_tree::OWNER_ENV,&owner_token);
-          let mut child=pair.slave.spawn_command(command).map_err(|_|ApiError::new("terminal_spawn_failed","CLIを起動できません。",500))?;drop(pair.slave);
-          let pid=child.process_id().ok_or_else(ApiError::storage)?;
-          let owner=match shared{Some(lease)=>{runtime.block_on(lease.attach(pid)).map_err(|_|ApiError::new("process_monitor_failed","CLIの所有確認に失敗しました。",500))?;Ownership::Shared(lease)},None=>match crate::process_tree::ProcessTree::new_with_token(pid,owner_token){Ok(tree)=>Ownership::Local(tree),Err(_)=>{let _=child.kill();let _=child.wait();return Err(ApiError::new("process_monitor_failed","CLIの所有確認に失敗しました。",500));}}};
-          let fd=pair.master.as_raw_fd().ok_or_else(ApiError::storage)?;unsafe{libc::fcntl(fd,libc::F_SETFL,libc::fcntl(fd,libc::F_GETFL)|libc::O_NONBLOCK);}
-          Ok((pair.master,child,owner,pid,fd))
-        }).await.map_err(|_|ApiError::storage())??;
+        let shared = if self.inner.supervised {
+            Some(crate::process_tree::reserve().await.map_err(|_| {
+                ApiError::new(
+                    "process_supervisor_failed",
+                    "プロセス監督に接続できません。",
+                    503,
+                )
+            })?)
+        } else {
+            None
+        };
+        let owner_token = shared
+            .as_ref()
+            .map(|v| v.token().to_owned())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let reaper = cancel_reaper()?;
+        let program = program.to_owned();
+        let cwd = cwd.to_owned();
+        let runtime = tokio::runtime::Handle::current();
+        let (master, mut child, owner, pid, fd) =
+            tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+                let pair = native_pty_system()
+                    .openpty(PtySize {
+                        rows: 30,
+                        cols: 100,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(|_| {
+                        ApiError::new("terminal_spawn_failed", "PTYを作成できません。", 500)
+                    })?;
+                let mut command = CommandBuilder::new(program);
+                command.args(args);
+                command.cwd(cwd);
+                command.env_clear();
+                for (k, v) in env {
+                    command.env(k, v);
+                }
+                command.env(crate::process_tree::OWNER_ENV, &owner_token);
+                let child = pair.slave.spawn_command(command).map_err(|_| {
+                    ApiError::new("terminal_spawn_failed", "CLIを起動できません。", 500)
+                })?;
+                let child = ChildGuard {
+                    child: Some(child),
+                    reaper,
+                };
+                drop(pair.slave);
+                let pid = child
+                    .child
+                    .as_ref()
+                    .unwrap()
+                    .process_id()
+                    .ok_or_else(ApiError::storage)?;
+                let owner = match shared {
+                    Some(lease) => {
+                        runtime.block_on(lease.attach(pid)).map_err(|_| {
+                            ApiError::new(
+                                "process_monitor_failed",
+                                "CLIの所有確認に失敗しました。",
+                                500,
+                            )
+                        })?;
+                        Ownership::Shared(lease)
+                    }
+                    None => {
+                        match crate::process_tree::ProcessTree::new_with_token(pid, owner_token) {
+                            Ok(tree) => Ownership::Local(tree),
+                            Err(_) => {
+                                return Err(ApiError::new(
+                                    "process_monitor_failed",
+                                    "CLIの所有確認に失敗しました。",
+                                    500,
+                                ));
+                            }
+                        }
+                    }
+                };
+                let fd = pair.master.as_raw_fd().ok_or_else(ApiError::storage)?;
+                unsafe {
+                    libc::fcntl(
+                        fd,
+                        libc::F_SETFL,
+                        libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+                    );
+                }
+                Ok((pair.master, child, owner, pid, fd))
+            })
+            .await
+            .map_err(|_| ApiError::storage())??;
         let token = Token(self.inner.sequence.fetch_add(1, Ordering::Relaxed));
         let mut session = Session {
             master,
-            owner:owner.clone(),
+            owner: owner.clone(),
             fd,
             pid,
             token,
@@ -381,20 +507,36 @@ impl PtyRuntime {
         let _ = self.inner.waker.wake();
         let inner = self.inner.clone();
         let terminal_id = id.to_owned();
-        let runtime=tokio::runtime::Handle::current();
-        std::thread::Builder::new()
+        let runtime = tokio::runtime::Handle::current();
+        let reaper_started = std::thread::Builder::new()
             .name("native-pty-exit".into())
             .stack_size(128 * 1024)
             .spawn(move || {
-                let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
-                if runtime.block_on(owner.stop()).is_err(){inner.fault.store(true,Ordering::Release);inner.sessions_changed.notify_waiters();}
+                let result = child.child.as_mut().unwrap().wait();
+                let code = result.as_ref().map(|s| s.exit_code()).unwrap_or(1);
+                if result.is_ok() {
+                    child.child.take();
+                }
+                if runtime.block_on(owner.stop()).is_err() {
+                    inner.fault.store(true, Ordering::Release);
+                    inner.sessions_changed.notify_waiters();
+                }
                 if let Some(s) = inner.sessions.lock().unwrap().get_mut(&terminal_id) {
                     s.exit_code = Some(code);
                 }
                 inner.dirty.lock().unwrap().insert(terminal_id);
                 let _ = inner.waker.wake();
-            })
-            .map_err(|_| ApiError::storage())?;
+            });
+        if reaper_started.is_err() {
+            if let Some(session) = self.inner.sessions.lock().unwrap().remove(id) {
+                let _ = self.inner.registry.deregister(&mut SourceFd(&session.fd));
+            }
+            self.inner.tokens.lock().unwrap().remove(&token.0);
+            self.inner.dirty.lock().unwrap().remove(id);
+            self.inner.pressured.lock().unwrap().remove(id);
+            self.inner.sessions_changed.notify_waiters();
+            return Err(ApiError::storage());
+        }
         Ok(pid)
     }
     pub async fn input(&self, id: &str, data: &str) -> Result<(), ApiError> {
@@ -446,11 +588,42 @@ impl PtyRuntime {
             .map_err(|_| ApiError::storage())?;
         Ok(())
     }
-    pub async fn stop(&self,id:&str)->Result<(),ApiError>{
-      let owner=self.inner.sessions.lock().unwrap().get(id).map(|s|s.owner.clone());
-      if let Some(owner)=owner{owner.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","CLI子孫の終了を確認できません。",500))?;}Ok(())
+    pub async fn stop(&self, id: &str) -> Result<(), ApiError> {
+        let owner = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|s| s.owner.clone());
+        if let Some(owner) = owner {
+            owner.stop().await.map_err(|_| {
+                ApiError::new(
+                    "process_cleanup_failed",
+                    "CLI子孫の終了を確認できません。",
+                    500,
+                )
+            })?;
+        }
+        Ok(())
     }
-    pub fn check_healthy(&self)->Result<(),ApiError>{if self.inner.fault.load(Ordering::Acquire){return Err(ApiError::new("terminal_runtime_failed","PTY保存または所有プロセスの処理に失敗しました。",503));}if self.inner.closed.load(Ordering::Acquire){return Err(ApiError::new("terminal_runtime_closed","PTYは終了処理中です。",503));}Ok(())}
+    pub fn check_healthy(&self) -> Result<(), ApiError> {
+        if self.inner.fault.load(Ordering::Acquire) {
+            return Err(ApiError::new(
+                "terminal_runtime_failed",
+                "PTY保存または所有プロセスの処理に失敗しました。",
+                503,
+            ));
+        }
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(ApiError::new(
+                "terminal_runtime_closed",
+                "PTYは終了処理中です。",
+                503,
+            ));
+        }
+        Ok(())
+    }
     pub async fn shutdown(&self) -> Result<(), ApiError> {
         let ids: Vec<_> = self
             .inner
@@ -460,8 +633,8 @@ impl PtyRuntime {
             .keys()
             .cloned()
             .collect();
-        let results=futures_util::future::join_all(ids.iter().map(|id|self.stop(id))).await;
-        let stop_failed=results.iter().any(Result::is_err);
+        let results = futures_util::future::join_all(ids.iter().map(|id| self.stop(id))).await;
+        let stop_failed = results.iter().any(Result::is_err);
         let drain = async {
             loop {
                 let changed = self.inner.sessions_changed.notified();
@@ -492,7 +665,7 @@ impl PtyRuntime {
             self.inner.store.call("barrier", json!({})).await?;
             Ok(())
         };
-        let drained=tokio::time::timeout(std::time::Duration::from_secs(15), drain)
+        let drained = tokio::time::timeout(std::time::Duration::from_secs(15), drain)
             .await
             .map_err(|_| {
                 ApiError::new(
@@ -501,6 +674,83 @@ impl PtyRuntime {
                     500,
                 )
             })?;
-        if stop_failed{return Err(ApiError::new("process_cleanup_failed","CLI子孫の終了を確認できません。",500));}drained
+        if stop_failed {
+            return Err(ApiError::new(
+                "process_cleanup_failed",
+                "CLI子孫の終了を確認できません。",
+                500,
+            ));
+        }
+        drained
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    fn child() -> (Box<dyn MasterPty + Send>, ChildGuard, u32) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("/bin/sleep");
+        command.arg("30");
+        let child = pair.slave.spawn_command(command).unwrap();
+        let pid = child.process_id().unwrap();
+        drop(pair.slave);
+        (
+            pair.master,
+            ChildGuard {
+                child: Some(child),
+                reaper: cancel_reaper().unwrap(),
+            },
+            pid,
+        )
+    }
+    async fn reaped(pid: u32) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if unsafe { libc::kill(pid as i32, 0) } != 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn cancelled_blocking_spawn_output_and_failed_attach_are_reaped() {
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let job = tokio::task::spawn_blocking(move || {
+            let (master, child, pid) = child();
+            pid_tx.send(pid).unwrap();
+            wait.recv().unwrap();
+            (master, child)
+        });
+        let pid = pid_rx.await.unwrap();
+        job.abort();
+        drop(job);
+        release.send(()).unwrap();
+        reaped(pid).await;
+        let pid = tokio::task::spawn_blocking(|| {
+            let (_master, _guard, pid) = child();
+            assert!(
+                crate::process_tree::ProcessTree::new_with_token(pid, "invalid".into()).is_err()
+            );
+            pid
+        })
+        .await
+        .unwrap();
+        reaped(pid).await;
     }
 }

@@ -1536,24 +1536,21 @@ async fn start_setup(
         let result = async {
             use std::process::Stdio;
             use tokio::io::AsyncReadExt;
-            let mut child = tokio::process::Command::new(
-                std::env::current_exe().map_err(|_| ApiError::storage())?,
-            )
-            .arg("provider-host")
-            .arg("/bin/bash")
+            let lease=crate::process_tree::reserve().await.map_err(|_|ApiError::new("process_supervisor_failed","プロセス監督に接続できません。",503))?;
+            let mut child = tokio::process::Command::new("/bin/bash")
+            .env(crate::process_tree::OWNER_ENV,lease.token())
             .arg(path)
             .current_dir(&root)
             .env("NEURA_PROJECT_ROOT", text(&p, "path")?)
             .env("NEURA_WORKTREE_PATH", &root)
-            .stdin(Stdio::piped())
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
             .map_err(|_| ApiError::new("setup_failed", "setup scriptを起動できません。", 500))?;
-            // Only the host keeps this pipe. Dropping this task (or the daemon dying)
-            // produces EOF; the host remains alive to terminate and reap descendants.
-            let mut lease = child.stdin.take();
+            lease.attach(child.id().ok_or_else(ApiError::storage)?).await.map_err(|_|ApiError::new("process_monitor_failed","setupの所有確認ができません。",500))?;
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
             async fn read(
                 mut stream: impl tokio::io::AsyncRead + Unpin,
@@ -1604,7 +1601,7 @@ async fn start_setup(
             let until = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
             let mut last = tokio::time::Instant::now();
             let status={let completed = async {
-                while let Some(bytes) = rx.recv().await {
+                let consume=async {while let Some(bytes) = rx.recv().await {
                     output.push_str(&bytes);
                     if output.len() > 65536 {
                         let mut cut = output.len() - 65536;
@@ -1623,13 +1620,15 @@ async fn start_setup(
                         last = tokio::time::Instant::now();
                     }
                 }
-                child.wait().await.map_err(|_| ApiError::storage())
+                Ok::<(),ApiError>(())};
+                let reap=async{let status=child.wait().await.map_err(|_|ApiError::storage())?;lease.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","setup子孫の終了を確認できません。",500))?;Ok::<_,ApiError>(status)};
+                let(_,status)=tokio::try_join!(consume,reap)?;Ok(status)
             };
             tokio::pin!(completed);
             let status=tokio::select!{value=&mut completed=>Some(value),_=cancelled.changed()=>None,_=tokio::time::sleep_until(until)=>None};
-            match status{Some(value)=>value,None=>{drop(lease.take());let drained=tokio::time::timeout(Duration::from_secs(10),&mut completed).await;match drained{Ok(Err(e))=>Err(e),Ok(Ok(_))=>Err(ApiError::new("setup_cancelled","setup scriptを中断しました。",500)),Err(_)=>Err(ApiError::new("setup_stop_timeout","setup終了を確認できません。",500))}}}
+            match status{Some(value)=>value,None=>{let stopped=lease.stop().await;let drained=tokio::time::timeout(Duration::from_secs(10),&mut completed).await;if stopped.is_err(){return Err(ApiError::new("process_cleanup_failed","setup子孫の終了を確認できません。",500));}match drained{Ok(Err(e))=>Err(e),Ok(Ok(_))=>Err(ApiError::new("setup_cancelled","setup scriptを中断しました。",500)),Err(_)=>Err(ApiError::new("setup_stop_timeout","setup終了を確認できません。",500))}}}
             };
-            drop(lease);a.abort();b.abort();let status=status?;
+            a.abort();b.abort();let status=status?;
             if !status.success() {
                 return Err(ApiError::new(
                     "setup_failed",
