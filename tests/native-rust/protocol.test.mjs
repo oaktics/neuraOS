@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {createServer} from 'node:net';
 import {request as httpRequest} from 'node:http';
+import WebSocket from 'ws';
 import {randomUUID} from 'node:crypto';
 import {setTimeout as sleep} from 'node:timers/promises';
 const exec=promisify(execFile);
@@ -22,7 +23,7 @@ async function fixture(){
  const start=async()=>{logs='';child=spawn(binary,[],{cwd:root,env:{...process.env,NEURA_DEV_DATA_DIR:data,NEURA_DEV_PORT:String(port)},stdio:['ignore','pipe','pipe'],detached:true});child.stdout.on('data',b=>logs=(logs+b).slice(-8000));child.stderr.on('data',b=>logs=(logs+b).slice(-8000));exit=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));let spawnError;child.once('error',e=>spawnError=e);for(let i=0;i<200;i++){if(spawnError)throw spawnError;if(child.exitCode!==null)throw Error(`Daemon exited ${logs}`);try{token=(await readFile(join(data,'daemon-token'),'utf8')).trim();const r=await request('/v1/state');if(r.status===200)return;}catch{}await sleep(50);}throw Error('Daemon startup timed out');};
  const stop=async()=>{if(!child||child.exitCode!==null)return;child.kill('SIGTERM');let timer;const ended=await Promise.race([exit,new Promise(r=>timer=setTimeout(()=>r(null),10000))]);clearTimeout(timer);if(!ended){process.kill(-child.pid,'SIGKILL');await exit;throw Error('Daemon shutdown timed out');}assert.equal(ended.code,0,logs);};
  try{await start();}catch(e){failure=true;try{await stop();}catch{}throw e;}
- return {root,data,repo,git,request,command,start,stop,async close(error){failure||=Boolean(error);try{await stop();}finally{if(failure)console.error(`Native fixture retained: ${root}`);else await rm(root,{recursive:true,force:true});}}};
+ return {root,data,repo,git,request,command,start,stop,stream(){return new WebSocket(base.replace('http:','ws:')+'/v1/stream',{headers:{authorization:`Bearer ${token}`}});},async crash(){child.kill('SIGKILL');await exit;},async close(error){failure||=Boolean(error);try{await stop();}finally{if(failure)console.error(`Native fixture retained: ${root}`);else await rm(root,{recursive:true,force:true});}}};
 }
 async function success(promise){const r=await promise;assert.equal(r.status,200,JSON.stringify(r.value));return r.value;}
 async function eventually(check){for(let i=0;i<100;i++){if(await check())return;await sleep(30);}assert.fail('Expected state did not arrive');}
@@ -75,4 +76,21 @@ test('native daemon keeps ordinary folders and folderless projects distinct',{ti
   const latest=await success(f.request('/v1/state'));const free=latest.workspaces.find(w=>w.projectId===scratch.id);assert.equal(free.kind,'scratch');
   assert.equal((await f.request(`/v1/workspaces/${free.id}/files`)).value.error,'folder_required');
  }catch(e){failure=e;throw e;}finally{await f.close(failure);}
+});
+
+
+test('native stream wakes on durable state, reconnects, and closes during daemon shutdown',{timeout:30000},async()=>{
+ const f=await fixture();let failure;const sockets=[];
+ const connect=async()=>{const socket=f.stream();sockets.push(socket);const messages=[];socket.on('message',bytes=>messages.push(JSON.parse(bytes)));await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});await eventually(async()=>messages.some(m=>m.type==='ready'));return {socket,messages};};
+ try{
+  const first=await connect();const project=await success(f.command({type:'project.add',path:f.repo}));
+  await eventually(async()=>first.messages.some(m=>m.type==='changed'&&m.state));
+  assert.ok((await success(f.request('/v1/state'))).projects.some(p=>p.id===project.id));
+  // Let the coalescer finish before checking healthy idle traffic.
+  await sleep(100);const count=first.messages.length;await sleep(400);assert.equal(first.messages.length,count);
+  first.socket.terminate();const second=await connect();assert.equal(second.messages[0].type,'ready');
+  let closed=false;second.socket.once('close',()=>closed=true);await f.stop();await eventually(async()=>closed);
+  await f.start();const op=randomUUID(),command={type:'project.create',name:'Crash replay'};const created=await success(f.command(command,op));
+  await f.crash();await f.start();assert.deepEqual(await success(f.command(command,op)),created,'ACKed operation survives abrupt daemon death');
+ }catch(e){failure=e;throw e;}finally{sockets.forEach(s=>s.terminate());await f.close(failure);}
 });
