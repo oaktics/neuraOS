@@ -65,7 +65,7 @@ node scripts/native/release/package.mjs
 NEURA_NOTARY_PROFILE=neura-local node scripts/native/signing/notarize.mjs
 ```
 
-公証がタイムアウトした場合、Apple側の処理が中断されたとは限らない。表示されたsubmission IDを使い`xcrun notarytool info <ID> --keychain-profile neura-local`で状態を確認する。ZIPにはstapleできないため、公証チケットを付けたappからZIPを作り直す。
+公証がタイムアウトした場合、Apple側の処理が中断されたとは限らない。submission IDは待機前に表示し、appの隣の`neuraOS.app.notarization.json`にも保存する。`xcrun notarytool info <ID> --keychain-profile neura-local`で状態を確認する。Acceptedになったら同じappへ`xcrun stapler staple`・`xcrun stapler validate`を行い、`codesign --verify --deep --strict`と`spctl --assess --type execute`で確認する。ZIPにはstapleできないため、公証チケットを付けたappからZIPを作り直す。
 
 署名・公証の成功とKeychainの実機確認は別々に行う。証明書付きのビルドを起動して一度許可し、コードを変更して再ビルド・再起動してもSafe Storageの確認が繰り返されず、ログイン状態が保たれることを確認する。普段のアプリでの確認には作業保存後の再起動が必要。
 

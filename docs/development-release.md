@@ -51,7 +51,9 @@ Node.js、tsx、Daemon、依存パッケージとネイティブPTYをアプリ�
 
 ### 追加料金なしで待ち時間を減らす選択肢
 
-2026-10-29時点の比較。直近の[release実行](https://github.com/oaktics/neuraOS/actions/runs/40811010465)は約8分37秒で、Swiftテスト2分20秒、Releaseビルド1分49秒、ZIP圧縮34秒・artifact upload11秒だった。公証導入前の実測であり、公証待ち時間は含まない。キャッシュ追加後の短縮幅はCIで別途測る。
+2026-10-29時点の比較。直近の[release実行](https://github.com/oaktics/neuraOS/actions/runs/40811010465)は約8分37秒で、Swiftテスト2分20秒、Releaseビルド1分49秒、ZIP圧縮34秒・artifact upload11秒だった。公証導入前の実測であり、公証待ち時間は含まない。
+
+PR #130では、[キャッシュ作成時](https://github.com/oaktics/neuraOS/actions/runs/40830977478)8分37秒から[キャッシュ利用時](https://github.com/oaktics/neuraOS/actions/runs/40832029850)5分46秒へ約33%短縮した。Swiftテストは2分12秒→1分4秒、Releaseビルドは1分59秒→57秒。Swiftソースに変更がない場合の実測であり、ソース変更時や公証待ちを含む配布全体の時間を保証するものではない。
 
 | 方式 | 追加料金なしの範囲 | neuraOSへの適合 |
 | --- | --- | --- |

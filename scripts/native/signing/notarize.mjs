@@ -1,5 +1,5 @@
 import {execFileSync, spawnSync} from 'node:child_process';
-import {mkdtempSync, rmSync} from 'node:fs';
+import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 
@@ -17,9 +17,18 @@ if (details.status !== 0 || !details.stderr.includes('Authority=Developer ID App
 const temporary = mkdtempSync(join(tmpdir(), 'neura-notary-'));
 try {
   const archive = join(temporary, 'neuraOS.zip');
+  console.log('Creating notarization archive…');
   run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, archive]);
-  const result = JSON.parse(execFileSync('xcrun', ['notarytool', 'submit', archive, ...auth,
-    '--wait', '--timeout', '30m', '--output-format', 'json'], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']}));
+  console.log('Uploading to Apple…');
+  const submitted = JSON.parse(execFileSync('xcrun', ['notarytool', 'submit', archive, ...auth,
+    '--output-format', 'json'], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']}));
+  if (!submitted.id) throw new Error('Apple did not return a submission ID');
+  // Record the ID before waiting: a timeout does not cancel Apple's work.
+  writeFileSync(`${app}.notarization.json`, JSON.stringify(submitted, null, 2) + '\n');
+  console.log(`Submitted ${submitted.id}; waiting for Apple (up to 30 minutes).`);
+  const result = JSON.parse(execFileSync('xcrun', ['notarytool', 'wait', submitted.id, ...auth,
+    '--timeout', '30m', '--output-format', 'json'], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit']}));
+  writeFileSync(`${app}.notarization.json`, JSON.stringify(result, null, 2) + '\n');
   console.log(`Notarization ${result.id}: ${result.status}`);
   if (result.status !== 'Accepted') {
     if (result.id) run('xcrun', ['notarytool', 'log', result.id, ...auth]);
