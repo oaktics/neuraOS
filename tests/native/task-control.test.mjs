@@ -77,9 +77,10 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   assert.deepEqual(bounded.pending.map(m=>m.text),['current design','keep this work']);
   assert.deepEqual(await tool('task_instruction',replacement),changed);
   const full=(await tool('task_list')).value;assert.equal(full.agents.length,1);
-  const lite=(await tool('task_list',{taskIds:[task.id],summaryOnly:true,limit:10})).value;
+  const lite=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,limit:10})).value;
   assert.equal(lite.agents.length,1);assert.equal(lite.agents[0].pendingCount,2);assert.equal(lite.agents[0].pending,undefined);
-  const delta=(await tool('task_list',{taskIds:[task.id],summaryOnly:true,sinceRevision:lite.revision,sinceEpoch:lite.epoch})).value;assert.equal(delta.unchanged,true);assert.deepEqual(delta.agents,[]);
+  for(const filter of [{workspaceId:randomUUID()},{workspaceId:workspace.id,status:'idle'}])assert.deepEqual((await tool('task_list',{...filter,taskIds:[task.id],summaryOnly:true})).value.agents,[]);
+  const delta=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,sinceRevision:lite.revision,sinceEpoch:lite.epoch})).value;assert.equal(delta.unchanged,true);assert.deepEqual(delta.agents,[]);
   mcp.stdin.end();assert.equal(await mcpEnd,0);mcp=null;
   await stop();await start();
   const recovered=(await request('/v1/agents')).agents.find(a=>a.id===task.id);
