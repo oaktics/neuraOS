@@ -30,6 +30,7 @@ import Foundation
         var terminals: [String]?
         var browser: Bool?
     }
+    let nativeId = UUID().uuidString.lowercased()
     private(set) var supported = false
     private(set) var connected = false
     private let endpoint: URL
@@ -62,6 +63,7 @@ import Foundation
         while !Task.isCancelled {
             do {
                 var url = URLComponents(url: endpoint.appendingPathComponent("v1/stream"), resolvingAgainstBaseURL: false)!
+                url.queryItems = [URLQueryItem(name: "nativeId", value: nativeId)]
                 url.scheme = endpoint.scheme == "https" ? "wss" : "ws"
                 var request = URLRequest(url: url.url!)
                 let token = try String(contentsOf: dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)

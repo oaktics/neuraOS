@@ -13,7 +13,7 @@ struct BrowserAutomationError: Error {let code: String}
     private var owners: [String: String] = [:]
     private var failures: [String: String] = [:]
     private var results: [[String: Any]] = []
-    private let nativeId = UUID().uuidString.lowercased()
+    private var nativeId: String {api.events.nativeId}
     private var loop: Task<Void, Never>?
     private var heartbeat: Task<Void, Never>?
     private var eventObserver: UUID?
@@ -99,7 +99,7 @@ struct BrowserAutomationError: Error {let code: String}
             let token = try String(contentsOf: api.dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let batch = try BrowserResultBatch.make(nativeId:nativeId,tabs:tabs,results:results,stream:api.events.supported)
+            let batch = try BrowserResultBatch.make(nativeId:nativeId,tabs:tabs,results:results,stream:api.events.connected)
             request.httpBody = batch.data
             let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {throw BrowserAutomationError(code: "browser_disconnected")}
