@@ -122,6 +122,21 @@ node scripts/native/release/smoke.mjs
 
 パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱のネイティブDaemon／SQLite／PTYを実行する。ソースチェックアウトや開発環境の`node_modules`に依存しないことを確認する。Node.jsはこの試験を起動する開発ツールとして使用する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
 
+## native統合の検証checkpoint（2026-10-29）
+
+[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`f2912e9`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
+
+| 検証 | 確認した結果 | 証跡／範囲 |
+| --- | --- | --- |
+| Rust core | library 56成功、integration 3成功 | `/tmp/neura-root-fault-complete-tests.log`。子プロセス内の部分再実行を重複加算しない |
+| 公開HTTP／MCP／ownership protocol | 20成功、失敗0 | `/tmp/neura-root-final-public-protocol.log`。10/20/32 MCP、共有予約、attach前crash、lifetime lockを含む合成fixture |
+| 実Codex接続 | 対象integration 1成功 | `/tmp/neura-root-real-codex.log`。root実行報告では実CLIのApp Server起動・`thread/loaded/list`・close/reapのみ。model turn実行や相互委任の実証ではない。テスト自体の実CLI分岐は`NEURA_TEST_CODEX_PATH`指定時のみ |
+| Swift UI | 142成功 | `/tmp/neura-root-swift-all.log` |
+| Swift updater | 18成功 | `/tmp/neura-root-updater18-tests.log`。実LaunchAgent適用とは別 |
+| legacy互換テスト | 全体165件中164成功、1失敗後に対象1件再試験成功 | `/tmp/neura-root-legacy-contract-tests.log`、`/tmp/neura-root-client-capabilities-retest.log`。Swift source列挙漏れの修正後の対象再試験であり、全体を再実行して165成功したとは記さない |
+
+実Claude／fake CLIの並列検証は進行中。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。公式1Password拡張の導入・再起動保持と、ユーザーによるadditional-browser登録後の実desktop接続・保存・自動入力も別の受入である。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
+
 ## Chromium browser
 
 Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions share the Chromium profile. Chrome-style management windows provide extension installation and toolbar popups. See [browser extensions](browser-extensions.md) and [1Password setup](1password-browser.md).

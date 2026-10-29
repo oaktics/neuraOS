@@ -67,7 +67,10 @@ remain quarantined until native completion/cancellation acknowledgment. Native
 also refuses new DevTools calls while a cancelled/timed-out call has an unknown
 renderer outcome. A timeout cannot undo an already executed click: inspect the
 page before deciding whether to issue a new action. Closing the tab resets its
-transport. Responses and page contents are not written to daemon diagnostics. Native result
+transport. Repeated stop requests on the same tab are rejected with
+`browser_busy` while its prior stop awaits native acknowledgment, preventing
+unbounded pending cancellation records; this bound is not an agent-count cap.
+Responses and page contents are not written to daemon diagnostics. Native result
 batches cap the entire JSON envelope at 10 MiB (below the 12 MiB HTTP limit).
 Multiple images are split across acknowledgments; a single oversized image
 returns `browser_image_too_large`, allowing later results to proceed.

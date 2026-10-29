@@ -24,7 +24,7 @@ neuraOSから起動したCodexは、他のCodexや「エージェントの作業
 
 ## 実装
 
-Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。App Serverの所有プロセスは共通のnative process hostを使い、Daemonとのパイプ切断時に所有プロセス群を停止します。OS上の保証範囲と制約は[native process ownership](native-process-ownership.md)を参照してください。
+Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。App ServerはDaemonから直接spawnし、Daemonごとに1つの共有native supervisorへ所有を登録します。spawn前にreserveのACKを待ち、所有tokenを環境へ渡してspawn後すぐattachします。per-Codexのprovider-hostは起動しません。起動取消・close・DropでもChild handleを保持してreapし、Daemonとのパイプ切断時は共有supervisorが予約済みの所有プロセス群を停止します。OS上の保証範囲と制約は[native process ownership](native-process-ownership.md)を参照してください。
 
 Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・terminal・状態・ターンID・未送信の指示・監視対象を保存します。起動順や親子関係に依存しません。CLIの画面テキストから会話IDや完了を推測しません。
 

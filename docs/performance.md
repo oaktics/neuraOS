@@ -28,7 +28,13 @@ Actual sustained concurrency depends on machine and provider resources.
 - CEF keeps native embedded views. Its callback-driven adaptive external pump
   has a 33 ms idle fallback. It is not a separate browser host. See
   [extension/pump verification](browser-extensions.md).
-- Shared native process monitoring replaces per-child `ps` loops. See
+- One shared native process supervisor per daemon replaces per-child `ps` loops
+  and per-Codex host processes. PTY, setup and Codex spawn directly after a
+  reservation ACK, then attach their child PID. The helper takes a profile
+  lifetime flock before the daemon opens SQLite and holds it through cleanup.
+  Child guards retain/reap processes across cancellation and failed attachment.
+  `provider-host` remains a compatibility/fixture entry, not the normal launch
+  path. See
   [ownership guarantees and OS limits](native-process-ownership.md).
 
 Daemon diagnostics are bounded, rotated, private operation records, with dropped
@@ -36,6 +42,13 @@ record counts. They no longer sample Node event-loop delay or JS heap. See
 [reliability](reliability.md). CPU, memory pressure, IO, wakeups and energy need
 separate workload measurements; swap allocation alone is not evidence of active
 thrashing, and idle samples cannot explain a past busy incident.
+
+A PTY/store failure emits a state invalidation and fails health/state/output
+operations closed; input is not acknowledged as healthy after failed output
+commit. The UI retries failed notification delivery with backoff while keeping
+its cursor. When a daemon no longer advertises `state.stream`, it cancels the
+old stream generation and returns to the legacy fallback. Healthy native idle
+consumers still wait for events.
 
 ## Evidence and limits
 

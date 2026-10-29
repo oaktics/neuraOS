@@ -13,11 +13,11 @@ neuraOS does not change 1Password trust settings, copy vault data, impersonate a
 
 ## User verification after installing an approved signed build
 
-These steps require the user's credentials/trust decision; they were not performed on the existing app or vault:
+These steps require the user's trust decision and an unlocked desktop app. The isolated observations below do not prove the in-progress real desktop connection:
 
 - Install the official extension through the puzzle-piece menu's dedicated window. Check the publisher and extension ID.
 - Choose **1Password を設定… > デスクトップ連携を準備**. This verifies the installed official helper signature (AgileBits team `2BUA8C4S2C`, identifier `com.1password.browser-support`) and registers its standard stdio host manifest in this CEF profile only. It permits only the official stable extension ID, refuses conflicting existing registrations and does not edit another browser. Then follow the additional-browser steps above and reload the extension. Check whether it reports the desktop app as connected; if not, collect a 1Password diagnostic without weakening validation.
-- Unlock/sign in using the extension's own toolbar popup, never an ordinary page asking for the account password.
+- Unlock 1Password for Mac and complete **Settings > Browser > Add Browser** for the signed app. The [official additional-browser flow](https://support.1password.com/additional-browsers/) can add the desktop app's accounts to the extension automatically; a separate website login is not a prerequisite. Confirm the extension reports a desktop connection and unlocks before testing a vault.
 - In an isolated test vault, create a disposable login for a test page. Verify inline suggestions and fill in an embedded neuraOS tab, then repeat in the dedicated window. Verify saving a changed/new test login and locking/unlocking. No real credentials are needed for this acceptance test.
 - Close and restart neuraOS, confirm installation persists, and repeat fill/unlock. If embedded Alloy behavior fails, use the dedicated window; if that fails, use an officially supported external browser.
 
@@ -31,6 +31,6 @@ The dedicated window is outside browser MCP. Embedded tabs remain automatable: u
 - In an embedded Alloy test form, the input accessibility tree offered the 1Password menu after typing a dummy username. CDP observed the official `inline/inject-content-scripts.js`, `inline/injected.js` and extension isolated execution context. This proves injection, **not** credential suggestions or autofill.
 - A separate sample MV3 extension executed content → service worker → persistent storage across restart and round-tripped to a disposable native host through CEF's standard profile manifest search path. This proves the native messaging transport, **not** 1Password trust acceptance.
 
-Remaining acceptance gates are actual 1Password desktop connection, unlock/lock, suggestions, filling, saving a new/changed test login, and authenticated restart. They require user authentication and explicit custom-browser trust; these were intentionally left for the user with the steps above. An unsupported extension API has not been identified as a blocker for these gates. APIs requiring full Chrome tab/window UI remain limited to the dedicated window; the embedded tab alone cannot supply the toolbar popup.
+Remaining acceptance gates are actual 1Password desktop connection, unlock/lock, suggestions, filling, saving a new/changed test login, and authenticated restart. They require desktop unlock and explicit custom-browser trust. Real desktop connection after the user adds the browser is still being verified; no authenticated fill/save success is claimed here. An unsupported extension API has not been identified as a blocker for these gates. APIs requiring full Chrome tab/window UI remain limited to the dedicated window; the embedded tab alone cannot supply the toolbar popup.
 
 These extension observations are independent of the Rust daemon migration. Native daemon protocol/Swift UI fixtures, signed and notarized release publication, installation/rollback on the real app, and authenticated 1Password acceptance must be recorded separately. Neither a release nor a browser MCP fixture authenticates a vault.

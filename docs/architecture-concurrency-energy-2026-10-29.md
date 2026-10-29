@@ -6,7 +6,7 @@
 
 ## 実装と検証の現在地
 
-製品の常駐daemon・PTY管理・保存・provider監督・MCPはRustへ統合する。process hostのイベント監視・所有token・macOS上の制約は[native process ownership](native-process-ownership.md)を参照する。Swift UI、CEF、外部の`claude`・`codex`・`git`・`gh`は役割を保つ。「外部CLIを使う」はneuraOS自身にNode runtimeを残す意味ではない。ビルド・回帰試験用Nodeと、外部CLI側が必要とするランタイムは配布daemonと区別する。
+製品の常駐daemon・PTY管理・保存・provider監督・MCPはRustへ統合する。通常のPTY/setup/Codexは直接spawnし、daemonごとに1つの共有supervisorでreserve ACK→token環境→spawn→attachを管理する。supervisorはDB開始前にprofile lifetime flockを取得し、旧子孫のcleanup完了まで保持する。provider-hostは互換fixture用で通常のper-agent hostではない。イベント監視・所有token・macOS上の制約は[native process ownership](native-process-ownership.md)を参照する。Swift UI、CEF、外部の`claude`・`codex`・`git`・`gh`は役割を保つ。「外部CLIを使う」はneuraOS自身にNode runtimeを残す意味ではない。ビルド・回帰試験用Nodeと、外部CLI側が必要とするランタイムは配布daemonと区別する。
 
 統合中の実装は認証付きHTTP command＋WebSocket変更通知＋cursor付き出力取得を使う。UIのstate/terminal/browser定期pollを通知へ置換し、入力と出力取得の待ち行列を分ける。PTYは共有mio reactor、保存は単一SQLite writerと出力read threadを持ち、control/bulkのcreditとFIFOを分離する。bulkが満杯でもcontrolを受け付け、barrierは両laneの受理済み書込みを待つ。端末数の固定上限とは異なる。出力の`data`と`chunks`の二重転送は新UIでは行わない。CEFはネイティブUIの埋込みを維持し、callback駆動pumpと33ms fallbackを使う。
 
