@@ -10,7 +10,10 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+    },
     time::Duration,
 };
 use tokio::{
@@ -84,7 +87,39 @@ pub struct LaunchSpec {
     pub env: HashMap<String, String>,
     pub agent_id: Option<String>,
 }
+#[derive(Default)]
+struct TerminalLife {
+    gate: Mutex<()>,
+    closing: AtomicBool,
+}
+#[derive(Default)]
+struct Lifecycle {
+    shutting_down: bool,
+    terminals: HashMap<String, Arc<TerminalLife>>,
+}
+struct PrepareGuard {
+    service: std::sync::Weak<ProviderService>,
+    terminal: String,
+    armed: bool,
+}
+impl Drop for PrepareGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            if let (Some(service), Ok(runtime)) = (
+                self.service.upgrade(),
+                tokio::runtime::Handle::try_current(),
+            ) {
+                let terminal = self.terminal.clone();
+                runtime.spawn(async move {
+                    let _ = service.close(&terminal).await;
+                });
+            }
+        }
+    }
+}
 pub struct ProviderService {
+    lifecycle: StdMutex<Lifecycle>,
+    cleanup: super::cleanup::CloseTasks,
     pub agents: Arc<Agents>,
     runtime: Arc<NativeRuntime>,
     store: StoreHandle,
@@ -110,6 +145,8 @@ impl ProviderService {
         let agents = Arc::new(Agents::new(Arc::new(store.clone()), runtime.clone()).await?);
         let monitor = CompletionMonitor::start(agents.clone())?;
         let this = Arc::new(Self {
+            lifecycle: StdMutex::new(Lifecycle::default()),
+            cleanup: super::cleanup::CloseTasks::default(),
             agents,
             runtime,
             store,
@@ -126,7 +163,9 @@ impl ProviderService {
                 match exits.recv().await {
                     Ok(exit) => {
                         let Some(service) = weak.upgrade() else { break };
-                        let _ = service.close(&exit.terminal_id).await;
+                        tokio::spawn(async move {
+                            let _ = service.close(&exit.terminal_id).await;
+                        });
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         let Some(service) = weak.upgrade() else { break };
@@ -139,7 +178,10 @@ impl ProviderService {
                             .collect();
                         for terminal in ids {
                             if service.runtime.pty.pid(&terminal).is_none() {
-                                let _ = service.close(&terminal).await;
+                                let service = service.clone();
+                                tokio::spawn(async move {
+                                    let _ = service.close(&terminal).await;
+                                });
                             }
                         }
                     }
@@ -191,6 +233,25 @@ impl ProviderService {
         prompt: Option<String>,
         choose_history: bool,
     ) -> Result<LaunchSpec> {
+        let life = {
+            let mut lifecycle = self.lifecycle.lock().unwrap();
+            if lifecycle.shutting_down {
+                return Err("providers_shutting_down".into());
+            }
+            lifecycle
+                .terminals
+                .entry(terminal.to_owned())
+                .or_default()
+                .clone()
+        };
+        let mut cancelled = PrepareGuard {
+            service: Arc::downgrade(self),
+            terminal: terminal.to_owned(),
+            armed: true,
+        };
+        let gate = life.gate.lock().await;
+        let result=async {
+            if life.closing.load(Ordering::Acquire){return Err("provider_terminal_closing".into());}
         let program = executable(provider).await?;
         let mut env = environment();
         if provider == "shell" {
@@ -238,8 +299,14 @@ impl ProviderService {
         } else {
             Err("invalid provider".into())
         };
+        result
+        }.await;
+        drop(gate);
+        cancelled.armed = false;
         if result.is_err() {
-            let _ = self.close(terminal).await;
+            if let Err(cleanup) = self.close(terminal).await {
+                return Err(format!("{}; cleanup: {cleanup}", result.err().unwrap()));
+            }
         }
         result
     }
@@ -293,7 +360,10 @@ impl ProviderService {
         let path = directory.join("activity.sock");
         let listener = match UnixListener::bind(&path) {
             Ok(listener) => listener,
-            Err(error) => { let _ = std::fs::remove_dir(&directory); return Err(error.to_string()); }
+            Err(error) => {
+                let _ = std::fs::remove_dir(&directory);
+                return Err(error.to_string());
+            }
         };
         let weak = Arc::downgrade(self);
         let terminal_id = terminal.to_string();
@@ -347,42 +417,132 @@ impl ProviderService {
             json!({"agents":self.agents.list().await,"revision":state["revision"],"currentSessionIds":current}),
         )
     }
-    pub async fn close(&self, terminal: &str) -> Result<()> {
+    pub async fn close(self: &Arc<Self>, terminal: &str) -> Result<()> {
+        let life = {
+            let mut lifecycle = self.lifecycle.lock().unwrap();
+            lifecycle
+                .terminals
+                .entry(terminal.to_owned())
+                .or_default()
+                .clone()
+        };
+        life.closing.store(true, Ordering::Release);
+        let this = self.clone();
+        let id = terminal.to_owned();
+        let cleanup_life = life.clone();
+        let result = self
+            .cleanup
+            .run(terminal, async move {
+                let life = cleanup_life;
+                let _gate = life.gate.lock().await;
+                let result = this.cleanup_terminal(&id).await;
+                if result.is_ok() {
+                    let mut lifecycle = this.lifecycle.lock().unwrap();
+                    if lifecycle
+                        .terminals
+                        .get(&id)
+                        .is_some_and(|current| Arc::ptr_eq(current, &life))
+                    {
+                        lifecycle.terminals.remove(&id);
+                    }
+                }
+                result
+            })
+            .await;
+        // A duplicate may register after the worker removes its lifecycle entry
+        // but before its completion is published. Retire that empty entry too.
+        if result.is_ok() {
+            let mut lifecycle = self.lifecycle.lock().unwrap();
+            if lifecycle
+                .terminals
+                .get(terminal)
+                .is_some_and(|current| Arc::ptr_eq(current, &life))
+            {
+                lifecycle.terminals.remove(terminal);
+            }
+        }
+        result
+    }
+    async fn cleanup_terminal(&self, terminal: &str) -> Result<()> {
+        let mut errors = Vec::new();
         self.credentials.lock().unwrap().remove(terminal);
         self.monitor.remove(terminal);
         if let Some((session, path)) = self.agents.observed_transcript(terminal).await {
-            let read_path = PathBuf::from(path);
             let read_session = session.clone();
-            if let Ok(Some((name, at))) = tokio::task::spawn_blocking(move || {
+            match tokio::task::spawn_blocking(move || {
                 let mut reader = claude::CompletionReader::default();
-                let _ = reader.read(&read_path, &read_session, i64::MAX);
-                reader.title
+                reader.read(&PathBuf::from(path), &read_session, i64::MAX)?;
+                Ok::<_, String>(reader.title)
             })
             .await
             {
-                let _ = self
-                    .agents
-                    .apply_claude_title(terminal, &session, &name, at)
-                    .await;
+                Ok(Ok(Some((name, at)))) => {
+                    if let Err(e) = self
+                        .agents
+                        .apply_claude_title(terminal, &session, &name, at)
+                        .await
+                    {
+                        errors.push(format!("title: {e}"));
+                    }
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => errors.push(format!("title: {e}")),
+                Err(e) => errors.push(format!("title task: {e}")),
             }
         }
-        if let Some((directory, task)) = self.hooks.lock().await.remove(terminal) {
+        let hook = self.hooks.lock().await.remove(terminal);
+        if let Some((directory, task)) = hook {
             task.abort();
-            let _ = tokio::fs::remove_dir_all(directory).await;
+            if let Err(e) = task.await {
+                if !e.is_cancelled() {
+                    errors.push(format!("hook task: {e}"));
+                }
+            }
+            if let Err(e) = tokio::fs::remove_dir_all(directory).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!("hook directory: {e}"));
+                }
+            }
         }
         let rpc = self.runtime.codex.lock().await.remove(terminal);
         if let Some(rpc) = rpc {
-            rpc.close().await?;
+            if let Err(e) = rpc.close().await {
+                errors.push(format!("Codex: {e}"));
+            }
         }
-        self.agents.close(terminal).await
+        if let Err(e) = self.agents.close(terminal).await {
+            errors.push(format!("agent: {e}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(self: &Arc<Self>) -> Result<()> {
+        let mut ids = {
+            let mut lifecycle = self.lifecycle.lock().unwrap();
+            lifecycle.shutting_down = true;
+            lifecycle.terminals.keys().cloned().collect::<Vec<_>>()
+        };
+        ids.extend(self.cleanup.ids());
+        ids.extend(self.credentials.lock().unwrap().keys().cloned());
+        ids.extend(self.hooks.lock().await.keys().cloned());
+        ids.extend(self.runtime.codex.lock().await.keys().cloned());
+        ids.sort();
+        ids.dedup();
+        let results = futures_util::future::join_all(ids.iter().map(|id| self.close(id))).await;
         self.monitor.close();
-        let ids: Vec<_> = self.credentials.lock().unwrap().keys().cloned().collect();
-        for id in ids {
-            self.close(&id).await?;
+        let errors: Vec<_> = ids
+            .into_iter()
+            .zip(results)
+            .filter_map(|(id, result)| result.err().map(|e| format!("{id}: {e}")))
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("provider shutdown failed: {}", errors.join("; ")))
         }
-        Ok(())
     }
 }
 fn credential() -> String {
@@ -511,21 +671,267 @@ async fn reconcile_codex(
 async fn probe(program: &str, arg: &str) -> Result<String> {
     use std::process::Stdio;
     let lease = crate::process_tree::reserve().await?;
-    let mut child = tokio::process::Command::new(program).arg(arg)
-        .env(crate::process_tree::OWNER_ENV,lease.token())
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .process_group(0).kill_on_drop(true).spawn().map_err(|e|e.to_string())?;
-    lease.attach(child.id().ok_or("provider probe pid")?).await?;
-    let stdout=child.stdout.take().ok_or("provider probe stdout")?;
-    let result=tokio::time::timeout(Duration::from_secs(3),async {
-        let read=async {let mut bytes=Vec::new();stdout.take(256*1024+1).read_to_end(&mut bytes).await.map_err(|e|e.to_string())?;
-            if bytes.len()>256*1024{return Err("provider_probe_too_large".into());}Ok(bytes)};
-        let wait=async {child.wait().await.map_err(|e|e.to_string())};
-        let(bytes,status)=tokio::try_join!(read,wait)?;
-        if !status.success(){return Err("provider_probe_failed".into());}
+    let mut child = tokio::process::Command::new(program)
+        .arg(arg)
+        .env(crate::process_tree::OWNER_ENV, lease.token())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    lease
+        .attach(child.id().ok_or("provider probe pid")?)
+        .await?;
+    let stdout = child.stdout.take().ok_or("provider probe stdout")?;
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        let read = async {
+            let mut bytes = Vec::new();
+            stdout
+                .take(256 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > 256 * 1024 {
+                return Err("provider_probe_too_large".into());
+            }
+            Ok(bytes)
+        };
+        let wait = async { child.wait().await.map_err(|e| e.to_string()) };
+        let (bytes, status) = tokio::try_join!(read, wait)?;
+        if !status.success() {
+            return Err("provider_probe_failed".into());
+        }
         Ok(String::from_utf8_lossy(&bytes).into_owned())
-    }).await.map_err(|_|"provider_probe_timeout".to_string()).and_then(|result|result);
-    let stopped=lease.stop().await;
-    if result.is_err(){let _=child.kill().await;}
-    stopped?;result
+    })
+    .await
+    .map_err(|_| "provider_probe_timeout".to_string())
+    .and_then(|result| result);
+    let stopped = lease.stop().await;
+    if result.is_err() {
+        let _ = child.kill().await;
+    }
+    stopped?;
+    result
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    #[tokio::test]
+    async fn shutdown_attempts_every_terminal_and_aggregates_cleanup_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("neura-provider-shutdown-{}", super::super::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events)
+            .await
+            .unwrap();
+        let pty = PtyRuntime::new(store.clone()).unwrap();
+        let service = ProviderService::new(
+            store.clone(),
+            pty.clone(),
+            "http://127.0.0.1:1".into(),
+            dir.join("token").display().to_string(),
+        )
+        .await
+        .unwrap();
+        let mut sessions = Vec::new();
+        for id in ["bad-one", "bad-two", "good"] {
+            let session = super::super::id();
+            sessions.push(session.clone());
+            let path = dir.join(id);
+            if id == "good" {
+                std::fs::create_dir(&path).unwrap();
+            } else {
+                std::fs::write(&path, b"not a directory").unwrap();
+            }
+            service
+                .credentials
+                .lock()
+                .unwrap()
+                .insert(id.into(), ("channel".into(), "browser".into()));
+            service
+                .hooks
+                .lock()
+                .await
+                .insert(id.into(), (path, tokio::spawn(std::future::pending())));
+            // Register a real agent so failure of hook cleanup cannot skip
+            // interruption/persistence for the same terminal.
+            service
+                .agents
+                .prepare_claude(
+                    json!({"id":"w","path":dir,"name":"fixture"}),
+                    id,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(service
+                .agents
+                .claude_event(
+                    id,
+                    &json!({"hook_event_name":"SessionStart","session_id":session})
+                )
+                .await
+                .unwrap());
+        }
+        let error = service.shutdown().await.unwrap_err();
+        assert!(error.contains("bad-one:"), "{error}");
+        assert!(error.contains("bad-two:"), "{error}");
+        assert!(!dir.join("good").exists());
+        assert!(service.hooks.lock().await.is_empty());
+        assert!(service.credentials.lock().unwrap().is_empty());
+        for session in sessions {
+            let row = store.get("agents", &session).await.unwrap().unwrap();
+            assert_eq!(row["status"], "interrupted");
+        }
+        // A second shutdown must still report prior failed cleanup, not success
+        // inferred from maps already emptied by the first shutdown.
+        assert_eq!(service.shutdown().await.unwrap_err(), error);
+        pty.shutdown().await.unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_waits_for_inflight_close_after_resource_maps_are_empty() {
+        let dir =
+            std::env::temp_dir().join(format!("neura-provider-close-race-{}", super::super::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events)
+            .await
+            .unwrap();
+        let pty = PtyRuntime::new(store.clone()).unwrap();
+        let service = ProviderService::new(
+            store,
+            pty.clone(),
+            "http://127.0.0.1:1".into(),
+            dir.join("token").display().to_string(),
+        )
+        .await
+        .unwrap();
+        let life = Arc::new(TerminalLife::default());
+        service
+            .lifecycle
+            .lock()
+            .unwrap()
+            .terminals
+            .insert("slow".into(), life.clone());
+        let gate = life.gate.lock().await;
+        let s = service.clone();
+        let first = tokio::spawn(async move { s.close("slow").await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !life.closing.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let s = service.clone();
+        let mut shutdown = tokio::spawn(async move { s.shutdown().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut shutdown)
+                .await
+                .is_err()
+        );
+        first.abort();
+        let _ = first.await; // shared cleanup survives caller cancellation
+        drop(gate);
+        shutdown.await.unwrap().unwrap();
+        assert!(service.lifecycle.lock().unwrap().terminals.is_empty());
+        pty.shutdown().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod hook_close_race_tests {
+    use super::*;
+    struct SlowDrop {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+    impl Drop for SlowDrop {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv_timeout(Duration::from_secs(3));
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removed_hook_is_not_completed_close_and_shutdown_waits_for_its_drop() {
+        let dir =
+            std::env::temp_dir().join(format!("neura-hook-close-race-{}", super::super::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events)
+            .await
+            .unwrap();
+        let pty = PtyRuntime::new(store.clone()).unwrap();
+        let service = ProviderService::new(
+            store,
+            pty.clone(),
+            "http://127.0.0.1:1".into(),
+            dir.join("token").display().to_string(),
+        )
+        .await
+        .unwrap();
+        let hook_dir = dir.join("hook");
+        std::fs::create_dir(&hook_dir).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready) = tokio::sync::oneshot::channel();
+        let hook = tokio::spawn(async move {
+            let _slow = SlowDrop {
+                entered: entered_tx,
+                release: release_rx,
+            };
+            let _ = ready_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        service
+            .credentials
+            .lock()
+            .unwrap()
+            .insert("slow".into(), ("channel".into(), "browser".into()));
+        service
+            .hooks
+            .lock()
+            .await
+            .insert("slow".into(), (hook_dir.clone(), hook));
+        let s = service.clone();
+        let first = tokio::spawn(async move { s.close("slow").await });
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(service.hooks.lock().await.is_empty());
+        assert!(service.credentials.lock().unwrap().is_empty());
+        assert!(hook_dir.exists());
+        let s = service.clone();
+        let mut duplicate = tokio::spawn(async move { s.close("slow").await });
+        tokio::time::timeout(Duration::from_secs(1), service.close("other"))
+            .await
+            .unwrap()
+            .unwrap();
+        let s = service.clone();
+        let mut shutdown = tokio::spawn(async move { s.shutdown().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut duplicate)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut shutdown)
+                .await
+                .is_err()
+        );
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        duplicate.await.unwrap().unwrap();
+        shutdown.await.unwrap().unwrap();
+        assert!(!hook_dir.exists());
+        pty.shutdown().await.unwrap();
+    }
 }
