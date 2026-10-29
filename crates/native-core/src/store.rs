@@ -358,6 +358,7 @@ struct Job {
 }
 #[derive(Clone)]
 pub struct StoreHandle {
+    events:broadcast::Sender<Change>,
     writes: mpsc::Sender<Job>,
     bulk: mpsc::Sender<Job>,
     reads: mpsc::Sender<Job>,
@@ -372,6 +373,7 @@ impl StoreHandle {
         let (bulk, mut bulk_rx) = mpsc::channel::<Job>(128);
         let (reads, mut read_rx) = mpsc::channel::<Job>(16);
         let (ready, ready_rx) = oneshot::channel();
+        let changes=events.clone();
         std::thread::Builder::new().name("native-store".into()).spawn(move||{
    let init=(||->Result<(Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;Ok((writer,reader))})();
    let Ok((mut writer,mut reader))=init else {let _=ready.send(false);return;};
@@ -391,7 +393,7 @@ impl StoreHandle {
      let Some((job,control))=next else{continue;};
      control_run=if control{control_run+1}else{0};
      let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());
-     if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=events.send(change);}}
+     if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=changes.send(change);}}
      let _=job.reply.send(result);
     }
    });
@@ -400,6 +402,7 @@ impl StoreHandle {
             return Err(ApiError::storage());
         }
         let store = Self {
+            events,
             writes,
             bulk,
             reads,
@@ -410,6 +413,7 @@ impl StoreHandle {
         store.call("recover", json!({})).await?;
         Ok(store)
     }
+    pub fn signal_change(&self,change:Change){let _=self.events.send(change);}
     pub async fn call(&self, op: &str, args: Value) -> Result<Value, ApiError> {
         if op == "barrier" {
             // Exclude new enqueues while FIFO fences pass through both lanes. Jobs already
