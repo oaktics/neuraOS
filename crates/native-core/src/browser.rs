@@ -278,7 +278,7 @@ impl BrowserBroker {
                             && t.tab_id == field(&p.command, "tabId")
                     }) {
                         None => Some("browser_tab_closed"),
-                        Some(t) if !t.enabled && field(&p.command, "action") != "stop" => {
+                        Some(t) if !t.enabled && !p.sent && field(&p.command, "action") != "stop" => {
                             Some("browser_disabled")
                         }
                         _ => None,
@@ -614,6 +614,22 @@ mod tests {
         let result = b.poll(poll.clone(), snapshot).unwrap();
         assert_eq!(result["requests"].as_array().unwrap().len(), 1);
         (task, result["requests"][0].clone())
+    }
+    #[tokio::test]
+    async fn disabled_registry_cannot_replace_a_dispatched_renderer_crash_result() {
+        let (b, snapshot, poll, call, _lease) = fixture();
+        let (pending, request) = dispatch(&b, &snapshot, &poll, &call).await;
+        let mut disabled = poll.clone();
+        disabled["tabs"][0]["enabled"] = json!(false);
+        b.poll(disabled.clone(), &snapshot).unwrap();
+        tokio::task::yield_now().await;
+        // Registry invalidation can arrive before the native cancellation task
+        // unwinds. Only that task knows the exact dispatched-operation failure.
+        assert!(!pending.is_finished());
+        assert_eq!(b.call(call, &snapshot, true).await.unwrap_err().error, "browser_disabled");
+        disabled["results"] = json!([{"id":request["id"],"error":"browser_renderer_crashed"}]);
+        b.poll(disabled, &snapshot).unwrap();
+        assert_eq!(pending.await.unwrap().unwrap_err().error, "browser_renderer_crashed");
     }
     #[tokio::test]
     async fn repeated_stop_without_native_ack_keeps_pending_bounded() {
