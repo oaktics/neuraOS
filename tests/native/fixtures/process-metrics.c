@@ -1,5 +1,6 @@
 // Read-only macOS benchmark sampler. No commands, environment or credentials.
 #include <libproc.h>
+#include <mach/mach_time.h>
 #include <sys/proc_info.h>
 #include <sys/resource.h>
 #include <stdint.h>
@@ -10,6 +11,8 @@
 struct row { int pid, parent, selected; };
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.denom) return 3;
     int root = atoi(argv[1]);
     if (root <= 1) return 2;
     int capacity = proc_listallpids(NULL, 0) + 1024;
@@ -42,7 +45,10 @@ int main(int argc, char **argv) {
         printf("%s{\"pid\":%d,\"start\":\"%llu\",\"cpuNs\":%llu,\"idleWakeups\":%llu,\"interruptWakeups\":%llu,\"footprintBytes\":%llu}",
             printed++ ? "," : "", rows[i].pid,
             (unsigned long long)info.ri_proc_start_abstime,
-            (unsigned long long)(info.ri_user_time + info.ri_system_time),
+            // rusage CPU counters are Mach absolute-time ticks, not ns.
+            // Widen before addition/multiplication (Apple M1 timebase=125/3).
+            (unsigned long long)((((__uint128_t)info.ri_user_time + info.ri_system_time)
+                * timebase.numer) / timebase.denom),
             (unsigned long long)info.ri_pkg_idle_wkups,
             (unsigned long long)info.ri_interrupt_wkups,
             (unsigned long long)info.ri_phys_footprint);
