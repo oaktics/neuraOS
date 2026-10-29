@@ -322,29 +322,19 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
             .args(["--no-optional-locks", "-c", "core.quotepath=false"])
             .env("GIT_TERMINAL_PROMPT", "0");
     }
-    let owner_token = uuid::Uuid::new_v4().to_string();
+    let tree = crate::process_tree::reserve().await.map_err(|_| err("github_failed", "外部処理の所有予約に失敗しました。", 502))?;
     command
-        .env(crate::process_tree::OWNER_ENV, &owner_token)
+        .env(crate::process_tree::OWNER_ENV, tree.token())
         .args(args);
     let mut child = command
         .spawn()
         .map_err(|_| err("github_failed", "コマンドを開始できません。", 502))?;
     let pid = child.id().ok_or_else(malformed)?;
-    let tree = match tokio::task::spawn_blocking(move || {
-        crate::process_tree::ProcessTree::new_with_token(pid, owner_token)
-    })
-    .await
-    {
-        Ok(Ok(tree)) => tree,
-        _ => {
-            let _ = child.kill().await;
-            return Err(err(
-                "github_failed",
-                "外部処理の所有確認に失敗しました。",
-                502,
-            ));
-        }
-    };
+    if tree.attach(pid).await.is_err() {
+        let _ = tree.stop().await;
+        let _ = child.kill().await;
+        return Err(err("github_failed", "外部処理の所有確認に失敗しました。", 502));
+    }
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let limit = if is_gh {
