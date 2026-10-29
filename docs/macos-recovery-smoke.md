@@ -24,7 +24,7 @@ Before creating data, a fixture server, daemon, CLI or app, the harness validate
 
 The guarded reliability entrypoint writes `ui-phases.jsonl` alongside the diagnostic report, writing each record directly to the kernel without buffered stdio or UI-thread fsync. Records contain only fixed phase IDs, start/complete, elapsed monotonic milliseconds, expected phase deadline and sheet iteration index. They do not contain view content or credentials.
 
-Release smoke failure summaries include the last started/completed phase, expected deadlines, overall 30-second timeout, phase log, diagnostic report and sample paths. Existing sample capture and failure-directory retention remain enabled. Expected phase deadlines are diagnostic budgets; the outer harness enforces the overall timeout.
+Release smoke failure summaries include the last started/completed phase, expected deadlines, overall 30-second timeout, phase log, diagnostic report and sample paths. Existing sample capture and failure-directory retention remain enabled. Successful phase records are copied to the harness log before fixture cleanup. Expected phase deadlines are diagnostic budgets; the outer harness enforces the overall timeout.
 
 For deliberate interruption coverage, build a candidate with bundle ID `com.neuraos.reliability-smoke.<suffix>`, data `/private/tmp/neura-ui-phase-<suffix>` and endpoint `http://127.0.0.1:1`, then run:
 

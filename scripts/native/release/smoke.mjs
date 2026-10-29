@@ -89,6 +89,8 @@ try {
   }, 30000);
   try {const [code, signal] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: code=${code} signal=${signal}; ${JSON.stringify(await uiFailureSummary(data))}`);}
   finally {clearTimeout(uiTimeout); stopUI();}
+  // Keep successful phase evidence in CI logs before removing the disposable fixture.
+  console.log('Packaged UI phase records:\n' + await readFile(join(data, 'ui-phases.jsonl'), 'utf8'));
   const diagnostic = JSON.parse(await readFile(report, 'utf8'));
   if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
   await rm(join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
