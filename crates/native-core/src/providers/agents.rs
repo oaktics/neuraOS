@@ -131,6 +131,12 @@ impl Agents {
         Ok(this)
     }
     async fn save(&self, s: &mut Registry, mut a: Agent) -> Result<()> {
+        if s.agents
+            .get(&a.id)
+            .is_some_and(|old| serde_json::to_value(old).ok() == serde_json::to_value(&a).ok())
+        {
+            return Ok(());
+        }
         a.updated_at = stamp();
         self.store
             .call("put", json!({"table":"agents","value":a}))
@@ -396,6 +402,8 @@ impl Agents {
         if matches!(name, "Stop" | "StopFailure") {
             self.deliver(&mut s).await?;
         }
+        drop(s);
+        self.flush_ready().await;
         Ok(true)
     }
     pub async fn channel(&self, terminal: &str) -> Result<Value> {
@@ -799,21 +807,29 @@ impl Agents {
         patch: Value,
         notification: Option<&str>,
     ) -> Result<()> {
-        let mut t = self
-            .store
-            .call("get", json!({"table":"terminals","id":terminal}))
-            .await?;
-        if let Some(object) = t.as_object_mut() {
-            object.extend(patch.as_object().unwrap().clone());
-            let n=notification.map(|kind|json!({"id":id(),"terminalId":terminal,"workspaceId":t["workspaceId"],"provider":t["provider"],"kind":kind,"createdAt":stamp()}));
-            self.store
-                .call(
-                    "put",
-                    json!({"table":"terminals","value":t,"notification":n}),
-                )
+        loop {
+            let expected = self
+                .store
+                .call("get", json!({"table":"terminals","id":terminal}))
                 .await?;
+            let mut next = expected.clone();
+            let Some(object) = next.as_object_mut() else {
+                return Ok(());
+            };
+            if notification.is_none()
+                && patch
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .all(|(key, value)| object.get(key) == Some(value))
+            {
+                return Ok(());
+            }
+            object.extend(patch.as_object().unwrap().clone());
+            let n=notification.map(|kind|json!({"id":id(),"terminalId":terminal,"workspaceId":next["workspaceId"],"provider":next["provider"],"kind":kind,"createdAt":stamp()}));
+            if self.store.call("compare_put",json!({"table":"terminals","id":terminal,"expected":expected,"value":next,"notification":n})).await?==true{return Ok(())}
+            tokio::task::yield_now().await;
         }
-        Ok(())
     }
     pub async fn register_codex(
         &self,
@@ -853,12 +869,18 @@ impl Agents {
         if parent.is_some() {
             a.parent_task_id = parent.clone();
         }
-        a.status = if thread["status"]["type"] == "active" {
-            "working"
-        } else {
-            "idle"
+        if !s
+            .agents
+            .get(task)
+            .is_some_and(|old| old.terminal_id == terminal)
+        {
+            a.status = if thread["status"]["type"] == "active" {
+                "working"
+            } else {
+                "idle"
+            }
+            .into();
         }
-        .into();
         self.save(&mut s, a).await?;
         self.parent_watch(&mut s, task, parent.as_deref()).await?;
         self.update_terminal(
@@ -949,10 +971,11 @@ impl Agents {
                                 .call("get", json!({"table":"workspaces","id":a.workspace_id}))
                                 .await?;
                             if w["kind"] == "worktree" && follows_name(&w) {
+                                let expected = w.clone();
                                 w["name"] = json!(name);
                                 w["sessionNameUpdatedAt"] = json!(now());
                                 self.store
-                                    .call("put", json!({"table":"workspaces","value":w}))
+                                    .call("compare_put", json!({"table":"workspaces","id":w["id"],"expected":expected,"value":w}))
                                     .await?;
                             }
                         }
@@ -1080,6 +1103,39 @@ impl Agents {
             _ => Err("unknown agent command".into()),
         }
     }
+    pub async fn flush_ready(&self) {
+        let ids: Vec<_> = {
+            let s = self.state.lock().await;
+            s.agents
+                .values()
+                .filter(|a| a.status == "idle" && s.codex.contains(&a.terminal_id))
+                .map(|a| a.id.clone())
+                .collect()
+        };
+        for id in ids {
+            let _ = self.flush(&id).await;
+        }
+    }
+    pub async fn reconcile_channels(&self) -> Result<()> {
+        let terminals: Vec<_> = {
+            let s = self.state.lock().await;
+            s.claude
+                .iter()
+                .filter(|(_, live)| {
+                    !live.confirmed && live.probe_sent.is_some_and(|at| now() - at > 60000)
+                })
+                .map(|(terminal, _)| terminal.clone())
+                .collect()
+        };
+        for terminal in terminals {
+            self.channel(&terminal).await?;
+        }
+        Ok(())
+    }
+    pub async fn forget_workspace(&self, workspace: &str) {
+        let mut s = self.state.lock().await;
+        s.agents.retain(|_, a| a.workspace_id != workspace);
+    }
     pub async fn close(&self, terminal: &str) -> Result<()> {
         let mut s = self.state.lock().await;
         s.claude.remove(terminal);
@@ -1095,6 +1151,61 @@ impl Agents {
             a.turn_id = None;
             a.requests.clear();
             self.save(&mut s, a).await?;
+        }
+        Ok(())
+    }
+    pub async fn observed_transcript(&self, terminal: &str) -> Option<(String, String)> {
+        let s = self.state.lock().await;
+        let live = s.claude.get(terminal)?;
+        let a = s.agents.get(live.session.as_ref()?)?;
+        Some((a.id.clone(), a.transcript_path.clone()?))
+    }
+    pub async fn apply_claude_title(
+        &self,
+        terminal: &str,
+        session: &str,
+        name: &str,
+        at: i64,
+    ) -> Result<()> {
+        let s = self.state.lock().await;
+        if s.claude.get(terminal).and_then(|v| v.session.as_deref()) != Some(session) {
+            return Ok(());
+        }
+        let t = self
+            .store
+            .call("get", json!({"table":"terminals","id":terminal}))
+            .await?;
+        if t["sessionId"] != session {
+            return Ok(());
+        }
+        if t["sessionName"] != name {
+            let mut next = t.clone();
+            next["sessionName"] = json!(name);
+            self.store
+                .call(
+                    "compare_put",
+                    json!({"table":"terminals","id":terminal,"expected":t,"value":next}),
+                )
+                .await?;
+        }
+        let w = self
+            .store
+            .call("get", json!({"table":"workspaces","id":t["workspaceId"]}))
+            .await?;
+        if w["kind"] == "worktree"
+            && follows_name(&w)
+            && w["sessionNameUpdatedAt"].as_i64().unwrap_or(0) <= at
+            && w["name"] != name
+        {
+            let mut next = w.clone();
+            next["name"] = json!(name);
+            next["sessionNameUpdatedAt"] = json!(at);
+            self.store
+                .call(
+                    "compare_put",
+                    json!({"table":"workspaces","id":w["id"],"expected":w,"value":next}),
+                )
+                .await?;
         }
         Ok(())
     }
