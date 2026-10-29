@@ -76,7 +76,6 @@ struct BrowserPane: View {
     @Binding var title: String?
     let onPopup: (NCChromiumView, String) -> Bool
     let onClosed: () -> Void
-    @State private var showOnePasswordSetup = false
     @StateObject private var browser: BrowserModel
     init(storageId: String, workspaceId: String, projectId: String, visible: Bool, title: Binding<String?>, view: NCChromiumView? = nil,
          onPopup: @escaping (NCChromiumView, String) -> Bool, onClosed: @escaping () -> Void) {
@@ -93,7 +92,6 @@ struct BrowserPane: View {
                 }.help(browser.isLoading ? "読み込みを停止" : "再読み込み")
                 TextField("URL", text: $browser.address).textFieldStyle(.roundedBorder).onSubmit {browser.navigate()}
                 Menu {
-                    Button("1Password を設定…") {showOnePasswordSetup = true}
                     Button("拡張機能を追加・管理…") {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
                     Button("Chrome ウェブストアを開く…") {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
                     Button("このページを拡張対応ウィンドウで開く") {
@@ -120,7 +118,7 @@ struct BrowserPane: View {
             if let message = browser.message {Text(message).font(.system(size: 11)).foregroundStyle(.secondary).padding(8)}
             BrowserWebView(browser: browser, visible: visible, onPopup: onPopup, onClosed: onClosed)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.sheet(isPresented: $showOnePasswordSetup) {OnePasswordSetupView()}
+        }
         .onChange(of: browser.title) {_, value in title = value.isEmpty ? nil : value}
     }
 }
