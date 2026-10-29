@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < used; i++) if (rows[i].selected) {
         struct rusage_info_v4 info = {0};
         if (proc_pid_rusage(rows[i].pid, RUSAGE_INFO_V4, (rusage_info_t *)&info)) continue;
-        printf("%s{\"pid\":%d,\"start\":\"%llu\",\"cpuNs\":%llu,\"idleWakeups\":%llu,\"interruptWakeups\":%llu,\"footprintBytes\":%llu}",
+        printf("%s{\"pid\":%d,\"start\":\"%llu\",\"cpuNs\":%llu,\"idleWakeups\":%llu,\"interruptWakeups\":%llu,\"footprintBytes\":%llu,\"diskReadBytes\":%llu,\"diskWriteBytes\":%llu,\"runnableNs\":%llu}",
             printed++ ? "," : "", rows[i].pid,
             (unsigned long long)info.ri_proc_start_abstime,
             // rusage CPU counters are Mach absolute-time ticks, not ns.
@@ -51,7 +51,10 @@ int main(int argc, char **argv) {
                 * timebase.numer) / timebase.denom),
             (unsigned long long)info.ri_pkg_idle_wkups,
             (unsigned long long)info.ri_interrupt_wkups,
-            (unsigned long long)info.ri_phys_footprint);
+            (unsigned long long)info.ri_phys_footprint,
+            (unsigned long long)info.ri_diskio_bytesread,
+            (unsigned long long)info.ri_diskio_byteswritten,
+            (unsigned long long)(((__uint128_t)info.ri_runnable_time * timebase.numer) / timebase.denom));
     }
     printf("]\n");
     free(rows); free(pids);

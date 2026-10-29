@@ -27,6 +27,7 @@ pub fn valid_uuid(value: &str) -> bool {
 #[derive(Clone)]
 enum Rule {
     Id,
+    NullableId,
     Text(usize, usize, bool),
     Enum(&'static [&'static str]),
     Bool,
@@ -79,7 +80,8 @@ fn validate(rule: &Rule, input: Option<&Value>) -> Result<Option<Value>, ApiErro
     }
     let v = input.ok_or_else(invalid)?;
     let value = match rule {
-        Id => {
+        NullableId if v.is_null() => Value::Null,
+        Id | NullableId => {
             if !v.as_str().is_some_and(valid_uuid) {
                 return Err(invalid());
             }
@@ -209,7 +211,25 @@ fn parse_object(v: &Value, schema: &[(&str, Rule)]) -> Result<Value, ApiError> {
     let input = v.as_object().ok_or_else(invalid)?;
     let mut out = Map::new();
     for (key, rule) in schema {
-        if let Some(value) = validate(rule, input.get(*key))? {
+        if let Some(value) = validate(rule, input.get(*key)).map_err(|e| {
+            if e.field.is_some() {
+                return e;
+            }
+            let mut base = rule;
+            while let Optional(inner) | Default(inner, _) = base {
+                base = inner;
+            }
+            e.field(
+                key,
+                if !input.contains_key(*key) {
+                    "required"
+                } else if matches!(base, Id | NullableId) {
+                    "expected_uuid"
+                } else {
+                    "invalid_value"
+                },
+            )
+        })? {
             out.insert((*key).into(), value);
         }
     }
@@ -221,7 +241,16 @@ pub fn envelope(body: Value) -> Result<(String, Value), ApiError> {
         .get("operationId")
         .and_then(Value::as_str)
         .filter(|s| valid_uuid(s))
-        .ok_or_else(invalid)?;
+        .ok_or_else(|| {
+            invalid().field(
+                "operationId",
+                if b.contains_key("operationId") {
+                    "expected_uuid"
+                } else {
+                    "required"
+                },
+            )
+        })?;
     Ok((
         id.to_owned(),
         command(b.get("command").cloned().ok_or_else(invalid)?)?,
@@ -281,6 +310,16 @@ pub fn command(body: Value) -> Result<Value, ApiError> {
                 Default(Box::new(Enum(&["queue", "steer"])), json!("queue")),
             ),
             ("expectedTurnId", optional(Id)),
+        ],
+        "agent.instruction" => vec![
+            ("agentId", Id),
+            ("sourceTerminalId", Id),
+            ("instructionId", Id),
+            ("expectedRevision", Int(0, 9_007_199_254_740_991)),
+            ("expectedTurnId", NullableId),
+            ("expectedState", Enum(&["queued", "delivered"])),
+            ("action", Enum(&["consume", "cancel", "supersede"])),
+            ("text", optional(trimmed(1, 65536))),
         ],
         "agent.interrupt" => vec![("agentId", Id), ("expectedTurnId", Id)],
         "agent.respond" => vec![
@@ -350,6 +389,45 @@ pub fn command(body: Value) -> Result<Value, ApiError> {
 mod tests {
     use super::*;
     const ID: &str = "4d654cfc-59db-44a0-96c8-0046ec720712";
+    #[test]
+    fn validation_reasons_are_field_specific_and_never_echo_values() {
+        for (body, reason) in [
+            (json!({"command":{}}), "required"),
+            (
+                json!({"operationId":"secret-invalid-value","command":{}}),
+                "expected_uuid",
+            ),
+        ] {
+            let error = serde_json::to_value(envelope(body).unwrap_err()).unwrap();
+            assert_eq!(error["field"], "operationId");
+            assert_eq!(error["reason"], reason);
+            assert!(!error.to_string().contains("secret-invalid-value"));
+        }
+        let error = serde_json::to_value(
+            envelope(
+                json!({"operationId":ID,"command":{"type":"agent.send","agentId":ID,"text":42}}),
+            )
+            .unwrap_err(),
+        )
+        .unwrap();
+        assert_eq!(error["field"], "text");
+        assert_eq!(error["reason"], "invalid_value");
+        let error =
+            serde_json::to_value(command(json!({"type":"agent.send","text":"hello"})).unwrap_err())
+                .unwrap();
+        assert_eq!(error["field"], "agentId");
+        assert_eq!(error["reason"], "required");
+    }
+    #[test]
+    fn instruction_contract_requires_explicit_turn_revision_and_state() {
+        let base = json!({"type":"agent.instruction","agentId":ID,"sourceTerminalId":ID,"instructionId":ID,"expectedRevision":0,"expectedTurnId":null,"expectedState":"queued","action":"cancel"});
+        assert!(command(base.clone()).is_ok());
+        for key in ["expectedRevision", "expectedTurnId", "expectedState"] {
+            let mut value = base.clone();
+            value.as_object_mut().unwrap().remove(key);
+            assert!(command(value).is_err());
+        }
+    }
     #[test]
     fn uuid_shape_matches_v1() {
         assert!(valid_uuid(ID));

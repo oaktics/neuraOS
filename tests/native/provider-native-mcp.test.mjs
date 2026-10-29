@@ -9,17 +9,17 @@ import {once} from 'node:events';
 const binary=process.env.NEURA_NATIVE_DAEMON;
 const delay=ms=>new Promise(r=>setTimeout(r,ms));
 const until=async check=>{for(let i=0;i<300;i++){if(check())return;await delay(10);}assert.fail('native MCP did not converge');};
-test('native MCP 10/20/32 clients stay idle, deliver one channel event, replay state after reconnect and exit', {skip:!binary,timeout:60000},async t=>{
- for(const count of [10,20,32])await t.test(String(count),async()=>{
+test('native MCP 10/20/32 clients stay idle, deliver one channel event, replay state after reconnect and exit', {skip:!binary,timeout:120000},async t=>{
+ for(const count of [10,20,32])for(const readyDelay of [0,800])await t.test(`${count} clients / ready ${readyDelay}ms`,async()=>{
   const dir=await mkdtemp('/tmp/neura-native-mcp-');await writeFile(dir+'/token','fixture');
-  let requests=0,revision=1,connections=0;const pending=new Map(),commands=[];
+  let requests=0,revision=1,connections=0;const pending=new Map(),commands=[],channelCompleted=new Map();
   const server=createServer(async(req,res)=>{requests++;assert.equal(req.headers.authorization,'Bearer fixture');let text='';for await(const chunk of req)text+=chunk;let value={};
    if(req.url==='/v1/agents')value={agents:[],revision,currentSessionIds:{}};
    else if(req.url.endsWith('/channel')){assert.equal(req.headers['x-neura-channel-token'],'channel');const terminal=req.url.split('/')[3];value=pending.get(terminal)??{};pending.delete(terminal);}
    else if(req.url==='/v1/commands'){commands.push(JSON.parse(text));value={ok:true};}
    else if(req.url==='/v1/state')value={projects:[],workspaces:[],terminals:[]};
-   res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(value));
-  });const ws=new WebSocketServer({noServer:true});server.on('upgrade',(req,socket,head)=>{assert.equal(req.headers.authorization,'Bearer fixture');connections++;ws.handleUpgrade(req,socket,head,client=>client.send(JSON.stringify({type:'ready',epoch:'fixture'})));});
+   res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(value),()=>{if(req.url.endsWith('/channel')){const terminal=req.url.split('/')[3];channelCompleted.set(terminal,(channelCompleted.get(terminal)??0)+1);}});
+  });const ws=new WebSocketServer({noServer:true});server.on('upgrade',(req,socket,head)=>{assert.equal(req.headers.authorization,'Bearer fixture');connections++;ws.handleUpgrade(req,socket,head,client=>ws.emit('connection',client,req));});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${server.address().port}`;
   const clients=Array.from({length:count},(_,i)=>{
    const process_=spawn(binary,['mcp'],{env:{...process.env,NEURA_SUPERVISION_URL:url,NEURA_SUPERVISION_TOKEN_FILE:dir+'/token',NEURA_SUPERVISION_TERMINAL:String(i),NEURA_SUPERVISION_WORKSPACE:'w',NEURA_SUPERVISION_CHANNEL:'claude',NEURA_CHANNEL_TOKEN:'channel'},stdio:['pipe','pipe','pipe']});let stderr='';process_.stderr.on('data',b=>stderr+=b);const messages=[],waiters=new Map();let next=0;
@@ -30,12 +30,15 @@ test('native MCP 10/20/32 clients stay idle, deliver one channel event, replay s
   const change=(agentTerminals)=>{for(const client of ws.clients)client.send(JSON.stringify({type:'changed',state:true,terminals:[],...(agentTerminals?{agentTerminals}:{})}));};
   try{
    await Promise.all(clients.map(async c=>{const init=await c.rpc('initialize');assert.ok(init.result.capabilities.experimental['claude/channel']);c.process.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');}));
-   await until(()=>connections===count);await delay(300);const idle=requests;await delay(1600);assert.equal(requests,idle,'healthy idle bridge makes zero HTTP requests');
+   await until(()=>connections===count&&channelCompleted.size===count);
+   const readyBarrier=async()=>{const before=new Map(channelCompleted);await delay(readyDelay);for(const socket of ws.clients)socket.send(JSON.stringify({type:'ready',epoch:'fixture'}));await until(()=>clients.every((_,i)=>(channelCompleted.get(String(i))??0)===(before.get(String(i))??0)+1));};
+   const assertIdle=async label=>{const idle=requests;await delay(1600);assert.equal(requests,idle,`${label}: healthy idle bridge makes zero HTTP requests`);};
+   await readyBarrier();await assertIdle('initial');
    const tools=(await clients[0].rpc('tools/list')).result.tools;for(const name of ['task_list','task_read','task_wait','task_watch','task_report','task_ack','task_start','task_spawn','task_send','task_interrupt','task_respond','workspace_create','workspace_delete','workspace_list','browser_screenshot','channel_ack'])assert.ok(tools.some(t=>t.name===name),name);
    assert.equal(tools.find(t=>t.name==='task_watch').inputSchema.properties.taskIds.maxItems,undefined);
-   const beforeTarget=requests;pending.set('0',{content:'exactly once',meta:{kind:'instruction',task_id:'fixture'}});revision++;change(['0']);await until(()=>clients[0].messages.length===1);await delay(100);assert.equal(requests-beforeTarget,1,'one targeted change wakes only its MCP');const beforeOther=requests;change([]);await delay(100);assert.equal(requests,beforeOther,'unrelated state does not wake Channels');change(['0']);await delay(100);assert.equal(clients[0].messages.length,1);
+   const beforeTarget=requests;pending.set('0',{content:'exactly once',meta:{kind:'instruction',task_id:'fixture'}});revision++;change(['0']);await until(()=>clients[0].messages.length===1);await delay(100);assert.equal(requests-beforeTarget,1,'one targeted change wakes only its MCP');const beforeOther=requests;change([]);await assertIdle('unrelated state');assert.equal(requests,beforeOther,'unrelated state does not wake Channels');const beforeDuplicate=channelCompleted.get('0');change(['0']);await until(()=>channelCompleted.get('0')===beforeDuplicate+1);assert.equal(clients[0].messages.length,1);
    const waiting=clients.map(c=>c.rpc('tools/call',{name:'task_wait',arguments:{after:revision}}));await delay(100);revision++;change();for(const reply of await Promise.all(waiting))assert.equal(JSON.parse(reply.result.content[0].text).revision,revision);
-   const before=connections;for(const socket of ws.clients)socket.terminate();await until(()=>connections===before+count);await delay(200);assert.equal(clients[0].messages.length,1,'reconnect does not replay consumed channel instructions');
+   const before=connections;for(const socket of ws.clients)socket.terminate();await until(()=>connections===before+count);await readyBarrier();await assertIdle('reconnect');assert.equal(clients[0].messages.length,1,'reconnect does not replay consumed channel instructions');
    const ends=clients.map(c=>once(c.process,'exit'));clients.forEach(c=>c.process.stdin.end());for(const ended of await Promise.all(ends))assert.equal(ended[0],0);assert.ok(clients.every(c=>!c.stderr()));
    t.diagnostic(`${count} native MCPs: idle HTTP 0/1.6s vs prior >=${count*2}; state wake, channel dedup, reconnect and EOF verified`);
   }finally{clients.forEach(c=>c.process.kill());for(const c of ws.clients)c.terminate();await new Promise(r=>ws.close(r));await new Promise(r=>server.close(r));await rm(dir,{recursive:true,force:true});}

@@ -11,10 +11,14 @@ import ChromiumBridge
             FileHandle.standardError.write(Data("Reliability smoke requires an isolated test bundle and data directory.\n".utf8))
             exit(2)
         }
+        do {try SmokePhase.configure(directory: report.deletingLastPathComponent())}
+        catch {fputs("Cannot create smoke phase evidence\n", stderr); exit(2)}
+        SmokePhase.record("cef-init", "start", deadlineMs: 5000)
         if CommandLine.arguments.contains("--with-chromium") {
             UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":report.deletingLastPathComponent().path], forName:"NeuraChromiumSmoke")
             if let error = NCInitializeChromium() {FileHandle.standardError.write(Data(error.utf8)); exit(1)}
         }
+        SmokePhase.record("cef-init", "complete")
         Diagnostics.shared.start()
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
@@ -68,27 +72,36 @@ import ChromiumBridge
                     browser.onError = {error in FileHandle.standardError.write(Data("Browser smoke: \(error)\n".utf8))}
                     browserWindow.contentView = browser
                     browserWindow.orderBack(nil)
+                    SmokePhase.record("page-ready", "start", deadlineMs: 2000)
                     browser.loadURL("data:text/html,<title>modal-ready</title>")
                     for _ in 0..<100 {
                         if browserTitle == "modal-ready" {break}
                         try await Task.sleep(for: .milliseconds(20))
                     }
                     guard browserTitle == "modal-ready" else {throw SmokeFailure.browserDidNotLoad(browserTitle)}
+                    SmokePhase.record("page-ready", "complete")
                     browserWindow.orderOut(nil)
                     window.makeKeyAndOrderFront(nil)
                     model.state.features = ["workspace.delete", "workspace.delete.discard"]
-                    for _ in 0..<10 {
+                    for index in 0..<10 {
+                        SmokePhase.record("sheet-show", "start", index: index, deadlineMs: 500)
                         model.pendingWorkspaceDeletion = workspace
                         try await Task.sleep(for: .milliseconds(500))
                         guard let sheet = window.attachedSheet else {throw SmokeFailure.missingButton}
+                        SmokePhase.record("sheet-show", "complete", index: index)
+                        SmokePhase.record("sheet-cancel", "start", index: index, deadlineMs: 2000)
                         guard let cancel = findButton(sheet, label: "キャンセル"), click(cancel, in: sheet) else {throw SmokeFailure.pressFailed}
+                        SmokePhase.record("sheet-cancel", "complete", index: index)
+                        SmokePhase.record("sheet-dismiss", "start", index: index, deadlineMs: 2000)
                         for _ in 0..<100 {
                             if model.pendingWorkspaceDeletion == nil && window.attachedSheet == nil {break}
                             try await Task.sleep(for: .milliseconds(20))
                         }
                         guard model.pendingWorkspaceDeletion == nil, window.attachedSheet == nil else {throw SmokeFailure.modalNotDismissed}
+                        SmokePhase.record("sheet-dismiss", "complete", index: index)
                     }
                     // Also cover app-modal dialogs (the file/save panel path uses this mode).
+                    SmokePhase.record("app-modal", "start", deadlineMs: 2000)
                     let alert = NSAlert(); alert.messageText = "Modal event routing smoke"
                     alert.addButton(withTitle: "キャンセル")
                     let cancelTimer = Timer(timeInterval: 0.3, repeats: false) {_ in
@@ -96,15 +109,19 @@ import ChromiumBridge
                     }
                     RunLoop.main.add(cancelTimer, forMode: .modalPanel)
                     guard alert.runModal() == .alertFirstButtonReturn else {throw SmokeFailure.noEffect}
+                    SmokePhase.record("app-modal", "complete")
+                    SmokePhase.record("browser-resume", "start", deadlineMs: 2000)
                     browser.loadURL("data:text/html,<title>modal-resumed</title>")
                     for _ in 0..<100 {
                         if browserTitle == "modal-resumed" {break}
                         try await Task.sleep(for: .milliseconds(20))
                     }
                     guard browserTitle == "modal-resumed" else {throw SmokeFailure.browserDidNotLoad(browserTitle)}
+                    SmokePhase.record("browser-resume", "complete")
                     browser.close(); browser.onState = nil; browserWindow.orderOut(nil)
                     FileHandle.standardOutput.write(Data("Native sheet/app-modal clicks and Chromium resume passed.\n".utf8))
                 }
+                SmokePhase.record("sidebar-tabs", "start", deadlineMs: 5000)
                 guard let button = findButton(host, label: "左サイドバーを閉じる") else {throw SmokeFailure.missingButton}
                 guard click(button, in: window) else {throw SmokeFailure.pressFailed}
                 try await Task.sleep(for: .milliseconds(350))
@@ -148,9 +165,14 @@ import ChromiumBridge
                 try await Task.sleep(for: .milliseconds(100))
                 guard let finished = UserDefaults.standard.data(forKey: storageKey), try JSONDecoder().decode(WorkspaceTabState.self, from: finished).tabs.isEmpty else {throw SmokeFailure.noEffect}
                 model.endAction("smoke-background")
+                SmokePhase.record("sidebar-tabs", "complete")
+                SmokePhase.record("diagnostic-export", "start", deadlineMs: 5000)
                 try await Diagnostics.shared.export(to: report)
+                SmokePhase.record("diagnostic-export", "complete")
+                SmokePhase.record("exit", "start", deadlineMs: 1000)
                 Diagnostics.shared.stop()
                 if let id = Bundle.main.bundleIdentifier, id.hasPrefix("com.neuraos.reliability-smoke.") {UserDefaults.standard.removePersistentDomain(forName: id)}
+                SmokePhase.record("exit", "complete")
                 exit(0)
             } catch {
                 FileHandle.standardError.write(Data("Reliability UI smoke failed: \(error)\n".utf8))

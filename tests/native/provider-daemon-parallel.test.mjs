@@ -9,6 +9,7 @@ import {createServer} from 'node:net';
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import WebSocket from 'ws';
+import {waitForStateInvalidations} from './fixtures/state-invalidation-barrier.mjs';
 const binary=process.env.NEURA_NATIVE_DAEMON;
 const quote=s=>"'"+s.replaceAll("'","'\\''")+"'";
 async function until(check,label){const end=Date.now()+15000;do{if(await check())return;await delay(25);}while(Date.now()<end);assert.fail(`deadline: ${label}`);}
@@ -60,8 +61,7 @@ test('actual native daemon launches fake Claude and Codex at 10/20/32 concurrenc
    const exitEventStart=subscription.events.length;
    await Promise.all(terminals.map(v=>input(v,'exit')));
    await until(async()=>{const s=await request('/v1/state');return s.terminals.filter(v=>ids.has(v.id)&&v.status==='exited'&&v.exitCode===0).length===count;},'provider PTY exit');
-   await until(()=>terminals.every(v=>subscription.events.slice(exitEventStart).some(e=>e.type==='changed'&&e.terminals?.includes(v.id))),'exit invalidations');
-   assert.ok(subscription.events.some(e=>e.type==='changed'&&e.state));
+   await waitForStateInvalidations(subscription,ids,exitEventStart);
    subscription.ws.terminate();sockets.delete(subscription.ws);
    const result={provider,count,simultaneousActive:count,milliseconds:Math.round(performance.now()-began),registration:true,input:true,turnEvents:true,exit:true,reconnectCursorReplay:true};evidence.checks.push(result);t.diagnostic(JSON.stringify(result));
   });

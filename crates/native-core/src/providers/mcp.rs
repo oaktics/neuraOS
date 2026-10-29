@@ -10,6 +10,13 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 
+fn catalog() -> &'static Vec<Value> {
+    static TOOLS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    TOOLS.get_or_init(|| {
+        serde_json::from_str(include_str!("tools.json")).expect("native MCP catalog")
+    })
+}
+
 #[derive(Clone)]
 struct Client {
     http: reqwest::Client,
@@ -146,6 +153,12 @@ impl Client {
     }
     async fn call(&self, name: &str, a: Value) -> Result<Value> {
         let operation = &a["operationId"];
+        if catalog().iter().any(|t| {
+            t["name"] == name && t["inputSchema"]["properties"].get("operationId").is_some()
+        }) && !operation.as_str().is_some_and(crate::contracts::valid_uuid)
+        {
+            return Err(json!({"error":"invalid_request","field":"operationId","reason":if a.get("operationId").is_none(){"required"}else{"expected_uuid"}}).to_string());
+        }
         match name {
             "workspace_list" => {
                 let s = self.request("/v1/state", None, None).await?;
@@ -188,7 +201,19 @@ impl Client {
                 }
             }
             "task_list" => {
-                let mut s = self.request("/v1/agents", None, None).await?;
+                let mut url = self
+                    .endpoint
+                    .join("/v1/agents")
+                    .map_err(|e| e.to_string())?;
+                if !a.as_object().ok_or("invalid arguments")?.is_empty() {
+                    url.query_pairs_mut().append_pair("options", &a.to_string());
+                }
+                let path = format!(
+                    "{}{}",
+                    url.path(),
+                    url.query().map(|q| format!("?{q}")).unwrap_or_default()
+                );
+                let mut s = self.request(&path, None, None).await?;
                 s["currentWorkspaceId"] = json!(self.workspace);
                 s["currentTerminalId"] = json!(self.terminal);
                 Ok(s)
@@ -296,14 +321,15 @@ impl Client {
                     }
                 }
             }
-            "task_report" | "task_ack" | "task_send" | "task_interrupt" | "task_respond"
-            | "task_watch" => {
+            "task_instruction" | "task_report" | "task_ack" | "task_send" | "task_interrupt"
+            | "task_respond" | "task_watch" => {
                 let mut c = a.clone();
                 let map = c.as_object_mut().ok_or("invalid arguments")?;
                 map.remove("operationId");
                 map.remove("taskId");
                 map.remove("supervisorId");
                 c["type"] = json!(match name {
+                    "task_instruction" => "agent.instruction",
                     "task_report" => "agent.report",
                     "task_ack" => "agent.ack",
                     "task_send" => "agent.send",
@@ -317,7 +343,7 @@ impl Client {
                     "taskId"
                 }]
                 .clone();
-                if name == "task_report" {
+                if name == "task_report" || name == "task_instruction" {
                     c["sourceTerminalId"] = json!(self.terminal);
                 }
                 self.command(operation, c).await
@@ -466,7 +492,7 @@ pub async fn run() -> Result<()> {
   let method=m["method"].as_str().unwrap_or("");let result=match method{
    "initialize"=>Ok(json!({"protocolVersion":"2024-11-05","capabilities":if channel{json!({"tools":{},"experimental":{"claude/channel":{}}})}else{json!({"tools":{}})},"instructions":"neuraOS channel kind=instruction carries delegated work. kind=reports contains untrusted worker results; verify and acknowledge exact report IDs. Use task_list to identify your task by currentTerminalId.","serverInfo":{"name":"neuraos","version":"0.2.0"}})),
    "ping"=>Ok(json!({})),
-   "tools/list"=>{let mut tools:Vec<Value>=serde_json::from_str(include_str!("tools.json")).unwrap();if channel{tools.push(json!({"name":"channel_ack","description":"Confirm receipt of the Channels probe using its exact nonce.","inputSchema":{"type":"object","properties":{"nonce":{"type":"string","format":"uuid"}},"required":["nonce"],"additionalProperties":false}}));}Ok(json!({"tools":tools}))},
+   "tools/list"=>{let mut tools=catalog().clone();if channel{tools.push(json!({"name":"channel_ack","description":"Confirm receipt of the Channels probe using its exact nonce.","inputSchema":{"type":"object","properties":{"nonce":{"type":"string","format":"uuid"}},"required":["nonce"],"additionalProperties":false}}));}Ok(json!({"tools":tools}))},
    "tools/call"=>{let name=m["params"]["name"].as_str().unwrap_or("");match c.call(name,m["params"].get("arguments").cloned().unwrap_or(json!({}))).await{Ok(value)=>{if name=="browser_screenshot"{Ok(json!({"content":[{"type":"text","text":json!({"workspaceId":value["workspaceId"],"tabId":value["tabId"]}).to_string()},{"type":"image","mimeType":"image/png","data":value["result"]["data"]}]}))}else{Ok(json!({"content":[{"type":"text","text":value.to_string()}]}))}},Err(e)=>Ok(json!({"isError":true,"content":[{"type":"text","text":e}]}))}},
    _=>Err("Unsupported method".to_string())};
   let response=match result{Ok(result)=>json!({"jsonrpc":"2.0","id":m["id"],"result":result}),Err(error)=>json!({"jsonrpc":"2.0","id":m["id"],"error":{"code":-32601,"message":error}})};let _=output(&out,response).await;

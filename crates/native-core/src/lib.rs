@@ -17,3 +17,5 @@ pub mod mutation;
 pub mod diagnostics;
 
 pub mod process_tree;
+
+pub mod performance;
