@@ -1,0 +1,69 @@
+{
+  "kind": "native-daemon-pty-stream",
+  "realProvider": false,
+  "realBatteryMeasurement": false,
+  "results": [
+    {
+      "children": 10,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 2286.8212080000003,
+      "httpStateP95Ms": 18.39970799999992,
+      "httpStateP99Ms": 33.03154100000006,
+      "inputP99Ms": 40.75774999999999,
+      "httpErrors": 0,
+      "changeMessages": 78,
+      "streamReady": 2,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    },
+    {
+      "children": 20,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 3744.8245830000005,
+      "httpStateP95Ms": 18.859292000000096,
+      "httpStateP99Ms": 34.06879200000003,
+      "inputP99Ms": 96.87737500000003,
+      "httpErrors": 0,
+      "changeMessages": 121,
+      "streamReady": 2,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    },
+    {
+      "children": 32,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 6641.953791999998,
+      "httpStateP95Ms": 21.896749999999884,
+      "httpStateP99Ms": 29.859792000001107,
+      "inputP99Ms": 41.65166700000009,
+      "httpErrors": 0,
+      "changeMessages": 203,
+      "streamReady": 2,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    }
+  ],
+  "verification": {
+    "build": "debug checkpoint from core worktree with uncommitted server/main; not a release result",
+    "binarySha256": "95aa55d44764b60423f2ad3256220b018787dcd3c8167609195629973653e531",
+    "hardware": "MacBookPro17,1 / 8 cores / 16 GiB",
+    "limitations": [
+      "Synthetic Python output via real HTTP/PTY, not real Claude jobs",
+      "Other builds and agents were running concurrently",
+      "No energy or battery measurement",
+      "Not a controlled optimized-build comparison"
+    ]
+  }
+}
