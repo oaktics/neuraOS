@@ -284,6 +284,18 @@ async fn executable(name: &str) -> Result<std::path::PathBuf> {
         400,
     ))
 }
+async fn read_capped(reader: impl tokio::io::AsyncRead + Unpin, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| malformed())?;
+    if bytes.len() > limit as usize {
+        return Err(err("github_failed", "コマンドの応答が大きすぎます。", 502));
+    }
+    Ok(bytes)
+}
 async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
     let program = if is_gh {
         executable("gh").await?
@@ -322,11 +334,8 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
         4 * 1024 * 1024
     };
     let result=tokio::time::timeout(Duration::from_secs(if is_gh{60}else{30}),async{
-        let mut out=vec![];let mut diagnostic=vec![];
-        let mut stdout=stdout.take(limit+1);let mut stderr=stderr.take(limit+1);
-        let (a,b,status)=tokio::join!(stdout.read_to_end(&mut out),stderr.read_to_end(&mut diagnostic),child.wait());
-        if a.is_err()||b.is_err()||out.len()>limit as usize||diagnostic.len()>limit as usize{return Err(err("github_failed","コマンドの応答が大きすぎます。",502));}
-        if status.map_err(|_|malformed())?.success(){return String::from_utf8(out).map_err(|_|malformed());}
+        let (out,diagnostic,status)=tokio::try_join!(read_capped(stdout,limit),read_capped(stderr,limit),async{child.wait().await.map_err(|_|malformed())})?;
+        if status.success(){return String::from_utf8(out).map_err(|_|malformed());}
         let message=String::from_utf8_lossy(&diagnostic).to_lowercase();
         let (code,description,status)=if ["auth login","not logged","bad credentials","http 401"].iter().any(|s|message.contains(s)){("github_auth","GitHub にログインできません。gh auth login を実行してください。",401)}
         else if ["http 403","http 429","rate limit"].iter().any(|s|message.contains(s)){("github_forbidden","GitHub の権限または API 利用制限により操作できません。",403)}
@@ -336,7 +345,11 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
         Err(err(if is_gh{code}else{"git_failed"},description,status))
     }).await;
     match result {
-        Ok(v) => v,
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            Err(e)
+        }
         Err(_) => {
             let _ = child.kill().await;
             Err(err(
@@ -1367,5 +1380,24 @@ mod tests {
                 .unwrap(),
             json!(3)
         );
+    }
+}
+
+#[cfg(test)]
+mod output_bound_tests {
+    use super::*;
+    #[tokio::test]
+    async fn oversized_output_fails_without_waiting_for_eof() {
+        use tokio::io::AsyncWriteExt;
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let producer = tokio::spawn(async move {
+            writer.write_all(&[b'x'; 33]).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result = tokio::time::timeout(Duration::from_secs(1), read_capped(reader, 32))
+            .await
+            .unwrap();
+        producer.abort();
+        assert_eq!(result.unwrap_err().error, "github_failed");
     }
 }
