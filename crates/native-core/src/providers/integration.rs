@@ -242,16 +242,12 @@ impl ProviderService {
         result
     }
     async fn hook_socket(self: &Arc<Self>, terminal: &str) -> Result<PathBuf> {
-        let directory = std::env::temp_dir().join(format!("neura-hook-{}", super::id()));
-        tokio::fs::create_dir(&directory)
-            .await
-            .map_err(|e| e.to_string())?;
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .await
-            .map_err(|e| e.to_string())?;
+        let directory = super::socket_dir::create()?;
         let path = directory.join("activity.sock");
-        let listener = UnixListener::bind(&path).map_err(|e| e.to_string())?;
+        let listener = match UnixListener::bind(&path) {
+            Ok(listener) => listener,
+            Err(error) => { let _ = std::fs::remove_dir(&directory); return Err(error.to_string()); }
+        };
         let weak = Arc::downgrade(self);
         let terminal_id = terminal.to_string();
         let task = tokio::spawn(async move {

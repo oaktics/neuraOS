@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 pub mod event_queue;
 pub mod mcp;
+mod socket_dir;
 
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};

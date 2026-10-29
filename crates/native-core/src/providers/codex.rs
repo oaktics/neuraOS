@@ -39,10 +39,7 @@ impl CodexRpc {
         args: &[String],
         events: super::event_queue::EventSender,
     ) -> Result<Arc<Self>> {
-        let directory = std::env::temp_dir().join(format!("neura-codex-{}", super::id()));
-        tokio::fs::create_dir(&directory)
-            .await
-            .map_err(|e| e.to_string())?;
+        let directory = super::socket_dir::create()?;
         let socket = directory.join("server.sock");
         let endpoint = format!("unix://{}", socket.display());
         let binary = match std::env::current_exe() {
