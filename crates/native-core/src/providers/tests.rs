@@ -427,13 +427,15 @@ fn tail_skips_partial_utf8_before_decoding_valid_japanese_stop_and_title() {
     std::fs::create_dir(&root).unwrap();
     let path = root.join("session.jsonl");
     let mut checked = false;
-    for session in ["s", "ss", "sss"] {
+    for padding in 0..3 {
+        let session = "s";
         let content = format!(
-            "{}\n{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}{}\n",
             json!({"type":"tool","payload":"あ".repeat(300000)}),
             json!({"type":"ai-title","sessionId":session,"aiTitle":"日本語の完了"}),
             json!({"type":"assistant","sessionId":session,"timestamp":"2026-10-29T00:00:00Z","message":{"content":[{"type":"text","text":"検証済み"}]}}),
-            json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":"2026-10-29T00:00:00Z"})
+            json!({"type":"system","subtype":"turn_duration","sessionId":session,"timestamp":"2026-10-29T00:00:00Z"}),
+            " ".repeat(padding)
         );
         let bytes = content.as_bytes();
         let start = bytes.len() - 512 * 1024;
