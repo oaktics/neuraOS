@@ -88,3 +88,43 @@ Primary API definitions and behavior:
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c
 
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sysctl.c (environment visibility)
+
+## Short-lived restricted descendants and non-reaping exit observation
+
+The direct shared-reservation path must not reap a short-lived command before
+stopping descendants. A Git alias or hook can fork restricted `/bin/sleep`,
+exit before its ancestry is sampled, and leave the child holding output pipes.
+Its environment is unreadable, and reaping the original group leader removes
+the remaining identity anchor. Increasing the EOF timeout cannot repair this.
+
+Use `OwnedChild::new(child, lease.clone())` immediately after spawn, then
+`lease.attach(pid).await`. Read stdout/stderr concurrently with
+`lease.wait_exit().await`, followed by `lease.stop().await` and finally
+`owned.child_mut().wait().await`. Exit observation does not reap or supply an
+exit status; the final Child wait does. After cleanup/reap,
+`owned.into_inner()` disarms the cancellation guard. Drop in a live Tokio
+runtime completes attachment if necessary, then stops ownership before killing
+and reaping the child. It never calls try_wait before cleanup.
+
+Attach registers a single exit observer in the shared monitor. The wire attach
+request receives its normal short-lived ACK; a separate token-keyed exit event
+resolves local watch receivers. Active exit waits consume no request credits.
+The monitor uses NOTE_EXIT and checks identity after subscription to cover the
+exit-before-registration race; no new polling thread or per-command host is
+introduced.
+
+XNU permits `proc_pidinfo(PROC_PIDT_BSDINFOWITHUNIQID, arg=1)` to include
+unreaped zombies. The same PID/unique identity safely anchors its dedicated
+PGID until reap, while each descendant is still individually audit-signalled.
+The arg=0 query returns ESRCH for this state. See Apple's
+[proc_info.c](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+findzomb handling. The real Git fixture in `tests/process_exit.rs` forces a
+zombie leader before attachment using waitid(WEXITED|WNOWAIT), then verifies
+restricted orphan cleanup, exit codes 0/7, cancellation before/after attachment,
+and parent reaping. waitid is used only to enforce fixture timing.
+
+This does not extend the guarantee to daemon SIGKILL followed by init reaping
+the leader before observation, nor to an unseen restricted child that has
+changed session with setsid. A persistent live anchor or stronger OS ownership
+mechanism is still needed for those cases. PTY processes establish their own
+session and cannot simply join a group in the supervisor's session.

@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::{mpsc, oneshot, Notify, OnceCell, OwnedSemaphorePermit, Semaphore},
+    sync::{mpsc, oneshot, watch, Notify, OnceCell, OwnedSemaphorePermit, Semaphore},
 };
 
 const REQUEST_CREDIT: usize = 128;
@@ -23,6 +23,7 @@ struct Reply {
     _credit: Option<OwnedSemaphorePermit>,
 }
 type Replies = Arc<Mutex<HashMap<String, Reply>>>;
+type Exits = Arc<Mutex<HashMap<String, watch::Sender<Option<Result<()>>>>>>;
 struct DropStop {
     _credit: Option<OwnedSemaphorePermit>,
 }
@@ -77,6 +78,7 @@ struct Supervisor {
     lock_path: PathBuf,
     outgoing: mpsc::Sender<Value>,
     replies: Replies,
+    exits: Exits,
     alive: Arc<AtomicBool>,
     credit: Arc<Semaphore>,
     drops: Arc<DropStops>,
@@ -93,6 +95,7 @@ struct Reservation {
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
+        self.supervisor.exits.lock().unwrap().remove(&self.token);
         if self.registered.load(Ordering::Acquire) {
             // One entry per real reservation, retained/coalesced until its ACK.
             // No per-Drop spawned task or unbounded stream of stop messages.
@@ -105,11 +108,42 @@ impl ProcessReservation {
         &self.0.token
     }
     pub async fn attach(&self, pid: u32) -> Result<()> {
+        // Register the local completion slot before the wire command: a short
+        // leader may exit before attach ACK. This is lease state, not credit.
+        self.0
+            .supervisor
+            .exits
+            .lock()
+            .unwrap()
+            .entry(self.0.token.clone())
+            .or_insert_with(|| watch::channel(None).0);
         self.0
             .supervisor
             .request(json!({"op":"attach","token":self.0.token,"pid":pid}))
             .await
             .map(|_| ())
+    }
+    /// Wait for the attached leader to exit without reaping it. This consumes
+    /// no control credit and cancellation drops only this watch receiver.
+    /// Keep Child alive, call stop(), then Child::wait() to reap.
+    pub async fn wait_exit(&self) -> Result<()> {
+        let mut exit = self
+            .0
+            .supervisor
+            .exits
+            .lock()
+            .unwrap()
+            .get(&self.0.token)
+            .ok_or("process exit observer not attached")?
+            .subscribe();
+        loop {
+            if let Some(result) = exit.borrow().clone() {
+                return result;
+            }
+            exit.changed()
+                .await
+                .map_err(|_| "process supervisor exit observer closed".to_owned())?;
+        }
     }
     pub async fn stop(&self) -> Result<()> {
         let mut stopped = self.0.stopped.lock().await;
@@ -124,6 +158,12 @@ impl ProcessReservation {
             .map(|_| ());
         if result.is_ok() {
             self.0.registered.store(false, Ordering::Release);
+            self.0
+                .supervisor
+                .exits
+                .lock()
+                .unwrap()
+                .remove(&self.0.token);
         }
         *stopped = Some(result.clone());
         result
@@ -202,6 +242,7 @@ impl Supervisor {
         let output = child.stdout.take().ok_or("supervisor stdout")?;
         let (tx, mut rx) = mpsc::channel::<Value>(WRITE_QUEUE);
         let replies: Replies = Arc::new(Mutex::new(HashMap::new()));
+        let exits: Exits = Arc::new(Mutex::new(HashMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
         let drops = Arc::new(DropStops {
             pending: Mutex::new(DropQueue::default()),
@@ -213,11 +254,13 @@ impl Supervisor {
             lock_path: lock_path.to_owned(),
             outgoing: tx,
             replies: replies.clone(),
+            exits: exits.clone(),
             alive: alive.clone(),
             credit: Arc::new(Semaphore::new(REQUEST_CREDIT)),
             drops: drops.clone(),
         });
         let failed = replies.clone();
+        let failed_exits = exits.clone();
         let writer_alive = alive.clone();
         let writer_drops = drops.clone();
         tokio::spawn(async move {
@@ -253,6 +296,7 @@ impl Supervisor {
             }
             writer_alive.store(false, Ordering::Release);
             fail(&failed, "process supervisor writer closed");
+            failed_exits.lock().unwrap().clear();
             writer_drops.pending.lock().unwrap().clear();
         });
         tokio::spawn(async move {
@@ -261,6 +305,22 @@ impl Supervisor {
                 let Ok(value) = serde_json::from_str::<Value>(&line) else {
                     break;
                 };
+                if value["event"] == "exit" {
+                    if let Some(token) = value["token"].as_str() {
+                        if let Some(exit) = exits.lock().unwrap().get(token) {
+                            let result = if value["ok"] == true {
+                                Ok(())
+                            } else {
+                                Err(value["error"]
+                                    .as_str()
+                                    .unwrap_or("process exit observation failed")
+                                    .to_owned())
+                            };
+                            exit.send_replace(Some(result));
+                        }
+                    }
+                    continue;
+                }
                 if let Some(id) = value["id"].as_str() {
                     if drops.acknowledge(id) {
                         if value["ok"] != true {
@@ -273,6 +333,7 @@ impl Supervisor {
             }
             alive.store(false, Ordering::Release);
             fail(&replies, "process supervisor exited");
+            exits.lock().unwrap().clear();
             drops.pending.lock().unwrap().clear();
         });
         tokio::spawn(async move {
@@ -443,6 +504,7 @@ pub async fn process_supervisor() -> Result<i32> {
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let output = Arc::new(tokio::sync::Mutex::new(tokio::io::stdout()));
     let mut tasks = tokio::task::JoinSet::new();
+    let mut exit_observers = std::collections::HashSet::new();
     loop {
         // Stop-only traffic must also reap finished tasks; the stop branch
         // continues before the normal command ACK path below.
@@ -481,11 +543,28 @@ pub async fn process_supervisor() -> Result<i32> {
                     tree,
                     command["pid"].as_u64().filter(|v| *v <= i32::MAX as u64),
                 ) {
-                    (Some(tree), Some(pid)) => tree.attach_pid(pid as u32).await,
+                    (Some(tree), Some(pid)) => {
+                        let result = tree.attach_pid(pid as u32).await;
+                        if result.is_ok() && exit_observers.insert(token.clone()) {
+                            let output = output.clone();
+                            let token = token.clone();
+                            tasks.spawn(async move {
+                                let result = tree.wait_exit().await;
+                                let mut bytes = serde_json::to_vec(&match result {
+                                    Ok(()) => json!({"event":"exit","token":token,"ok":true}),
+                                    Err(error) => json!({"event":"exit","token":token,"ok":false,"error":error}),
+                                }).unwrap();
+                                bytes.push(b'\n');
+                                let _ = output.lock().await.write_all(&bytes).await;
+                            });
+                        }
+                        result
+                    }
                     _ => Err("invalid process attachment".into()),
                 }
             }
             Some("stop") => {
+                exit_observers.remove(&token);
                 // Keep the tree in the map until stop completes, so stdin EOF
                 // also awaits already-running stops before the helper exits.
                 let tree = trees.lock().await.get(&token).cloned();
@@ -555,6 +634,7 @@ mod pressure_tests {
                 lock_path: PathBuf::new(),
                 outgoing,
                 replies: Arc::new(Mutex::new(HashMap::new())),
+                exits: Arc::new(Mutex::new(HashMap::new())),
                 alive,
                 credit: Arc::new(Semaphore::new(REQUEST_CREDIT)),
                 drops,
@@ -680,6 +760,42 @@ mod pressure_tests {
             finish_reply(&service.replies, json!({"id":value["id"],"ok":true}));
             task.await.unwrap().unwrap();
         }
+    }
+    #[tokio::test]
+    async fn exit_waiters_never_hold_request_credit() {
+        let (service, mut rx) = mock();
+        let mut leases = Vec::new();
+        let mut waits = tokio::task::JoinSet::new();
+        for _ in 0..REQUEST_CREDIT * 2 {
+            let token = uuid::Uuid::new_v4().to_string();
+            let (tx, _) = watch::channel(None);
+            service.exits.lock().unwrap().insert(token.clone(), tx);
+            let lease = ProcessReservation(Arc::new(Reservation {
+                token,
+                supervisor: service.clone(),
+                registered: AtomicBool::new(true),
+                stopped: tokio::sync::Mutex::new(None),
+            }));
+            let l = lease.clone();
+            waits.spawn(async move { l.wait_exit().await });
+            leases.push(lease);
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(service.credit.available_permits(), REQUEST_CREDIT);
+        let s = service.clone();
+        let ready = tokio::spawn(async move { s.request(json!({"op":"ready"})).await });
+        let value = rx.recv().await.unwrap();
+        finish_reply(&service.replies, json!({"id":value["id"],"ok":true}));
+        ready.await.unwrap().unwrap();
+        for tx in service.exits.lock().unwrap().values() {
+            tx.send_replace(Some(Ok(())));
+        }
+        while let Some(result) = waits.join_next().await {
+            result.unwrap().unwrap();
+        }
+        assert_eq!(service.credit.available_permits(), REQUEST_CREDIT);
+        drop(leases);
+        assert!(service.exits.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn request_backpressure_does_not_cap_live_reservations() {

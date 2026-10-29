@@ -671,7 +671,7 @@ async fn reconcile_codex(
 async fn probe(program: &str, arg: &str) -> Result<String> {
     use std::process::Stdio;
     let lease = crate::process_tree::reserve().await?;
-    let mut child = tokio::process::Command::new(program)
+    let child = tokio::process::Command::new(program)
         .arg(arg)
         .env(crate::process_tree::OWNER_ENV, lease.token())
         .stdin(Stdio::null())
@@ -681,10 +681,15 @@ async fn probe(program: &str, arg: &str) -> Result<String> {
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| e.to_string())?;
+    let mut child = crate::process_tree::OwnedChild::new(child, lease.clone());
     lease
-        .attach(child.id().ok_or("provider probe pid")?)
+        .attach(child.child_mut().id().ok_or("provider probe pid")?)
         .await?;
-    let stdout = child.stdout.take().ok_or("provider probe stdout")?;
+    let stdout = child
+        .child_mut()
+        .stdout
+        .take()
+        .ok_or("provider probe stdout")?;
     let result = tokio::time::timeout(Duration::from_secs(3), async {
         let read = async {
             let mut bytes = Vec::new();
@@ -698,7 +703,11 @@ async fn probe(program: &str, arg: &str) -> Result<String> {
             }
             Ok(bytes)
         };
-        let wait = async { child.wait().await.map_err(|e| e.to_string()) };
+        let wait = async {
+            lease.wait_exit().await?;
+            lease.stop().await?;
+            child.child_mut().wait().await.map_err(|e| e.to_string())
+        };
         let (bytes, status) = tokio::try_join!(read, wait)?;
         if !status.success() {
             return Err("provider_probe_failed".into());
@@ -710,9 +719,11 @@ async fn probe(program: &str, arg: &str) -> Result<String> {
     .and_then(|result| result);
     let stopped = lease.stop().await;
     if result.is_err() {
-        let _ = child.kill().await;
+        let _ = child.child_mut().kill().await;
     }
     stopped?;
+    child.child_mut().wait().await.map_err(|e| e.to_string())?;
+    let _ = child.into_inner();
     result
 }
 
