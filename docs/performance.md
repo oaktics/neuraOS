@@ -10,6 +10,12 @@ There is no arbitrary fixed agent concurrency limit. Queue byte credits, report
 inbox capacity and test points such as 10/20/32 are not agent-count limits.
 Actual sustained concurrency depends on machine and provider resources.
 
+This release scope covers native runtime performance work and general extension/
+signing infrastructure. [1Password usability is deferred](1password-browser.md)
+and is not a prerequisite for concluding this performance release. This scope
+change is not evidence of a measured speedup; the controlled comparison and
+release checks remain separate.
+
 ## Current data path
 
 - HTTP commands and authenticated WebSocket invalidations replace fixed UI state,

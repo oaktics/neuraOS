@@ -2,6 +2,12 @@
 
 neuraOS uses CEF 156.0.7 (Chromium 156.0.8078.17). Signing/notarization permits macOS to run the application; it does not enable Chrome extension APIs.
 
+1Password-specific usability is deferred to [Issue #134](https://github.com/oaktics/neuraOS/issues/134)
+and is not a release acceptance gate for this general extension foundation.
+The dedicated 1Password setup entry is outside this release scope. Installation,
+Connected status and content-script injection do not establish account sync,
+saving or filling; see the [deferred investigation](1password-browser.md).
+
 ## Using extensions
 
 Open the puzzle-piece menu beside the browser address field:

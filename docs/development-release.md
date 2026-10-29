@@ -1,5 +1,7 @@
 # 開発・配布フロー
 
+今回のリリース範囲はnative runtimeの性能改善と一般拡張・署名基盤。1Password実用化はユーザー判断で[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、専用設定導線を範囲から外す。保存・自動入力の受入未完了を今回のrelease blockerにはしない。一般拡張・署名・更新の回帰検証は維持し、最終性能結果とrelease完了は別途確認する。
+
 1. `staging`を起点にneuraOSでworktreeを作成し、機能ブランチで変更・commitする。
 2. GitHubサイドバーからPush → `staging`向けにPR作成。PR本文に変更内容と確認結果を書く。
 3. CI `native-development / macos` とレビューを確認して`staging`へマージする。この段階ではリリースしない。
@@ -139,11 +141,11 @@ node scripts/native/release/smoke.mjs
 | Swift updater | 18成功 | `/tmp/neura-root-updater18-tests.log`。実LaunchAgent適用とは別 |
 | legacy互換テスト | 全体165件中164成功、1失敗後に対象1件再試験成功 | `/tmp/neura-root-legacy-contract-tests.log`、`/tmp/neura-root-client-capabilities-retest.log`。Swift source列挙漏れの修正後の対象再試験であり、全体を再実行して165成功したとは記さない |
 
-実モデルを使うClaudeの受入は別途確認する。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。公式1Password拡張の導入・再起動保持、Connected表示、実アカウント同期・保存・自動入力も別の受入である。現在popupのロゴ停止と公式overviewのHTTP 500が報告され、fixture CSP修正後の再試験中であり、Connectedだけでは受入完了としない。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
+実モデルを使うClaudeの受入は別途確認する。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
 
 ## Chromium browser
 
-Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions share the Chromium profile. Chrome-style management windows provide extension installation and toolbar popups. See [browser extensions](browser-extensions.md) and [1Password setup](1password-browser.md).
+Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions share the Chromium profile. Chrome-style management windows provide extension installation and toolbar popups. See [browser extensions](browser-extensions.md) and [deferred 1Password investigation](1password-browser.md).
 
 `pnpm build` and `pnpm test:macos` prepare the pinned CEF SDK from `scripts/native/chromium/version.json`. Direct `swift build/test` users must first run `node scripts/native/chromium/prepare.mjs`. Downloads and extracted SDKs are shared across worktrees in `~/Library/Caches/neuraOS/cef/<architecture>-<archive checksum>/` (override with `NEURA_CEF_CACHE_DIR`). Each worktree keeps an ignored `apps/macos/.cef/sdk` symlink; generated helpers stay local. Completed cache entries are published atomically, so concurrent builds never consume a partial extraction. Simultaneous first-time preparations may download independently; subsequent preparations reuse the SDK. Old worktree-local SDK directories are replaced with links on preparation. Direct Swift commands still require preparation once per worktree. The archive checksum is verified before extraction; updating Chromium requires updating both architecture entries in the manifest and rerunning the packaged smoke test. Chromium is bundled with the application, so security updates require a new neuraOS release.
 

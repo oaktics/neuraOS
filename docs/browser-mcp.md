@@ -5,6 +5,10 @@ Browser tools operate the actual mounted CEF tabs and their existing profile,
 cookies and page state. They do not launch another Chromium or expose a remote
 DevTools port. Restart the CLI after upgrading to obtain its browser credential.
 
+1Password usability is [deferred](1password-browser.md). Browser MCP fixture
+success does not establish account sync, saving or filling, and dedicated
+Chrome-style extension windows remain outside browser MCP.
+
 ## Scope and controls
 
 `browser_list` returns mounted tabs in every workspace of the caller's project;
