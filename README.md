@@ -15,7 +15,7 @@ xcodebuild -downloadComponent MetalToolchain
 pnpm dev
 ```
 
-`pnpm dev`はnative daemonとSwiftUIアプリをビルドし、ユーザーのLaunchAgentをnative版へ再登録して開きます。**既存DaemonとPTY／エージェントを停止するため、実行前に作業を保存してください。** ビルドだけなら`pnpm build`を使います。
+`pnpm dev`はnative daemonとSwiftUIアプリをビルドし、`service ensure`でLaunchAgentを確認して開きます。稼働中なら旧Node版や別パスのnative版でもDaemonとPTYを温存し、停止中・未登録の場合だけ開発用native版を登録します。ビルドだけなら`pnpm build`を使います。
 
 生成先：`apps/macos/dist/neuraOS.app`
 
@@ -29,7 +29,7 @@ pnpm service stop
 pnpm service restart
 ```
 
-`pnpm dev`、`install`、`restart`は既存DaemonのPTYを終了します。作業中は実行しないでください。アプリのウィンドウを閉じる／アプリを終了するだけならPTYは継続します。Daemon自身の再起動やログアウト・PC停止後は履歴を復元し、中断として表示します。生きていたプロセスを復元したとは表示しません。
+`install`、`restart`、`stop`は既存DaemonのPTYを終了します。作業中は実行しないでください。アプリのウィンドウを閉じる／アプリを終了するだけならPTYは継続します。Daemon自身の再起動やログアウト・PC停止後は履歴を復元し、中断として表示します。生きていたプロセスを復元したとは表示しません。
 
 DaemonはRust製のネイティブ実行ファイルです。mainへのマージ後はCIがDaemon同梱の配布版をビルドし、GitHub Releasesへ公開します。配布RuntimeはRustの`neura-native-core`とSwiftの`neura-updater`の2実行ファイルで、Node.js・tsx・node_modulesを含みません。アプリ全体にはSwift UI、CEFのframework/helper、Sleep serviceも同梱します。native版同士はneuraOSメニューの「アップデートを確認…」から更新できます。build62以前のNode Runtime版からの初回移行には、新しい署名済み成果物のnative updaterを使う別手順が必要です。旧更新ボタンだけでは直接移行できません。更新時はDaemonも再起動するため、作業を保存してください。公開版はDeveloper ID署名・Apple公証付きです。ローカル検証ではad-hoc署名も使用します。初回導入・PR・検証・復旧手順は[開発・配布フロー](docs/development-release.md)を参照してください。
 

@@ -71,7 +71,7 @@ build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、
 
 2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`／healthはmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。Developer ID署名済み検証bundle自体は未公証で、そのhelperの直接起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
 
-追加の`854cc25`では稼働サービス温存・新native instance判定・ファイルdownload／stream hashを実装し、Swift updater 17 testsが成功した（`/tmp/neura-native-review-fixes-tests-final.log`）。これも隔離fixtureの結果であり、最新の署名済み候補からの実サービス移行は別の未実施項目である。
+追加の`854cc25`では稼働サービス温存・新native instance判定・ファイルdownload／stream hashを実装し、Swift updater 17 testsが成功した（`/tmp/neura-native-review-fixes-tests-final.log`）。続く`5014291`で`pnpm dev`も`service ensure`へ変更し、稼働サービス温存を含む18 testsが成功した（`/tmp/neura-native-dev-preservation-tests.log`）。これらは隔離fixtureの結果であり、最新の署名済み候補からの実サービス移行は別の未実施項目である。
 
 ## 更新の保証範囲
 
@@ -118,7 +118,7 @@ node scripts/native/release/package.mjs
 node scripts/native/release/smoke.mjs
 ```
 
-`pnpm daemon`はRust daemonを起動する。比較用の旧TypeScript daemonは`pnpm daemon:legacy`に限定する。`pnpm service`は開発用Node wrapperからnative helperへ転送する。`pnpm dev`はbuild後にサービスを再登録するため、既存DaemonとPTYを停止する。稼働中の作業を保持したい場合は実行しない。
+`pnpm daemon`はRust daemonを起動する。比較用の旧TypeScript daemonは`pnpm daemon:legacy`に限定する。`pnpm service`は開発用Node wrapperからnative helperへ転送する。`pnpm dev`はbuild後に`service ensure`を使い、旧Node版・別パスのnative版も含め稼働中のDaemonとPTYを温存する。停止中・未登録の場合だけ開発用native版を登録する。稼働サービスの置換は明示的な`pnpm service install`またはupdater applyで行う。`restart`・`stop`もPTYを終了する明示操作なので、先に作業を保存する。
 
 パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱のネイティブDaemon／SQLite／PTYを実行する。ソースチェックアウトや開発環境の`node_modules`に依存しないことを確認する。Node.jsはこの試験を起動する開発ツールとして使用する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
 
