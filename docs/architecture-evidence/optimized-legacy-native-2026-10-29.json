@@ -32,7 +32,7 @@
     "No Swift UI/CEF or real model workload in this benchmark; it does not measure battery life or total app energy.",
     "Input p99 is calculated over only N simultaneous input commands per point (N=1/5/10/20/32), not a production latency distribution.",
     "CPU counters converted from Mach ticks using mach_timebase_info and independently checked against getrusage.",
-    "Native binary built from the stated source commit. Subsequent documentation-only commits do not alter the measured implementation."
+    "Native binary built from the stated source checkpoint. Subsequent process-exit registration fixes are verified separately; these measurements are not from the published release binary."
   ],
   "nativeBinarySha256": "4cf24b1e7ff9772087f071824a9b15ed28f8753471f818b5d2542050f08f8606",
   "samplerSourceCommit": "6f04e0e",

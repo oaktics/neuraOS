@@ -127,12 +127,12 @@ node scripts/native/release/smoke.mjs
 
 ## native統合の検証checkpoint（2026-10-29）
 
-[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`a61effc`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。正式なCI結果はPRのchecks、公開版の署名・公証とtagは[GitHub Releases](https://github.com/oaktics/neuraOS/releases/latest)で確認する。
+[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`3547a58`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。正式なCI結果はPRのchecks、公開版の署名・公証とtagは[GitHub Releases](https://github.com/oaktics/neuraOS/releases/latest)で確認する。
 
 | 検証 | 確認した結果 | 証跡／範囲 |
 | --- | --- | --- |
-| Rust core | library 85成功、integration 5成功 | `/tmp/neura-review-final-rust.log`。子プロセス内の部分再実行を重複加算しない |
-| 最適化版の公開protocol／移行／provider／ownership | 28成功、失敗0、skip 0 | `/tmp/neura-review-final-public.log`。HTTP／MCP、Node→Rust→Node移行、fake CLI各10/20/32、共有予約、attach前crash、lifetime lockを含む。実モデル負荷や速度比較ではない |
+| Rust core | library 87成功、integration 5成功 | `/tmp/neura-inexit-final-rust.log`。子プロセス内の部分再実行を重複加算しない |
+| 最適化版の公開protocol／移行／provider／ownership | 28成功、失敗0、skip 0 | `/tmp/neura-inexit-final-public.log`。HTTP／MCP、Node→Rust→Node移行、fake CLI各10/20/32、共有予約、attach前crash、lifetime lockを含む。実モデル負荷や速度比較ではない |
 | 実daemon間データ移行 | Node→Rust→Node、1成功 | [保存証拠](architecture-evidence/legacy-native-data-migration-2026-10-29.json)、`/tmp/neura-root-migration-final.log`。同一の隔離DBでUnicode PTY/cursor、設定、通知、pending/reports/exact ACK、復旧状態、operation結果を確認。実LaunchAgent／installed appの更新ではない |
 | native ProviderService並列起動 | Claude／Codexのfake CLI各10/20/32、全7成功 | [保存証拠](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)、`/tmp/neura-root-provider-daemon-parallel.log`。全段階で指定数の同時active、登録、入力、turn event、exit、UI stream再接続/cursor replayを確認。終了後残存プロセス0 |
 | plist署名正規化のrelease回帰 | 13成功 | `/tmp/neura-root-plist-release-tests.log`。正式CI／公証とは別 |

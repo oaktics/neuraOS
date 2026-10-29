@@ -65,7 +65,7 @@ Resize requests share the bounded output FIFO with already-read bytes and pendin
 
 ## Optimized comparison (2026-10-29)
 
-[Full results and build metadata](architecture-evidence/optimized-legacy-native-2026-10-29.json) use an Apple M1 / 8 CPU / 16 GiB Mac on macOS 26.6.2. The native optimized local binary was built from `a61effc`; the legacy daemon used Node 24.13.0 from the same checkout. Both use SQLite WAL with `synchronous=FULL`. Each terminal emits 1,024 ordered rows with a 2,048-byte payload and Unicode marker. Two runs per runtime were performed in native→legacy→legacy→native order, with heavy build/worker jobs stopped. Normal desktop background applications remained running. Values below are the min–max across the two runs, not confidence intervals.
+[Full results and build metadata](architecture-evidence/optimized-legacy-native-2026-10-29.json) use an Apple M1 / 8 CPU / 16 GiB Mac on macOS 26.6.2. This is the `a61effc` performance checkpoint, before the subsequent process-exit registration fix, not a measurement of the published release artifact. The native optimized local binary was built from `a61effc`; the legacy daemon used Node 24.13.0 from the same checkout. Both use SQLite WAL with `synchronous=FULL`. Each terminal emits 1,024 ordered rows with a 2,048-byte payload and Unicode marker. Two runs per runtime were performed in native→legacy→legacy→native order, with heavy build/worker jobs stopped. Normal desktop background applications remained running. Values below are the min–max across the two runs, not confidence intervals.
 
 | PTYs | Completion ms: legacy | native | State p99 ms: legacy | native | Input p99 ms: legacy | native |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
