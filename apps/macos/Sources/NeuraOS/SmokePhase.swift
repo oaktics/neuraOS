@@ -19,7 +19,8 @@ import Foundation
         guard var bytes = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) else {return}
         bytes.append(10)
         try? output?.write(contentsOf: bytes)
-        try? output?.synchronize()
+        // FileHandle writes directly to the kernel, with no stdio buffer to flush.
+        // Avoid fsync on the UI thread: process termination does not discard kernel writes.
         // Deliberate hang only reachable from the guarded disposable smoke entrypoint.
         if state == "start", ProcessInfo.processInfo.environment["NEURA_UI_SMOKE_STALL_PHASE"] == id {
             while true {RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))}
