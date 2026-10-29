@@ -1,53 +1,555 @@
 use crate::error::ApiError;
-use serde_json::{json,Value};
-use sha2::{Digest,Sha256};
-use std::{path::{Path,PathBuf},time::Duration};
-use tokio::{fs,process::Command};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tokio::{fs, process::Command};
 use uuid::Uuid;
-pub fn hash(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
-pub fn text<'a>(v:&'a Value,k:&str)->Result<&'a str,ApiError>{v.get(k).and_then(Value::as_str).ok_or_else(||ApiError::new("invalid_request","要求の形式が正しくありません。",400))}
-pub async fn git(root:&str,args:&[&str])->Result<String,ApiError>{run(root,"git",&[&["--no-optional-locks","-c","core.quotepath=false"][..],args].concat(),30).await}
-pub async fn run(root:&str,program:&str,args:&[&str],seconds:u64)->Result<String,ApiError>{
- use std::process::Stdio;use tokio::io::AsyncReadExt;
- async fn bounded(reader:impl tokio::io::AsyncRead+Unpin,limit:u64)->Result<Vec<u8>,ApiError>{
-  let mut data=Vec::new();reader.take(limit+1).read_to_end(&mut data).await.map_err(|_|ApiError::storage())?;
-  if data.len()as u64>limit{return Err(ApiError::new("output_too_large","外部処理の出力が大きすぎます。",413));}Ok(data)
- }
- let token=Uuid::new_v4().to_string();
- let mut child=Command::new(program).env(crate::process_tree::OWNER_ENV,&token).args(args).current_dir(root).env("GIT_TERMINAL_PROMPT","0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|ApiError::new("operation_failed","外部プログラムを起動できません。",500))?;
- let pid=child.id().ok_or_else(ApiError::storage)?;
- let tree=tokio::task::spawn_blocking(move||crate::process_tree::ProcessTree::new_with_token(pid,token)).await.map_err(|_|ApiError::storage())?.map_err(|_|ApiError::new("process_monitor_failed","外部処理の所有確認ができません。",500))?;
- let stdout=child.stdout.take().ok_or_else(ApiError::storage)?;let stderr=child.stderr.take().ok_or_else(ApiError::storage)?;
- let result=tokio::time::timeout(Duration::from_secs(seconds),async{
-  tokio::try_join!(bounded(stdout,4*1024*1024),bounded(stderr,64*1024),async{let status=child.wait().await.map_err(|_|ApiError::storage())?;tree.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","外部処理の終了を確認できません。",500))?;Ok(status)})
- }).await;
- tree.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","外部処理の終了を確認できません。",500))?;
- let output=match result{Ok(Ok(v))=>v,Ok(Err(e))=>{let _=child.kill().await;let _=child.wait().await;return Err(e);},Err(_)=>{let _=child.kill().await;let _=child.wait().await;return Err(ApiError::new("operation_timeout","外部処理が時間内に終了しませんでした。",504));}};
- if !output.2.success(){return Err(ApiError::new("git_failed",String::from_utf8_lossy(&output.1).chars().take(2000).collect::<String>(),400));}
- Ok(String::from_utf8_lossy(&output.0).into_owned())
+pub fn hash(s: &str) -> String {
+    format!("{:x}", Sha256::digest(s.as_bytes()))
 }
-pub async fn project_folder(path:&str)->Result<(String,bool),ApiError>{let path=fs::canonicalize(path).await.map_err(|_|ApiError::new("not_directory","フォルダを選択してください。",400))?;if !fs::metadata(&path).await.map_err(|_|ApiError::storage())?.is_dir(){return Err(ApiError::new("not_directory","フォルダを選択してください。",400));}let p=path.to_string_lossy().into_owned();Ok(match git(&p,&["rev-parse","--show-toplevel"]).await{Ok(root)=>(root.trim().into(),true),Err(_)=>(p,false)})}
-fn valid_path(path:&str,git_allowed:bool)->Result<(),ApiError>{if Path::new(path).is_absolute()||path.contains('\0')||path.split(['/', '\\']).any(|p|p==".."||(!git_allowed&&p==".git")){return Err(ApiError::new("invalid_path","このパスにはアクセスできません。",400));}Ok(())}
-pub async fn scoped(root:&str,path:&str)->Result<PathBuf,ApiError>{valid_path(path,false)?;let base=fs::canonicalize(root).await.map_err(|_|ApiError::storage())?;let target=fs::canonicalize(base.join(path)).await.map_err(|_|ApiError::new("file_missing","ファイルがありません。",404))?;let rel=target.strip_prefix(base).map_err(|_|ApiError::new("invalid_path","このパスにはアクセスできません。",400))?;if rel.components().any(|c|c.as_os_str()==".git"){return Err(ApiError::new("invalid_path","このパスにはアクセスできません。",400));}Ok(target)}
-pub async fn files(root:&str,path:&str)->Result<Value,ApiError>{let mut dir=fs::read_dir(scoped(root,path).await?).await.map_err(|_|ApiError::storage())?;let mut entries=Vec::new();while let Some(e)=dir.next_entry().await.map_err(|_|ApiError::storage())?{let name=e.file_name().to_string_lossy().into_owned();let kind=e.file_type().await.map_err(|_|ApiError::storage())?;if [".git","node_modules",".build",".DS_Store"].contains(&name.as_str())||kind.is_symlink(){continue;}entries.push(json!({"name":name,"path":if path.is_empty(){name.clone()}else{format!("{path}/{name}")},"isDirectory":kind.is_dir()}));}entries.sort_by(|a,b|b["isDirectory"].as_bool().cmp(&a["isDirectory"].as_bool()).then(a["name"].as_str().cmp(&b["name"].as_str())));Ok(json!({"path":path,"entries":entries}))}
-pub async fn file(root:&str,path:&str)->Result<Value,ApiError>{let p=scoped(root,path).await?;let m=fs::metadata(&p).await.map_err(|_|ApiError::storage())?;if !m.is_file()||m.len()>1048576{return Err(ApiError::new("file_too_large","表示できるのは1MB以下のテキストファイルです。",400));}let data=fs::read(p).await.map_err(|_|ApiError::storage())?;if data.contains(&0){return Err(ApiError::new("binary_file","バイナリファイルは表示できません。",400));}let content=String::from_utf8(data).map_err(|_|ApiError::new("file_encoding","UTF-8以外のファイルは編集できません。",400))?;Ok(json!({"path":path,"hash":hash(&content),"content":content}))}
-pub async fn save_file(root:&str,path:&str,content:&str,expected:&str)->Result<Value,ApiError>{if content.len()>1048576{return Err(ApiError::new("file_too_large","ファイルが大きすぎます。",413));}let previous=file(root,path).await?;if previous["hash"]!=expected{return Err(ApiError::new("file_conflict","ファイルが外部で更新されています。",409));}let target=scoped(root,path).await?;let temporary=target.parent().unwrap().join(format!(".neura-{}.tmp",Uuid::new_v4()));let result=async{let mut handle=fs::OpenOptions::new().write(true).create_new(true).open(&temporary).await.map_err(|_|ApiError::storage())?;use tokio::io::AsyncWriteExt;handle.write_all(content.as_bytes()).await.map_err(|_|ApiError::storage())?;handle.set_permissions(fs::metadata(&target).await.map_err(|_|ApiError::storage())?.permissions()).await.map_err(|_|ApiError::storage())?;handle.sync_all().await.map_err(|_|ApiError::storage())?;fs::rename(&temporary,&target).await.map_err(|_|ApiError::storage())?;Ok(json!({"path":path,"content":content,"hash":hash(content)}))}.await;let _=fs::remove_file(temporary).await;result}
-pub async fn git_status(root:&str)->Result<Value,ApiError>{let raw=git(root,&["status","--porcelain=v1","-z","--untracked-files=normal"]).await?;let mut parts=raw.split('\0');let mut changes=Vec::new();while let Some(entry)=parts.next(){if entry.len()<3{continue;}let status=&entry[..2];changes.push(json!({"status":status,"path":&entry[3..]}));if status.contains(['R','C']){parts.next();}}let branch=git(root,&["branch","--show-current"]).await?;Ok(json!({"branch":if branch.trim().is_empty(){"(detached)"}else{branch.trim()},"changes":changes}))}
-pub async fn diff(root:&str,path:&str)->Result<Value,ApiError>{valid_path(path,false)?;let status=git_status(root).await?;let c=status["changes"].as_array().unwrap().iter().find(|c|c["path"]==path);let content=match c{None=>"変更はありません。".into(),Some(c)if c["status"]=="??"=>format!("新規ファイル: {path}\n\n{}",file(root,path).await?["content"].as_str().unwrap_or("")),_=>git(root,&["diff","--no-ext-diff","--no-textconv","HEAD","--",&format!(":(literal){path}")]).await?};Ok(json!({"path":path,"content":content}))}
-pub async fn fetch_default(root:&str)->Result<Value,ApiError>{let raw=git(root,&["ls-remote","--symref","origin","HEAD"]).await?;let reference=raw.lines().find_map(|l|l.strip_prefix("ref: ").and_then(|l|l.strip_suffix("\tHEAD"))).ok_or_else(||ApiError::new("remote_head_missing","originのデフォルトブランチを取得できません。",400))?;if !reference.starts_with("refs/heads/"){return Err(ApiError::new("remote_head_missing","ブランチが見つかりません。",400));}git(root,&["check-ref-format",reference]).await?;let branch=&reference[11..];git(root,&["fetch","--no-tags","origin",&format!("+{reference}:refs/remotes/origin/{branch}")]).await?;let commit=git(root,&["rev-parse","--verify",&format!("refs/remotes/origin/{branch}^{{commit}}")]).await?;Ok(json!({"branch":branch,"commit":commit.trim()}))}
-async fn clean(root:&str)->Result<(),ApiError>{if !git(root,&["status","--porcelain=v1","--untracked-files=all"]).await?.trim().is_empty(){return Err(ApiError::new("workspace_dirty","未コミットの変更・未追跡ファイルがあります。",409));}Ok(())}
-pub async fn sync_default(root:&str,target:&Value)->Result<Value,ApiError>{clean(root).await?;let branch=text(target,"branch")?;let commit=text(target,"commit")?;if git(root,&["branch","--show-current"]).await?.trim().is_empty(){return Err(ApiError::new("detached_head","ブランチに切り替えてください。",409));}let reference=format!("refs/heads/{branch}");let exists=git(root,&["for-each-ref","--format=%(refname)",&reference]).await?.lines().any(|l|l==reference);if exists&&git(root,&["merge-base","--is-ancestor",&reference,commit]).await.is_err(){return Err(ApiError::new("local_commits","リモート未反映のコミットがあります。",409));}let ignored=git(root,&["ls-files","--others","--ignored","--exclude-standard","--directory","-z"]).await?;let tracked=git(root,&["ls-tree","-r","--name-only","-z",commit]).await?;for i in ignored.split('\0').filter(|s|!s.is_empty()){let i=i.trim_end_matches('/');if tracked.split('\0').any(|t|t==i||t.starts_with(&format!("{i}/"))||i.starts_with(&format!("{t}/"))){return Err(ApiError::new("ignored_collision","更新先と重なる無視対象ファイルがあります。",409));}}clean(root).await?;if exists{git(root,&["switch","--no-overwrite-ignore",branch]).await?;}else{git(root,&["switch","--no-overwrite-ignore","-c",branch,commit]).await?;}git(root,&["-c","merge.autostash=false","merge","--ff-only",commit]).await?;Ok(target.clone())}
-pub async fn setup_path(root:&str,path:&str)->Result<PathBuf,ApiError>{valid_path(path,true)?;let base=fs::canonicalize(root).await.map_err(|_|ApiError::storage())?;let target=fs::canonicalize(base.join(path)).await.map_err(|_|ApiError::new("setup_missing","setup scriptが見つかりません。",400))?;if target==base||!target.starts_with(base)||!fs::metadata(&target).await.map_err(|_|ApiError::storage())?.is_file(){return Err(ApiError::new("invalid_setup_path","リポジトリ内のファイルを指定してください。",400));}Ok(target)}
-pub async fn detect_setup(root:&str)->Value{let mut paths=Vec::new();for p in ["scripts/worktree-setup.sh","worktree-setup.sh",".orca/setup.sh",".neuraos/setup.sh","scripts/setup.sh","setup.sh"]{if setup_path(root,p).await.is_ok(){paths.push(p);}}json!({"scripts":paths})}
+pub fn text<'a>(v: &'a Value, k: &str) -> Result<&'a str, ApiError> {
+    v.get(k)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::new("invalid_request", "要求の形式が正しくありません。", 400))
+}
+pub async fn git(root: &str, args: &[&str]) -> Result<String, ApiError> {
+    run(
+        root,
+        "git",
+        &[
+            &["--no-optional-locks", "-c", "core.quotepath=false"][..],
+            args,
+        ]
+        .concat(),
+        30,
+    )
+    .await
+}
+pub async fn run(
+    root: &str,
+    program: &str,
+    args: &[&str],
+    seconds: u64,
+) -> Result<String, ApiError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    async fn bounded(
+        reader: impl tokio::io::AsyncRead + Unpin,
+        limit: u64,
+    ) -> Result<Vec<u8>, ApiError> {
+        let mut data = Vec::new();
+        reader
+            .take(limit + 1)
+            .read_to_end(&mut data)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        if data.len() as u64 > limit {
+            return Err(ApiError::new(
+                "output_too_large",
+                "外部処理の出力が大きすぎます。",
+                413,
+            ));
+        }
+        Ok(data)
+    }
+    let token = Uuid::new_v4().to_string();
+    let mut child = Command::new(program)
+        .env(crate::process_tree::OWNER_ENV, &token)
+        .args(args)
+        .current_dir(root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| ApiError::new("operation_failed", "外部プログラムを起動できません。", 500))?;
+    let pid = child.id().ok_or_else(ApiError::storage)?;
+    let tree = tokio::task::spawn_blocking(move || {
+        crate::process_tree::ProcessTree::new_with_token(pid, token)
+    })
+    .await
+    .map_err(|_| ApiError::storage())?
+    .map_err(|_| {
+        ApiError::new(
+            "process_monitor_failed",
+            "外部処理の所有確認ができません。",
+            500,
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(ApiError::storage)?;
+    let stderr = child.stderr.take().ok_or_else(ApiError::storage)?;
+    let result = tokio::time::timeout(Duration::from_secs(seconds), async {
+        tokio::try_join!(
+            bounded(stdout, 4 * 1024 * 1024),
+            bounded(stderr, 64 * 1024),
+            async {
+                let status = child.wait().await.map_err(|_| ApiError::storage())?;
+                tree.stop().await.map_err(|_| {
+                    ApiError::new(
+                        "process_cleanup_failed",
+                        "外部処理の終了を確認できません。",
+                        500,
+                    )
+                })?;
+                Ok(status)
+            }
+        )
+    })
+    .await;
+    tree.stop().await.map_err(|_| {
+        ApiError::new(
+            "process_cleanup_failed",
+            "外部処理の終了を確認できません。",
+            500,
+        )
+    })?;
+    let output = match result {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(e);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(ApiError::new(
+                "operation_timeout",
+                "外部処理が時間内に終了しませんでした。",
+                504,
+            ));
+        }
+    };
+    if !output.2.success() {
+        return Err(ApiError::new(
+            "git_failed",
+            String::from_utf8_lossy(&output.1)
+                .chars()
+                .take(2000)
+                .collect::<String>(),
+            400,
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.0).into_owned())
+}
+pub async fn project_folder(path: &str) -> Result<(String, bool), ApiError> {
+    let path = fs::canonicalize(path)
+        .await
+        .map_err(|_| ApiError::new("not_directory", "フォルダを選択してください。", 400))?;
+    if !fs::metadata(&path)
+        .await
+        .map_err(|_| ApiError::storage())?
+        .is_dir()
+    {
+        return Err(ApiError::new(
+            "not_directory",
+            "フォルダを選択してください。",
+            400,
+        ));
+    }
+    let p = path.to_string_lossy().into_owned();
+    Ok(match git(&p, &["rev-parse", "--show-toplevel"]).await {
+        Ok(root) => (root.trim().into(), true),
+        Err(_) => (p, false),
+    })
+}
+fn valid_path(path: &str, git_allowed: bool) -> Result<(), ApiError> {
+    if Path::new(path).is_absolute()
+        || path.contains('\0')
+        || path
+            .split(['/', '\\'])
+            .any(|p| p == ".." || (!git_allowed && p == ".git"))
+    {
+        return Err(ApiError::new(
+            "invalid_path",
+            "このパスにはアクセスできません。",
+            400,
+        ));
+    }
+    Ok(())
+}
+pub async fn scoped(root: &str, path: &str) -> Result<PathBuf, ApiError> {
+    valid_path(path, false)?;
+    let base = fs::canonicalize(root)
+        .await
+        .map_err(|_| ApiError::storage())?;
+    let target = fs::canonicalize(base.join(path))
+        .await
+        .map_err(|_| ApiError::new("file_missing", "ファイルがありません。", 404))?;
+    let rel = target
+        .strip_prefix(base)
+        .map_err(|_| ApiError::new("invalid_path", "このパスにはアクセスできません。", 400))?;
+    if rel.components().any(|c| c.as_os_str() == ".git") {
+        return Err(ApiError::new(
+            "invalid_path",
+            "このパスにはアクセスできません。",
+            400,
+        ));
+    }
+    Ok(target)
+}
+pub async fn files(root: &str, path: &str) -> Result<Value, ApiError> {
+    let mut dir = fs::read_dir(scoped(root, path).await?)
+        .await
+        .map_err(|_| ApiError::storage())?;
+    let mut entries = Vec::new();
+    while let Some(e) = dir.next_entry().await.map_err(|_| ApiError::storage())? {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let kind = e.file_type().await.map_err(|_| ApiError::storage())?;
+        if [".git", "node_modules", ".build", ".DS_Store"].contains(&name.as_str())
+            || kind.is_symlink()
+        {
+            continue;
+        }
+        entries.push(json!({"name":name,"path":if path.is_empty(){name.clone()}else{format!("{path}/{name}")},"isDirectory":kind.is_dir()}));
+    }
+    entries.sort_by(|a, b| {
+        b["isDirectory"]
+            .as_bool()
+            .cmp(&a["isDirectory"].as_bool())
+            .then(a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    Ok(json!({"path":path,"entries":entries}))
+}
+pub async fn file(root: &str, path: &str) -> Result<Value, ApiError> {
+    let p = scoped(root, path).await?;
+    let m = fs::metadata(&p).await.map_err(|_| ApiError::storage())?;
+    if !m.is_file() || m.len() > 1048576 {
+        return Err(ApiError::new(
+            "file_too_large",
+            "表示できるのは1MB以下のテキストファイルです。",
+            400,
+        ));
+    }
+    let data = fs::read(p).await.map_err(|_| ApiError::storage())?;
+    if data.contains(&0) {
+        return Err(ApiError::new(
+            "binary_file",
+            "バイナリファイルは表示できません。",
+            400,
+        ));
+    }
+    let content = String::from_utf8(data).map_err(|_| {
+        ApiError::new(
+            "file_encoding",
+            "UTF-8以外のファイルは編集できません。",
+            400,
+        )
+    })?;
+    Ok(json!({"path":path,"hash":hash(&content),"content":content}))
+}
+pub async fn save_file(
+    root: &str,
+    path: &str,
+    content: &str,
+    expected: &str,
+) -> Result<Value, ApiError> {
+    if content.len() > 1048576 {
+        return Err(ApiError::new(
+            "file_too_large",
+            "ファイルが大きすぎます。",
+            413,
+        ));
+    }
+    let previous = file(root, path).await?;
+    if previous["hash"] != expected {
+        return Err(ApiError::new(
+            "file_conflict",
+            "ファイルが外部で更新されています。",
+            409,
+        ));
+    }
+    let target = scoped(root, path).await?;
+    let temporary = target
+        .parent()
+        .unwrap()
+        .join(format!(".neura-{}.tmp", Uuid::new_v4()));
+    let result = async {
+        let mut handle = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        use tokio::io::AsyncWriteExt;
+        handle
+            .write_all(content.as_bytes())
+            .await
+            .map_err(|_| ApiError::storage())?;
+        handle
+            .set_permissions(
+                fs::metadata(&target)
+                    .await
+                    .map_err(|_| ApiError::storage())?
+                    .permissions(),
+            )
+            .await
+            .map_err(|_| ApiError::storage())?;
+        handle.sync_all().await.map_err(|_| ApiError::storage())?;
+        fs::rename(&temporary, &target)
+            .await
+            .map_err(|_| ApiError::storage())?;
+        Ok(json!({"path":path,"content":content,"hash":hash(content)}))
+    }
+    .await;
+    let _ = fs::remove_file(temporary).await;
+    result
+}
+pub async fn git_status(root: &str) -> Result<Value, ApiError> {
+    let raw = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )
+    .await?;
+    let mut parts = raw.split('\0');
+    let mut changes = Vec::new();
+    while let Some(entry) = parts.next() {
+        if entry.len() < 3 {
+            continue;
+        }
+        let status = &entry[..2];
+        changes.push(json!({"status":status,"path":&entry[3..]}));
+        if status.contains(['R', 'C']) {
+            parts.next();
+        }
+    }
+    let branch = git(root, &["branch", "--show-current"]).await?;
+    Ok(
+        json!({"branch":if branch.trim().is_empty(){"(detached)"}else{branch.trim()},"changes":changes}),
+    )
+}
+pub async fn diff(root: &str, path: &str) -> Result<Value, ApiError> {
+    valid_path(path, false)?;
+    let status = git_status(root).await?;
+    let c = status["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["path"] == path);
+    let content = match c {
+        None => "変更はありません。".into(),
+        Some(c) if c["status"] == "??" => format!(
+            "新規ファイル: {path}\n\n{}",
+            file(root, path).await?["content"].as_str().unwrap_or("")
+        ),
+        _ => {
+            git(
+                root,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "HEAD",
+                    "--",
+                    &format!(":(literal){path}"),
+                ],
+            )
+            .await?
+        }
+    };
+    Ok(json!({"path":path,"content":content}))
+}
+pub async fn fetch_default(root: &str) -> Result<Value, ApiError> {
+    let raw = git(root, &["ls-remote", "--symref", "origin", "HEAD"]).await?;
+    let reference = raw
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("ref: ")
+                .and_then(|l| l.strip_suffix("\tHEAD"))
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                "remote_head_missing",
+                "originのデフォルトブランチを取得できません。",
+                400,
+            )
+        })?;
+    if !reference.starts_with("refs/heads/") {
+        return Err(ApiError::new(
+            "remote_head_missing",
+            "ブランチが見つかりません。",
+            400,
+        ));
+    }
+    git(root, &["check-ref-format", reference]).await?;
+    let branch = &reference[11..];
+    git(
+        root,
+        &[
+            "fetch",
+            "--no-tags",
+            "origin",
+            &format!("+{reference}:refs/remotes/origin/{branch}"),
+        ],
+    )
+    .await?;
+    let commit = git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/origin/{branch}^{{commit}}"),
+        ],
+    )
+    .await?;
+    Ok(json!({"branch":branch,"commit":commit.trim()}))
+}
+async fn clean(root: &str) -> Result<(), ApiError> {
+    if !git(root, &["status", "--porcelain=v1", "--untracked-files=all"])
+        .await?
+        .trim()
+        .is_empty()
+    {
+        return Err(ApiError::new(
+            "workspace_dirty",
+            "未コミットの変更・未追跡ファイルがあります。",
+            409,
+        ));
+    }
+    Ok(())
+}
+pub async fn sync_default(root: &str, target: &Value) -> Result<Value, ApiError> {
+    clean(root).await?;
+    let branch = text(target, "branch")?;
+    let commit = text(target, "commit")?;
+    if git(root, &["branch", "--show-current"])
+        .await?
+        .trim()
+        .is_empty()
+    {
+        return Err(ApiError::new(
+            "detached_head",
+            "ブランチに切り替えてください。",
+            409,
+        ));
+    }
+    let reference = format!("refs/heads/{branch}");
+    let exists = git(root, &["for-each-ref", "--format=%(refname)", &reference])
+        .await?
+        .lines()
+        .any(|l| l == reference);
+    if exists
+        && git(root, &["merge-base", "--is-ancestor", &reference, commit])
+            .await
+            .is_err()
+    {
+        return Err(ApiError::new(
+            "local_commits",
+            "リモート未反映のコミットがあります。",
+            409,
+        ));
+    }
+    let ignored = git(
+        root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+    )
+    .await?;
+    let tracked = git(root, &["ls-tree", "-r", "--name-only", "-z", commit]).await?;
+    for i in ignored.split('\0').filter(|s| !s.is_empty()) {
+        let i = i.trim_end_matches('/');
+        if tracked
+            .split('\0')
+            .any(|t| t == i || t.starts_with(&format!("{i}/")) || i.starts_with(&format!("{t}/")))
+        {
+            return Err(ApiError::new(
+                "ignored_collision",
+                "更新先と重なる無視対象ファイルがあります。",
+                409,
+            ));
+        }
+    }
+    clean(root).await?;
+    if exists {
+        git(root, &["switch", "--no-overwrite-ignore", branch]).await?;
+    } else {
+        git(
+            root,
+            &["switch", "--no-overwrite-ignore", "-c", branch, commit],
+        )
+        .await?;
+    }
+    git(
+        root,
+        &["-c", "merge.autostash=false", "merge", "--ff-only", commit],
+    )
+    .await?;
+    Ok(target.clone())
+}
+pub async fn setup_path(root: &str, path: &str) -> Result<PathBuf, ApiError> {
+    valid_path(path, true)?;
+    let base = fs::canonicalize(root)
+        .await
+        .map_err(|_| ApiError::storage())?;
+    let target = fs::canonicalize(base.join(path))
+        .await
+        .map_err(|_| ApiError::new("setup_missing", "setup scriptが見つかりません。", 400))?;
+    if target == base
+        || !target.starts_with(base)
+        || !fs::metadata(&target)
+            .await
+            .map_err(|_| ApiError::storage())?
+            .is_file()
+    {
+        return Err(ApiError::new(
+            "invalid_setup_path",
+            "リポジトリ内のファイルを指定してください。",
+            400,
+        ));
+    }
+    Ok(target)
+}
+pub async fn detect_setup(root: &str) -> Value {
+    let mut paths = Vec::new();
+    for p in [
+        "scripts/worktree-setup.sh",
+        "worktree-setup.sh",
+        ".orca/setup.sh",
+        ".neuraos/setup.sh",
+        "scripts/setup.sh",
+        "setup.sh",
+    ] {
+        if setup_path(root, p).await.is_ok() {
+            paths.push(p);
+        }
+    }
+    json!({"scripts":paths})
+}
 
 #[cfg(test)]
 mod runner_tests {
- use super::*;
- #[tokio::test]
- async fn bounds_stdout_and_stderr_while_draining(){
-  for script in ["import sys;sys.stdout.write('x'*5000000)","import sys;sys.stderr.write('x'*100000)"]{
-   let error=run("/tmp","/usr/bin/python3",&["-c",script],5).await.unwrap_err();assert_eq!(error.error,"output_too_large");
-  }
-  assert_eq!(run("/tmp","/usr/bin/python3",&["-c","import sys;sys.stderr.write('x'*50000);print('ok')"],5).await.unwrap(),"ok\n");
- }
+    use super::*;
+    #[tokio::test]
+    async fn bounds_stdout_and_stderr_while_draining() {
+        for script in [
+            "import sys;sys.stdout.write('x'*5000000)",
+            "import sys;sys.stderr.write('x'*100000)",
+        ] {
+            let error = run("/tmp", "/usr/bin/python3", &["-c", script], 5)
+                .await
+                .unwrap_err();
+            assert_eq!(error.error, "output_too_large");
+        }
+        assert_eq!(
+            run(
+                "/tmp",
+                "/usr/bin/python3",
+                &["-c", "import sys;sys.stderr.write('x'*50000);print('ok')"],
+                5
+            )
+            .await
+            .unwrap(),
+            "ok\n"
+        );
+    }
 }
