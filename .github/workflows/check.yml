@@ -38,7 +38,21 @@ jobs:
         with:
           node-version: '24.13.0'
           cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/native-core/target
+          key: native-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/native-core/Cargo.lock') }}
+      - run: cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib
+      - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
       - run: pnpm install --frozen-lockfile
+      - name: Verify native HTTP protocol and native provider MCP
+        run: node --test tests/native-rust/protocol.test.mjs tests/native/provider-native-mcp.test.mjs
+        env:
+          NEURA_NATIVE_DAEMON: crates/native-core/target/release/neura-native-core
       - run: pnpm typecheck
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
@@ -68,6 +82,7 @@ jobs:
         if: github.event_name != 'push'
         run: pnpm exec tsx scripts/native/chromium/browser-smoke.ts
         env:
+          NEURA_BROWSER_SMOKE_DAEMON: crates/native-core/target/release/neura-native-core
           NEURA_APP_OUTPUT: apps/macos/dist/browser-fixture/neuraOS.app
           NEURA_APP_ID: com.neuraos.browser-smoke.ci
           NEURA_DEV_DATA_DIR: /tmp/neura-browser-ci

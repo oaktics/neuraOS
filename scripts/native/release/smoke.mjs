@@ -6,6 +6,7 @@ import {spawn, spawnSync, execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 const runtime = resolve(process.env.NEURA_APP_OUTPUT ?? 'apps/macos/dist/neuraOS.app', 'Contents/Resources/Runtime');
 const data = await mkdtemp(join(tmpdir(), 'neura-release-'));
+let completed = false;
 try {
   await smokeRuntime(runtime);
   // Tests against .build can silently find SwiftPM resources at their original
@@ -22,7 +23,7 @@ try {
   const sleepExecutable = resolve(original, '..', sleepConfig.BundleProgram);
   // Static checks remain mandatory even on CI images with SIP disabled, where
   // the OS deliberately bypasses Hardened Runtime enforcement.
-  for (const peer of [join(original, 'MacOS/NeuraOS'), sleepExecutable]) {
+  for (const peer of [join(original, 'MacOS/NeuraOS'), sleepExecutable, join(runtime,'bin/neura-native-core'), join(runtime,'bin/neura-updater')]) {
     const signature = spawnSync('/usr/bin/codesign', ['-d', '--verbose=4', peer], {encoding: 'utf8'});
     const flags = /flags=0x([a-f0-9]+)/i.exec(signature.stderr ?? '')?.[1];
     if (signature.status !== 0 || !flags || !(parseInt(flags, 16) & 0x10000)) throw new Error('Missing Hardened Runtime: ' + peer);
@@ -81,8 +82,11 @@ try {
   // Run the actual event pump. AX performPress alone misses native modal click routing bugs.
   const ui = spawn(executable, ['--reliability-smoke', report, '--with-chromium'], {stdio: 'inherit', detached: true});
   const stopUI = () => {if (ui.pid) {try {process.kill(-ui.pid, 'SIGKILL');} catch {ui.kill('SIGKILL');}}};
-  const uiTimeout = setTimeout(stopUI, 30000);
-  try {const [code] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: ${code}`);}
+  const uiTimeout = setTimeout(() => {
+    spawnSync('/usr/bin/sample', [String(ui.pid), '1', '-file', join(data, 'ui-timeout.sample.txt')], {timeout: 5000});
+    stopUI();
+  }, 30000);
+  try {const [code, signal] = await once(ui, 'exit'); if (code !== 0) throw new Error(`Packaged modal/UI smoke failed: code=${code} signal=${signal}; evidence=${data}`);}
   finally {clearTimeout(uiTimeout); stopUI();}
   const diagnostic = JSON.parse(await readFile(report, 'utf8'));
   if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
@@ -92,4 +96,8 @@ try {
   catch (error) {missingStatus = error.status; missingMessage = error.stderr?.toString();}
   if (missingStatus !== 1 || !missingMessage?.includes('Missing GitHub Markdown resources'))
     throw new Error(`Missing resources must fail cleanly, got status ${missingStatus}`);
-} finally {await rm(data, {recursive: true, force: true});}
+  completed = true;
+} finally {
+  if (completed) await rm(data, {recursive: true, force: true});
+  else console.error(`Release smoke failure evidence retained: ${data}`);
+}

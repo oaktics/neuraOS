@@ -1,6 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
-import {openSync, readSync, closeSync, readdirSync} from 'node:fs';
+import {openSync, readSync, closeSync, readdirSync, existsSync} from 'node:fs';
 
 export function selectIdentity(env = process.env, identities) {
   if (env.NEURA_SIGN_IDENTITY) {
@@ -41,7 +41,7 @@ export function signCertifiedTree(app, identity, run = execFileSync) {
         else if (entry.name.endsWith('.app')) sign(file,
           entry.name === 'NeuraOS Helper.app' || / \((Renderer|GPU)\)\.app$/.test(entry.name) ? 'jit' : 'empty');
       } else if (entry.isFile() && isMachO(file)) {
-        sign(file, ['node', 'claude'].includes(entry.name) ? 'jit' : 'empty');
+        sign(file, 'empty');
       }
       // Never traverse symlinks: framework aliases and pnpm links share targets.
     }
@@ -56,6 +56,9 @@ export function signApplication(app, identity = selectIdentity()) {
   // Sign nested CEF/runtime components first. Then explicitly harden the only
   // privileged IPC peers; a later --deep signing pass must not undo these flags.
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
-  execFileSync('codesign', ['--force', '--options', 'runtime', '--sign', '-', join(app, 'Contents/MacOS/NeuraSleepService')], {stdio: 'inherit'});
+  for (const relative of ['Contents/MacOS/NeuraSleepService','Contents/Resources/Runtime/bin/neura-native-core','Contents/Resources/Runtime/bin/neura-updater']) {
+    const file=join(app,relative);
+    if(existsSync(file))execFileSync('codesign',['--force','--options','runtime','--sign','-',file],{stdio:'inherit'});
+  }
   execFileSync('codesign', ['--force', '--options', 'runtime', '--entitlements', join(import.meta.dirname, 'client.entitlements.plist'), '--sign', '-', app], {stdio: 'inherit'});
 }
