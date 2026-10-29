@@ -175,21 +175,15 @@ pub async fn read_codex_usage(program: Option<PathBuf>) -> Result<Value> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let owner_token = uuid::Uuid::new_v4().to_string();
-    command.env(crate::process_tree::OWNER_ENV, &owner_token);
+    let tree = crate::process_tree::reserve().await.map_err(|_| UsageError::Unavailable)?;
+    command.env(crate::process_tree::OWNER_ENV, tree.token());
     let mut child = command.spawn().map_err(|_| UsageError::Unavailable)?;
     let pid = child.id().ok_or(UsageError::Unavailable)?;
-    let tree = match tokio::task::spawn_blocking(move || {
-        crate::process_tree::ProcessTree::new_with_token(pid, owner_token)
-    })
-    .await
-    {
-        Ok(Ok(tree)) => tree,
-        _ => {
-            let _ = child.kill().await;
-            return Err(UsageError::Unavailable);
-        }
-    };
+    if tree.attach(pid).await.is_err() {
+        let _ = tree.stop().await;
+        let _ = child.kill().await;
+        return Err(UsageError::Unavailable);
+    }
     let mut input = child.stdin.take().ok_or(UsageError::Unavailable)?;
     let output = child.stdout.take().ok_or(UsageError::Unavailable)?;
     let result=tokio::time::timeout(Duration::from_secs(10),async{
