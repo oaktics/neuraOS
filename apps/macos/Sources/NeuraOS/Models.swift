@@ -73,14 +73,15 @@ final class DaemonClient {
     let dataDirectory: URL
     let clientId: String
     private let session: URLSession
-    init() {
+    @MainActor lazy var events = DaemonEvents.shared(endpoint: endpoint, dataDirectory: dataDirectory)
+    init(endpoint: URL? = nil, dataDirectory: URL? = nil, session: URLSession? = nil) {
         clientId = UserDefaults.standard.string(forKey: "daemonClientId") ?? UUID().uuidString.lowercased()
         UserDefaults.standard.set(clientId, forKey: "daemonClientId")
-        endpoint = URL(string: Bundle.main.object(forInfoDictionaryKey: "NeuraEndpoint") as? String ?? "http://127.0.0.1:4318")!
-        dataDirectory = URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "NeuraDataDirectory") as? String ?? NSHomeDirectory() + "/Library/Application Support/neuraOS/Developer")
+        self.endpoint = endpoint ?? URL(string: Bundle.main.object(forInfoDictionaryKey: "NeuraEndpoint") as? String ?? "http://127.0.0.1:4318")!
+        self.dataDirectory = dataDirectory ?? URL(fileURLWithPath: Bundle.main.object(forInfoDictionaryKey: "NeuraDataDirectory") as? String ?? NSHomeDirectory() + "/Library/Application Support/neuraOS/Developer")
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 15
-        session = URLSession(configuration: config)
+        self.session = session ?? URLSession(configuration: config)
     }
     func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: (path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
@@ -190,6 +191,8 @@ final class DaemonClient {
     var requestedTerminalId: String?
     private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
+    private let statePulse = EventPulse()
+    private var eventObserver: UUID?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
@@ -200,8 +203,22 @@ final class DaemonClient {
             self.select(terminal.workspaceId)
             self.requestedTerminalId = terminalId
         }
+        eventObserver = api.events.observe { [weak self] change in
+            guard let self else {return}
+            if change.type == "disconnected" {self.updateConnection(false)}
+            if change.type == "ready" || change.state == true {self.statePulse.signal()}
+        }
         polling = Task { [weak self] in
-            while !Task.isCancelled {await self?.refresh(); try? await Task.sleep(for: .seconds(1))}
+            guard let self else {return}
+            var updates = self.statePulse.stream.makeAsyncIterator()
+            while !Task.isCancelled {
+                await self.refresh()
+                if self.api.events.supported && self.connected {
+                    guard await updates.next() != nil else {return}
+                } else {
+                    try? await Task.sleep(for: .seconds(1))
+                }
+            }
         }
     }
     func refresh() async {
@@ -210,6 +227,7 @@ final class DaemonClient {
             guard next.protocolVersion == 1 else {throw APIError(error: "protocol", message: "Daemonとアプリのバージョンが一致しません。")}
             // A daemon upgrade can change features without changing stored data/revision.
             applySnapshot(next)
+            api.events.configure(features: next.features)
             updateConnection(true)
             if (selectedId != nil || !visibleWorkspaces.isEmpty), !visibleWorkspaces.contains(where: {$0.id == selectedId}) {
                 let saved = sidebarSpaces.active.selectedWorkspaceId

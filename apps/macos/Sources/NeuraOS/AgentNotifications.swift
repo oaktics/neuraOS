@@ -55,8 +55,9 @@ struct AgentNotificationCursor {
         receiving = true
         defer {receiving = false}
         do {
-            // Bound each polling pass; backlog continues from the same cursor next time.
-            for _ in 0..<4 {
+            // Drain this revision without needing a later polling tick. Yield
+            // between pages so a large backlog cannot monopolize the UI.
+            while !Task.isCancelled {
                 let page: AgentNotificationPage = try await api.get("v1/notifications", query: ["after": String(cursor.after ?? 0)])
                 for event in cursor.pending(page) {
                     if ["codex", "claude"].contains(event.provider), ["waiting", "completed"].contains(event.kind),
@@ -75,6 +76,7 @@ struct AgentNotificationCursor {
                 }
                 cursor.acknowledge(page.cursor)
                 if !page.more {break}
+                await Task.yield()
             }
         } catch {NSLog("Agent notification delivery failed: %@", error.localizedDescription)}
     }

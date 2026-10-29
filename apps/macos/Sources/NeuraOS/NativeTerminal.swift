@@ -11,6 +11,10 @@ class NativeTerminalView: TerminalView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         registerForDraggedTypes([.fileURL])
+        if window != nil && !isUsingMetalRenderer {
+            do {try setUseMetal(true)}
+            catch {Diagnostics.shared.record("terminal.renderer.fallback")}
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -122,6 +126,9 @@ struct NativeTerminal: NSViewRepresentable {
         let terminal: TerminalRecord; let api: DaemonClient; let onError: (Error) -> Void
         var polling: Task<Void, Never>?
         var delay: Task<Void, Never>?
+        private var writing: Task<Void, Never>?
+        private var outputPulse = EventPulse()
+        private var eventObserver: UUID?
         var running = true; var cursor = 0; var pendingInput = ""; var pendingSize: (Int, Int)?; var desiredSize: (Int, Int)?
         var visible = false
         private var ended = false
@@ -144,12 +151,13 @@ struct NativeTerminal: NSViewRepresentable {
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
             guard !applying, newCols >= 20, newRows >= 5 else {return}
             desiredSize = (min(400, newCols), min(200, newRows))
-            if running && caughtUp && visible {pendingSize = desiredSize}
+            if running && caughtUp && visible {pendingSize = desiredSize; flushWrites()}
         }
         func send(source: TerminalView, data: ArraySlice<UInt8>) {
             guard running, applying || (visible && caughtUp) else {return}
             // Reply sequences from the emulator use the same ordered channel as keystrokes.
             pendingInput += String(decoding: data, as: UTF8.self)
+            flushWrites()
         }
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
@@ -165,6 +173,10 @@ struct NativeTerminal: NSViewRepresentable {
             delay?.cancel()
             polling?.cancel()
             polling = nil
+            writing?.cancel(); writing = nil
+            outputPulse.finish()
+            if let eventObserver {api.events.remove(eventObserver)}
+            eventObserver = nil
         }
         func setVisible(_ value: Bool) {
             view?.isHidden = !value
@@ -172,7 +184,8 @@ struct NativeTerminal: NSViewRepresentable {
             visible = value
             if value {
                 delay?.cancel()
-                if running && caughtUp {pendingSize = desiredSize}
+                if running && caughtUp {pendingSize = desiredSize; flushWrites()}
+                outputPulse.signal()
                 focusIfVisible()
             } else {
                 pendingSize = nil
@@ -236,25 +249,59 @@ struct NativeTerminal: NSViewRepresentable {
             await withTaskCancellationHandler {await wait.value} onCancel: {wait.cancel()}
             delay = nil
         }
-        func start() {
-            guard polling == nil else {return}
-            polling = Task { [weak self] in
+        // Input/resize must not wait behind output replay or a slow output read.
+        private func flushWrites() {
+            guard polling != nil, writing == nil, running else {return}
+            writing = Task { [weak self] in
                 guard let self else {return}
-                while !Task.isCancelled {
+                defer {self.writing = nil}
+                await Task.yield()
+                while !Task.isCancelled && running {
                     do {
-                        if running, !pendingInput.isEmpty {
-                            let input = String(pendingInput.prefix(8192)); pendingInput = String(pendingInput.dropFirst(8192))
+                        if !pendingInput.isEmpty {
+                            let input = String(pendingInput.prefix(8192))
+                            pendingInput = String(pendingInput.dropFirst(8192))
                             let _: OK = try await api.command(["type": "terminal.input", "terminalId": terminal.id, "clientId": api.clientId, "data": input])
-                        }
-                        if running, visible, caughtUp, let size = pendingSize {
+                        } else if visible, caughtUp, let size = pendingSize {
                             pendingSize = nil
                             let _: OK = try await api.command(["type": "terminal.resize", "terminalId": terminal.id, "clientId": api.clientId, "cols": size.0, "rows": size.1])
-                        }
+                        } else {return}
+                    } catch {
+                        guard !Task.isCancelled else {return}
+                        if handleLifecycleError(error) {return}
+                        // The write may have executed. Never replay uncertain input.
+                        if visible {onError(error)}
+                        return
+                    }
+                }
+            }
+        }
+        func start() {
+            guard polling == nil else {return}
+            outputPulse = EventPulse()
+            eventObserver = api.events.observe { [weak self] change in
+                guard let self else {return}
+                if change.type == "ready" || change.terminals?.contains(self.terminal.id) == true {
+                    self.outputPulse.signal()
+                }
+            }
+            polling = Task { [weak self] in
+                guard let self else {return}
+                var updates = outputPulse.stream.makeAsyncIterator()
+                while !Task.isCancelled {
+                    do {
                         let output: TerminalOutput = try await api.get("v1/terminals/\(terminal.id)/output", query: ["after": String(cursor)])
                         guard !Task.isCancelled, let view else {return}
                         await applyResponsive(output, to: view)
+                        flushWrites()
                         reportedError = false
-                        await pause(milliseconds: output.more ? 10 : visible ? 60 : 500)
+                        if output.more {
+                            await Task.yield()
+                        } else if api.events.supported {
+                            guard await updates.next() != nil else {return}
+                        } else {
+                            await pause(milliseconds: visible ? 60 : 500)
+                        }
                     } catch {
                         applying = false
                         guard !Task.isCancelled else {return}
@@ -264,6 +311,7 @@ struct NativeTerminal: NSViewRepresentable {
                     }
                 }
             }
+            flushWrites()
         }
     }
 }
