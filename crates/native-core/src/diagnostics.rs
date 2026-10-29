@@ -47,7 +47,7 @@ impl Diagnostics {
     pub fn new(directory: PathBuf) -> std::io::Result<Self> {
         Self::with_limit(directory, 1_048_576)
     }
-    fn with_limit(directory: PathBuf, limit: u64) -> std::io::Result<Self> {
+    pub(crate) fn with_limit(directory: PathBuf, limit: u64) -> std::io::Result<Self> {
         let (sender, mut receiver) = mpsc::channel(256);
         let dropped = Arc::new(AtomicU64::new(0));
         let missed = dropped.clone();
@@ -99,6 +99,13 @@ impl Diagnostics {
         if let Some(ms) = duration_ms.filter(|ms| ms.is_finite() && *ms >= 0.) {
             row["durationMs"] = json!(ms);
         }
+        if self.sender.try_send(Entry::Row(row)).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn performance(&self, mut row: Value) {
+        row["time"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        row["session"] = json!(self.session);
         if self.sender.try_send(Entry::Row(row)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }

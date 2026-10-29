@@ -268,6 +268,7 @@ impl AppState {
         }
         self.diagnostics.record(Phase::End, None, None, None);
         self.diagnostics.flush().await;
+        neura_native_core::performance::flush().await;
         if failed {
             Err(ApiError::new(
                 "shutdown_incomplete",
@@ -416,7 +417,16 @@ async fn auth(State(s): State<Arc<AppState>>, req: axum::extract::Request, next:
     if *s.closing.borrow() {
         return ApiError::new("daemon_closing", "Daemonは終了処理中です。", 503).into_response();
     }
-    let mut response = next.run(req).await;
+    let trace = neura_native_core::performance::context();
+    let mut response = if let Some(id) = trace {
+        // Accept only UUID correlation, never copy arbitrary header text to evidence.
+        let id = req.headers().get("x-neura-perf-id").and_then(|v|v.to_str().ok())
+            .filter(|v| uuid::Uuid::parse_str(v).is_ok()).unwrap_or(&id).to_owned();
+        neura_native_core::performance::event(&id, "http.received");
+        let response = neura_native_core::performance::REQUEST.scope(id.clone(), next.run(req)).await;
+        neura_native_core::performance::event(&id, "http.response");
+        response
+    } else { next.run(req).await };
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());

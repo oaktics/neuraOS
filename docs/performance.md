@@ -140,3 +140,92 @@ same workload, durability and functionality, repeat under controlled load, and
 report throughput, p99, backlog, CPU/IO/memory and energy separately. Protocol
 fixtures, signed/notarized distribution, rollback and installed-app acceptance
 are distinct verification steps.
+
+## Tail-latency evidence (#141)
+
+[Functional acceptance evidence](architecture-evidence/tail-latency-idle-barrier-2026-10-30.json)
+records the ABBA fixture results and MCP barrier matrix, including the failed
+first attempt. These are not optimized speed or battery measurements.
+
+`NEURA_PERF_TRACE_DIR` explicitly enables a private, bounded diagnostic trace for
+an isolated benchmark daemon. It is off by default. Enabling it installs no
+runtime polling timer and no agent-count limit. The benchmark writes UUID
+`x-neura-perf-id` correlation headers; the server accepts only UUIDs and never
+exports request paths, tokens, SQL, arguments, terminal data or conversation text.
+Invalid correlation headers are replaced with a generated UUID.
+
+The runtime trace records `http.received`, `store.queue.begin`,
+`store.sqlite.begin/end`, `store.commit.begin/end` and `http.response`. Queue time
+includes admission/byte-credit waiting and FIFO waiting. Explicit transaction
+commit is measured around COMMIT itself; `store.autocommit.begin/end` includes the
+whole standalone operation statement and its implicit commit, so it must not be
+interpreted as fsync-only time. Group commits attach the same transaction interval
+to every participating request. Background work without an HTTP context receives
+its own UUID. Tasks detached from a request are separate work, not falsely linked.
+HTTP response time is handler response construction, not socket delivery or client
+body decoding. Cancellation can leave an incomplete HTTP interval; committed store
+work is still recorded even when its reply receiver has gone away.
+
+Rows carry a process-session ID, a monotonic millisecond offset, UTC timestamp,
+process CPU and block-I/O counters and host load average. Use monotonic offsets for
+intervals within one daemon lifetime and UTC for joining benchmark samples across
+processes; wall-clock adjustments can affect cross-process joins. The benchmark's
+active-workload-only `pressure.jsonl` adds CPU tick counters, load average and,
+when `NEURA_BENCH_METRICS` is supplied, stable-process CPU/runnable-time and disk
+read/write byte counters. It includes the sampling duration. These are pressure
+indicators, not proof of contention or a direct filesystem fsync latency counter;
+zero/unsupported block-I/O counters are not evidence of no disk activity. Sampling
+and trace logging themselves add overhead. Do not mix traced measurements with an
+untraced speedup comparison.
+
+The writer uses a bounded 256-row channel, two rotated files of approximately
+32 MiB each, and private 0700/0600 permissions. Saturation/file failures produce
+`droppedEvents` on a later successful record. Rotation can also remove early
+intervals. Missing records or unmatched starts mean evidence is incomplete; they
+must not be assigned zero duration or used to exonerate a subsystem. There is no
+unbounded in-memory trace buffer or synchronous trace-file write on the HTTP/store
+executor.
+
+Reproduce the sequential native→legacy→legacy→native order at 1/5/10/20/32 PTYs:
+
+```sh
+cc -O2 -Wall -Wextra -Werror tests/native/fixtures/process-metrics.c -o /tmp/neura-process-metrics
+NEURA_BENCH_METRICS=/tmp/neura-process-metrics \
+NEURA_BENCH_EVIDENCE=/tmp/neura-tail-evidence \
+NEURA_BENCH_ROWS=1024 NEURA_BENCH_IDLE_MS=5000 \
+node scripts/native/benchmark-order.mjs
+node scripts/native/analyze-latency.mjs /tmp/neura-tail-evidence/1-native/5
+```
+
+Build the optimized native binary first. Optional `NEURA_BENCH_NATIVE_COMMAND`
+and `NEURA_BENCH_LEGACY_COMMAND` are JSON argv arrays, not shell commands.
+`NEURA_BENCH_COUNTS` overrides only the benchmark points, never runtime concurrency.
+Each count uses disposable data and synthetic PTYs, checks exact output order,
+Unicode, no missing/duplicate rows, and identical replay after fixture restart.
+The installed app and its daemon are never restarted. Successful external evidence
+is retained while temporary workload data is removed; failed fixtures are retained.
+
+`http-outliers.jsonl` retains request UUIDs for requests above
+`NEURA_BENCH_SLOW_MS` (default 100 ms), HTTP failures and transport/timeouts. Set
+this threshold to 0 when validating the join. The analyzer joins those UUIDs to
+runtime intervals and nearby pressure samples, including unfinished intervals,
+`httpComplete` describes only the presence of HTTP start/end, not proof that every
+store event survived. It does not choose a root cause. The Rust injection test holds an explicit commit
+behind a test-only condition-variable gate, observes a second request's queue
+entry, then releases the commit. It proves slow commit and queue waiting are
+separate intervals without exposing a runtime injection endpoint. The existing
+WAL/FULL group commit, failed-commit and durable replay tests remain applicable.
+No claim is made about the original unreproduced outlier or battery-life effects.
+
+## Native MCP idle barrier (#145)
+
+`tests/native/provider-native-mcp.test.mjs` exercises 10/20/32 clients with ready
+delivery delayed by 0 and 800 ms. The fixture first observes one completed initial
+channel HTTP response for every terminal, sends ready only after that barrier,
+then observes each terminal's ready-triggered completed response before beginning
+the idle window. A WebSocket upgrade count alone is not a readiness barrier.
+Reconnect uses the same per-terminal response-completion barrier. Each initial
+and reconnect window requires exactly zero HTTP growth over 1.6 seconds; targeted
+changes require exactly one HTTP request, unrelated state changes require zero,
+and consumed instructions must not be delivered again. Delay variation is a
+fixture perturbation, not an increased grace sleep or relaxed HTTP allowance.
