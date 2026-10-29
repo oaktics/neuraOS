@@ -54,7 +54,11 @@ public enum NativeCommand {
             }
             Thread.sleep(forTimeInterval: 0.02)
         }
-        let bytes = (try? Data(contentsOf: log)) ?? Data()
+        let file = try FileHandle(forReadingFrom: log)
+        defer {try? file.close()}
+        let length = try file.seekToEnd()
+        try file.seek(toOffset: length > 65536 ? length - 65536 : 0)
+        let bytes = try file.read(upToCount: 65536) ?? Data()
         let code = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
         return CommandResult(status: code, output: String(decoding: bytes.suffix(65536), as: UTF8.self))
     }

@@ -22,8 +22,12 @@ public struct NativeRelease: Codable, Equatable {
               asset["browser_download_url"] as? String == url else {throw UpdateFailure("このMac用の検証可能な更新ファイルがありません。")}
         return NativeRelease(tag: tag, build: build, name: name, digest: String(digest.dropFirst(7)), url: url)
     }
-    public func verify(_ bytes: Data) throws {
-        guard SHA256.hash(data: bytes).map({String(format: "%02x", $0)}).joined() == digest else {throw UpdateFailure("更新ファイルのSHA-256が一致しません。")}
+    public func verify(file: URL) throws {
+        let input = try FileHandle(forReadingFrom: file)
+        defer {try? input.close()}
+        var hash = SHA256()
+        while let bytes = try input.read(upToCount: 1024 * 1024), !bytes.isEmpty {hash.update(data: bytes)}
+        guard hash.finalize().map({String(format: "%02x", $0)}).joined() == digest else {throw UpdateFailure("更新ファイルのSHA-256が一致しません。")}
     }
 }
 
@@ -47,6 +51,16 @@ public struct ReleaseClient {
             release.authenticated = true
             return release
         }
+    }
+    public func downloadArchive(_ url: URL, to destination: URL) async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 600; configuration.timeoutIntervalForResource = 600
+        let session = URLSession(configuration: configuration)
+        defer {session.invalidateAndCancel()}
+        let (temporary, response) = try await session.download(from: url)
+        defer {try? FileManager.default.removeItem(at: temporary)}
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {throw UpdateFailure("更新ファイルの取得に失敗しました。")}
+        try FileManager.default.moveItem(at: temporary, to: destination)
     }
     public func download(_ url: URL, timeout: TimeInterval = 600) async throws -> Data {
         var request = URLRequest(url: url); request.timeoutInterval = timeout

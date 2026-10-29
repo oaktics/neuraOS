@@ -1,6 +1,16 @@
 import Foundation
 import Darwin
 
+public struct DaemonIdentity: Decodable {
+    public let runtime: String?
+    public let daemonInstanceId: String?
+    public init(runtime: String?, daemonInstanceId: String?) {self.runtime = runtime; self.daemonInstanceId = daemonInstanceId}
+    public var instance: UUID? {daemonInstanceId.flatMap(UUID.init(uuidString:))}
+    public func isNewNative(after previous: DaemonIdentity?) -> Bool {
+        runtime == "rust" && instance != nil && instance != previous?.instance
+    }
+}
+
 public struct UpdateEngine {
     public var home: URL
     public var helper: URL
@@ -8,7 +18,7 @@ public struct UpdateEngine {
     public var pause: (TimeInterval) -> Void = {Thread.sleep(forTimeInterval: $0)}
     public var parentExists: (Int32) -> Bool = {kill($0, 0) == 0 || errno != ESRCH}
     public var launch: (String, [String]) throws -> Void = NativeCommand.launch
-    public var health: (() async -> Bool)?
+    public var daemonState: (() async -> DaemonIdentity?)?
     private let fm = FileManager.default
     public init(home: URL = URL(fileURLWithPath: NSHomeDirectory()), helper: URL) {self.home = home; self.helper = helper}
     public var updates: URL {home.appendingPathComponent("Library/Application Support/neuraOS/Updates")}
@@ -73,12 +83,14 @@ public struct UpdateEngine {
     }
     public func bootstrap() throws {
         let daemon = helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")
-        let existing = (try? Data(contentsOf: plist)).flatMap {try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]}
-        if existing?["ProgramArguments"] as? [String] == [daemon.path], (try? service("status", daemon: daemon)) != nil {return}
+        // Opening a second/relocated app must never stop an existing daemon or
+        // its terminals. Only explicit install/apply may replace a live service.
+        if let status = try? service("status", daemon: daemon),
+           status.range(of: #"(?m)^\s*pid\s*=\s*[1-9][0-9]*\s*$"#, options: .regularExpression) != nil {return}
         try installService(daemon: daemon)
     }
     public func prepare(tag: String, parentPID: Int32, latest: () async throws -> NativeRelease,
-                        download: (URL) async throws -> Data) async throws {
+                        download: (URL, URL) async throws -> Void) async throws {
         guard parentPID > 1 else {throw UpdateFailure("Invalid application PID")}
         let release = try await latest()
         guard release.tag == tag else {throw UpdateFailure("新しいリリースが公開されました。もう一度確認してください。")}
@@ -91,8 +103,8 @@ public struct UpdateEngine {
             let archive = stage.appendingPathComponent(release.name)
             if release.authenticated {
                 _ = try execute("gh", ["release", "download", release.tag, "--repo", NativeRelease.repository, "--pattern", release.name, "--dir", stage.path], 600)
-            } else {try await download(URL(string: release.url)!).write(to: archive)}
-            try release.verify(Data(contentsOf: archive))
+            } else {try await download(URL(string: release.url)!, archive)}
+            try release.verify(file: archive)
             _ = try execute("/usr/bin/ditto", ["-x", "-k", archive.path, stage.path], 120)
             let app = stage.appendingPathComponent("neuraOS.app")
             _ = try execute("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], 120)
@@ -113,13 +125,14 @@ public struct UpdateEngine {
             throw error
         }
     }
-    private func healthy() async -> Bool {
-        if let health {return await health()}
-        guard let token = try? String(contentsOf: data.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) else {return false}
+    private func readDaemonState() async -> DaemonIdentity? {
+        if let daemonState {return await daemonState()}
+        guard let token = try? String(contentsOf: data.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) else {return nil}
         var request = URLRequest(url: URL(string: "http://127.0.0.1:4318/v1/state")!); request.timeoutInterval = 1
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else {return false}
-        return (response as? HTTPURLResponse)?.statusCode == 200
+        guard let (bytes, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else {return nil}
+        return try? JSONDecoder().decode(DaemonIdentity.self, from: bytes)
     }
     public func apply(stage: URL, parentPID: Int32) async throws {
         guard parentPID > 1, stage.deletingLastPathComponent().resolvingSymlinksInPath() == updates.resolvingSymlinksInPath(),
@@ -137,6 +150,7 @@ public struct UpdateEngine {
                 try oldPlist!.write(to: savedPlist, options: .atomic)
                 try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: savedPlist.path)
             }
+            let previousDaemon = await readDaemonState()
             try directory(target.deletingLastPathComponent())
             try remove(backup)
             if fm.fileExists(atPath: target.path) {try fm.moveItem(at: target, to: backup); moved = true}
@@ -144,7 +158,7 @@ public struct UpdateEngine {
             serviceChanged = true
             try installService(daemon: target.appendingPathComponent("Contents/Resources/Runtime/bin/neura-native-core"))
             var ready = false
-            for _ in 0..<30 {if await healthy() {ready = true; break}; pause(0.5)}
+            for _ in 0..<30 {if await readDaemonState()?.isNewNative(after: previousDaemon) == true {ready = true; break}; pause(0.5)}
             guard ready else {throw UpdateFailure("更新後のDaemonが起動しませんでした。")}
             try remove(updates.appendingPathComponent("last-error.txt"))
             _ = try execute("/usr/bin/open", [target.path])

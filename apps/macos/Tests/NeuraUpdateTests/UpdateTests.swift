@@ -13,6 +13,7 @@ final class UpdateTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
         var engine = UpdateEngine(home: home, helper: helper)
         engine.run = {_,_,_ in CommandResult()}; engine.pause = {_ in}; engine.parentExists = {_ in false}
+        engine.daemonState = {nil}
         engine.launch = {_,_ in XCTFail("Unexpected installer launch")}
         return (home, engine)
     }
@@ -43,10 +44,27 @@ final class UpdateTests: XCTestCase {
     }
     func testReleaseValidationAndDigestFailClosed() throws {
         let value = try release(); XCTAssertEqual(value.build, 42)
-        try value.verify(Data("archive".utf8)); XCTAssertThrowsError(try value.verify(Data("tampered".utf8)))
+        let (home, _) = try fixture(); let file = home.appendingPathComponent("archive")
+        try Data("archive".utf8).write(to: file); try value.verify(file: file)
+        try Data("tampered".utf8).write(to: file); XCTAssertThrowsError(try value.verify(file: file))
         for mutation: (inout [String: Any]) -> Void in [{$0["draft"] = true}, {$0["prerelease"] = true}, {$0["tag_name"] = "../../evil"}, {$0["assets"] = []}, {$0["assets"] = [["name":"neuraOS-darwin-arm64.zip","digest":"sha256:"+String(repeating:"a",count:64),"browser_download_url":"https://evil.invalid/archive.zip"]]}] {
             XCTAssertThrowsError(try release(mutation))
         }
+    }
+    func testArchiveHashUsesBoundedChunksForLargeFile() throws {
+        let (home, _) = try fixture(); let file = home.appendingPathComponent("large.zip")
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        let output = try FileHandle(forWritingTo: file)
+        let chunk = Data(repeating: 0x5a, count: 1024 * 1024)
+        var hash = SHA256()
+        for _ in 0..<24 {try output.write(contentsOf: chunk); hash.update(data: chunk)}
+        try output.close()
+        let digest = hash.finalize().map {String(format: "%02x", $0)}.joined()
+        let candidate = NativeRelease(tag: "native-42", build: 42, name: "fixture", digest: digest, url: "unused")
+        try candidate.verify(file: file)
+        let modify = try FileHandle(forWritingTo: file)
+        try modify.seek(toOffset: 12 * 1024 * 1024); try modify.write(contentsOf: Data([0])); try modify.close()
+        XCTAssertThrowsError(try candidate.verify(file: file))
     }
     func testLaunchAgentRunsOnlyNativeDaemonAndEscapesPaths() throws {
         let (_, engine) = try fixture()
@@ -66,10 +84,39 @@ final class UpdateTests: XCTestCase {
         engine.run = {_,args,_ in CommandResult(status: args.first == "bootout" ? 1 : 0, output: "permission denied")}
         XCTAssertThrowsError(try engine.installService(daemon: engine.helper))
     }
+    func testBootstrapPreservesRunningLegacyAndOtherNativeServices() throws {
+        for executable in ["/old/Runtime/bin/node", "/another/Runtime/bin/neura-native-core"] {
+            let (_, original) = try fixture(); var engine = original
+            try FileManager.default.createDirectory(at: engine.plist.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let old = try PropertyListSerialization.data(fromPropertyList: ["ProgramArguments": [executable]], format: .xml, options: 0)
+            try old.write(to: engine.plist)
+            engine.run = {program, args, _ in
+                XCTAssertEqual(program, "/bin/launchctl"); XCTAssertEqual(args.first, "print")
+                return CommandResult(output: "service = {\n    state = running\n    pid = 12345\n}\n")
+            }
+            try engine.bootstrap()
+            XCTAssertEqual(try Data(contentsOf: engine.plist), old)
+        }
+    }
+    func testBootstrapRepairsStoppedOrMissingService() throws {
+        for status in [CommandResult(output: "service = {\n state = not running\n}\n"), CommandResult(status: 113)] {
+            let (_, original) = try fixture(); var engine = original
+            let daemon = engine.helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")
+            try Data("fixture".utf8).write(to: daemon)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: daemon.path)
+            var started = false
+            engine.run = {_, args, _ in
+                if args.first == "print" {return status}
+                if args.first == "bootstrap" {started = true}
+                return CommandResult()
+            }
+            try engine.bootstrap(); XCTAssertTrue(started)
+        }
+    }
     func testHealthyInstallKeepsBackupAndStartsNativeService() async throws {
         let (_, original) = try fixture(); var engine = original
         let stage = try staged(engine); var calls: [[String]] = []
-        engine.run = {program,args,_ in calls.append([program]+args); return CommandResult()}; engine.health = {true}
+        engine.run = {program,args,_ in calls.append([program]+args); return CommandResult()}; engine.daemonState = {DaemonIdentity(runtime: "rust", daemonInstanceId: UUID().uuidString)}
         try await engine.apply(stage: stage, parentPID: 123)
         XCTAssertEqual(try String(contentsOf: engine.target.appendingPathComponent("marker")), "new")
         XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: engine.target.path+".previous/marker")), "old")
@@ -80,7 +127,7 @@ final class UpdateTests: XCTestCase {
     }
     func testUnhealthyInstallRestoresOldAppAndOldService() async throws {
         let (_, original) = try fixture(); var engine = original
-        let stage = try staged(engine); engine.health = {false}; var calls: [[String]] = []
+        let stage = try staged(engine); engine.daemonState = {nil}; var calls: [[String]] = []
         engine.run = {program,args,_ in calls.append([program]+args); return CommandResult()}
         do {try await engine.apply(stage: stage, parentPID: 123); XCTFail("Expected unhealthy failure")} catch {}
         XCTAssertEqual(try String(contentsOf: engine.target.appendingPathComponent("marker")), "old")
@@ -109,7 +156,7 @@ final class UpdateTests: XCTestCase {
                 }
                 return CommandResult()
             }
-            engine.health = {healthy}
+            engine.daemonState = {healthy ? DaemonIdentity(runtime: "rust", daemonInstanceId: UUID().uuidString) : nil}
             do {try await engine.apply(stage: stage, parentPID: 123); XCTAssertTrue(healthy)} catch {XCTAssertFalse(healthy)}
             XCTAssertEqual(try Data(contentsOf: engine.updates.appendingPathComponent("previous-launch-agent.plist")), oldPlist)
             let legacyApp = healthy ? URL(fileURLWithPath: engine.target.path + ".previous") : engine.target
@@ -124,6 +171,29 @@ final class UpdateTests: XCTestCase {
             }
         }
     }
+    func testNativeIdentityRequiresNewValidInstanceAndRejectsLegacy200() async throws {
+        let id = UUID().uuidString
+        let old = DaemonIdentity(runtime: "rust", daemonInstanceId: id)
+        for candidate in [old, DaemonIdentity(runtime: "rust", daemonInstanceId: id.lowercased()),
+                          DaemonIdentity(runtime: nil, daemonInstanceId: nil),
+                          DaemonIdentity(runtime: "node", daemonInstanceId: UUID().uuidString),
+                          DaemonIdentity(runtime: "rust", daemonInstanceId: "invalid")] {
+            let (_, original) = try fixture(); var engine = original
+            let stage = try staged(engine); var reads = 0
+            engine.daemonState = {reads += 1; return reads == 1 ? old : candidate}
+            do {try await engine.apply(stage: stage, parentPID: 123); XCTFail("Old or non-native response must fail")} catch {}
+            XCTAssertEqual(try String(contentsOf: engine.target.appendingPathComponent("marker")), "old")
+            XCTAssertEqual(try String(contentsOf: engine.plist), "old-service")
+        }
+        XCTAssertTrue(DaemonIdentity(runtime: "rust", daemonInstanceId: UUID().uuidString).isNewNative(after: old))
+        XCTAssertTrue(DaemonIdentity(runtime: "rust", daemonInstanceId: UUID().uuidString).isNewNative(after: DaemonIdentity(runtime: nil, daemonInstanceId: nil)))
+    }
+    func testCommandReturnsOnlyBoundedTail() throws {
+        let result = try NativeCommand.run("/bin/sh", ["-c", "dd if=/dev/zero bs=1048576 count=8 2>/dev/null; printf tail-marker"], 10)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.output.utf8.count, 65536)
+        XCTAssertTrue(result.output.hasSuffix("tail-marker"))
+    }
     func testApplicationRefusingExitLeavesAppAndServiceUntouched() async throws {
         let (_, original) = try fixture(); var engine = original
         let stage = try staged(engine); engine.parentExists = {_ in true}
@@ -135,13 +205,13 @@ final class UpdateTests: XCTestCase {
     func testPrepareTimeoutCleansOnlyOwnedStageAndLock() async throws {
         let (_, original) = try fixture(); var engine = original; let candidate = try release()
         engine.run = {_,_,_ in throw UpdateFailure("timeout")}
-        do {try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_ in Data("archive".utf8)}); XCTFail("Expected timeout")} catch {}
+        do {try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_, file in try Data("archive".utf8).write(to: file)}); XCTFail("Expected timeout")} catch {}
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: engine.updates.path), [])
     }
     func testPrepareRejectsGatekeeperFailureAndDoesNotLaunch() async throws {
         let (_, original) = try fixture(); var engine = original; let candidate = try release()
         engine.run = {program,_,_ in CommandResult(status: program == "/usr/sbin/spctl" ? 1 : 0, output: "rejected")}
-        do {try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_ in Data("archive".utf8)}); XCTFail("Expected trust rejection")} catch {}
+        do {try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_, file in try Data("archive".utf8).write(to: file)}); XCTFail("Expected trust rejection")} catch {}
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: engine.updates.path), [])
     }
     func testPrepareCopiesNativeInstallerOutsideApplicationBeforeLaunching() async throws {
@@ -152,7 +222,7 @@ final class UpdateTests: XCTestCase {
             return CommandResult()
         }
         engine.launch = {path,args in launched = true; XCTAssertTrue(path.hasPrefix(engine.updates.path)); XCTAssertEqual(args.first,"apply"); XCTAssertEqual(args.last,"123"); XCTAssertTrue(FileManager.default.isExecutableFile(atPath:path))}
-        try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_ in Data("archive".utf8)})
+        try await engine.prepare(tag: candidate.tag, parentPID: 123, latest: {candidate}, download: {_, file in try Data("archive".utf8).write(to: file)})
         XCTAssertTrue(launched); XCTAssertTrue(FileManager.default.fileExists(atPath:engine.updates.appendingPathComponent("install.lock").path))
     }
     func testForeignApplyStageCannotDeleteFiles() async throws {

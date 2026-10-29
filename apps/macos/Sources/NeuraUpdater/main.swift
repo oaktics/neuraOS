@@ -15,7 +15,7 @@ import Darwin
             case "check": print(String(decoding: try JSONEncoder().encode(await client.latest()), as: UTF8.self))
             case "prepare" where args.count == 3:
                 guard let pid = Int32(args[2]) else {throw UpdateFailure("Invalid application PID")}
-                try await engine.prepare(tag: args[1], parentPID: pid, latest: {try await client.latest()}, download: {try await client.download($0)})
+                try await engine.prepare(tag: args[1], parentPID: pid, latest: {try await client.latest()}, download: {try await client.downloadArchive($0, to: $1)})
                 print("{\"ready\":true}")
             case "apply" where args.count == 3:
                 guard let pid = Int32(args[2]) else {throw UpdateFailure("Invalid application PID")}
