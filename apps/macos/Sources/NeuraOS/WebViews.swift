@@ -13,7 +13,7 @@ import ChromiumBridge
     let workspaceId: String
     let projectId: String
     var tabId: String {String(storageId.split(separator: ".").last ?? "")}
-    var browserVisible = true
+    var browserVisible = true { didSet { if browserVisible != oldValue { BrowserAutomation.shared.changed() } } }
     @Published var automationEnabled = true {
         didSet {UserDefaults.standard.set(!automationEnabled, forKey: "browser.mcpDisabled." + storageId)}
     }

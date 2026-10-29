@@ -205,7 +205,7 @@ final class DaemonClient {
         }
         eventObserver = api.events.observe { [weak self] change in
             guard let self else {return}
-            if change.type == "disconnected" {self.updateConnection(false)}
+            if change.type == "disconnected" {self.updateConnection(false); self.statePulse.signal()}
             if change.type == "ready" || change.state == true {self.statePulse.signal()}
         }
         polling = Task { [weak self] in
@@ -213,7 +213,7 @@ final class DaemonClient {
             var updates = self.statePulse.stream.makeAsyncIterator()
             while !Task.isCancelled {
                 await self.refresh()
-                if self.api.events.supported && self.connected {
+                if self.api.events.supported && self.api.events.connected && self.connected {
                     guard await updates.next() != nil else {return}
                 } else {
                     try? await Task.sleep(for: .seconds(1))
