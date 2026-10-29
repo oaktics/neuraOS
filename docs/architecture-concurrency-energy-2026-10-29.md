@@ -1,8 +1,18 @@
 # neuraOS: 10子並列時の安定性・電力と基盤再設計
 
-2026-10-29、設計検討。実装・本番変更・全面リライトの承認を意味しない。
+2026-10-29の設計検討と実装検証。以下の推奨構成は検討時の仮説を含む。現在の実装・検証済み範囲は次節で区別する。
 調査基点 HEAD: `d7c779ac4a11a8eaed615770d2713b9182676f63`。
 独立workspace: `a992dc6c-27f7-4853-8f97-434be3c5324e`。
+
+## 実装と検証の現在地
+
+製品の常駐daemon・PTY管理・保存・provider監督・MCPはRustへ統合する。Swift UI、CEF、外部の`claude`・`codex`・`git`・`gh`は役割を保つ。「外部CLIを使う」はneuraOS自身にNode runtimeを残す意味ではない。ビルド・回帰試験用Nodeと、外部CLI側が必要とするランタイムは配布daemonと区別する。
+
+統合中の実装は認証付きHTTP command＋WebSocket変更通知＋cursor付き出力取得を使う。UIのstate/terminal/browser定期pollを通知へ置換し、入力と出力取得の待ち行列を分ける。PTYは共有mio reactor、保存は単一SQLite writerと出力read threadを持ち、control/bulkのcreditとFIFOを分離する。bulkが満杯でもcontrolを受け付け、barrierは両laneの受理済み書込みを待つ。端末数の固定上限とは異なる。出力の`data`と`chunks`の二重転送は新UIでは行わない。CEFはネイティブUIの埋込みを維持し、callback駆動pumpと33ms fallbackを使う。
+
+UDS binary、shared memory、segmented journal、別browser hostは以下に残る設計候補であり、実装済みと数えない。これらの優位性を今回の測定が証明したわけではない。Rustという言語名だけを根拠に最高性能を達成したとも結論しない。
+
+[旧daemonのHTTP/PTY測定](architecture-evidence/legacy-daemon-pty-2026-10-29.json)と[ネイティブ開発checkpoint](architecture-evidence/native-debug-pty-2026-10-29.json)では、10・20・32個の実PTYへ各1024行の約2KiB出力を流し、HTTP error・行欠落・重複0、Unicode保持、終了後のcursor replay一致を確認した。後者は最適化前debug binary、同時に別build/agentが稼働した単発標本であり、実Claude仕事量・電池寿命・最適化版の公平比較を示さない。開発checkpointには未統合の操作が残るため、この証拠だけでリリース完了にはしない。
 
 ## 判断
 
