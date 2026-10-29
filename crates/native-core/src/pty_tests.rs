@@ -66,7 +66,7 @@ async fn concurrent_native_ptys_drain_utf8_and_replay_after_shutdown() {
         }
     })
     .await;
-    pty.shutdown().await;
+    pty.shutdown().await.unwrap();
     assert!(
         result.is_ok(),
         "native PTYs stalled before EOF: {} of {} still running",
