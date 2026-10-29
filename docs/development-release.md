@@ -56,9 +56,9 @@ build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、
    "$HELPER" prepare native-N OLD_APP_PID
    ```
 
-   helperは公式Releaseを改めて取得し、最新tag一致・SHA-256・署名・Gatekeeper・bundle ID・build番号・native Runtimeを検証する。`{"ready":true}`後、60秒以内に旧UIアプリを通常終了する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
+   helperは公式Releaseを再ダウンロードするため、展開済みbundleだけのoffline installではない。最新tag一致・SHA-256・署名・Gatekeeper・bundle ID・build番号・native Runtimeを検証する。`{"ready":true}`は準備完了であり移行完了ではない。prepare中に先に旧UIを終了せず、この応答後60秒以内に通常終了する。終了しなければappを置き換える前に中止する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
 
-   旧UIが既に終了している場合は、短命のshellの終了を待つ次の形を使う（`native-N`は実値へ置き換える）。
+   旧UIが起動不能または既に完全終了している場合は、短命のshellの終了を待つ次の形を使う（`native-N`は実値へ置き換える）。旧UIがまだ動いている状態では使わない。sudoは不要。
 
    ```sh
    /bin/sh -c '"$1" prepare "$2" "$$"' sh "$HELPER" native-N
@@ -69,7 +69,7 @@ build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、
 
 登録やhealth確認の失敗時は、helperが旧appと旧plistを戻して旧daemonの再登録を試みる。復元の成否はサービス状態と`Updates/last-error.txt`を確認する。旧プロセスの実行継続やDBの巻き戻しは保証しない。復元自体に失敗した場合は`.previous`と保存plistを保持し、進行中のhelperがないことを確認してから調査・復旧する。再実行は既存backupを置き換えるため、原因を確認せず連打しない。
 
-2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`はmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。署名済みhelperの起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
+2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`／healthはmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。Developer ID署名済み検証bundle自体は未公証で、そのhelperの直接起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
 
 ## 更新の保証範囲
 
