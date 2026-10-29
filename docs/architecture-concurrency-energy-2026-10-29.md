@@ -16,7 +16,7 @@ UDS binary、shared memory、segmented journal、別browser hostは以下に残�
 
 実native ProviderServiceからfake Claude／Codexを各10/20/32起動した[並列fixture](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)では、全指定数の同時active、登録・入力・turn event・exit、UI stream切断後のcursor replayを確認した。これは実モデル負荷でも公平な性能比較でもなく、provider App Server再接続の証明ではない。[Node→Rust→Nodeデータ移行](architecture-evidence/legacy-native-data-migration-2026-10-29.json)も隔離DBで成功したが、実installed app／LaunchAgentの更新とは区別する。最適化版idle/load比較とrelease受入は保留。
 
-## 判断
+## 調査時点の判断と比較候補（実装仕様ではない）
 
 **推奨はRust/native core＋Swift UI＋薄いprovider adapter＋分離したブラウザ実行環境**。実装コスト、既存資産再利用、移行容易性は性能ランキングから除外する。目的は、PCの資源が許す限り有用な仕事を並列実行し、最大持続throughputとp99応答性を両立させ、CPU・起床・IO・メモリ・energyの管理overheadを最小化すること。4/10/20 activeや同時起動2件などの人為的な製品上限は設けない。20は測定点であり上限ではない。
 
@@ -80,7 +80,7 @@ Browser-host boundary -> CEF browser / renderer / GPU processes
 
 MCPの2025-03-26と2026-07-28ではHTTP transport/session/GET streamの仕様が違う。最新draftだけを見てCLI互換を想定しない。[公式versioned transports](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-03-26/basic/transports.mdx)、[2026-07-28](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/basic/transports/index.mdx)。
 
-## 採用案の契約
+## 比較検討案の契約（現行仕様はperformance.mdを参照）
 
 1. **単一の状態所有者**: control actorのみがtask/workspace/terminal lifecycleを遷移。provider adapterは観測eventを送るだけ。writerは永続化所有者であり別の業務状態ownerではない。mutation→writer transaction commit ACK→revision公開の順。snapshotはimmutableでrevision付き、UIが独自にworking/completedを確定しない。
 2. **stream**: 初回snapshot revision R、その後R+1から差分。接続epoch/session/terminal/turn IDを含める。重複はsequenceで無視、gap/retention超過はsnapshot取得。UI publishは16–33ms coalesceし、不可視workspaceのview invalidationを抑制。
@@ -93,9 +93,9 @@ MCPの2025-03-26と2026-07-28ではHTTP transport/session/GET streamの仕様が
 9. **process lifecycle**: PIDだけでなくstart identity/PGID/所有leaseを保持。ps全表scanは共有監視1箇所にまとめ、通常はpipe EOF/exit event、停止時に子孫追跡を強化。親crash/孫reparent/別PGIDの保証を維持し、wakeups削減のために既存孤児回収を単純削除しない。
 10. **UI/CEF**: 端末protocol処理と再描画を分け、不可視端末も入力応答を維持。CEF pumpは担当間調整の別実装。OnScheduleMessagePumpWorkを使っても完全無timer化を約束しない。現在のCEF公式headerはcallback以外のfallback pump（約33ms推奨）も要求する。実際に固定したSDK版で確認し、modal/menu回避と再入防止を保持する。[CEF公式header](https://raw.githubusercontent.com/chromiumembedded/cef/master/include/cef_browser_process_handler.h)。
 
-## 段階的な検証・移行とrollback
+## 撤回した段階的実装計画とrollbackの検討記録
 
-ゼロベースの目標構成は前述のRust/native core案、段階表はそこへ安全に到達して性能を検証する順序であり、両者を分けて読む。現Nodeは既存機能の比較基準・移行中の互換経路として利用できるが、既存資産や検証の早さは最高性能の証明でもNodeを製品の最終構成へ採用する理由でもない。旧版の暫定4activeは未計測の保護案にすぎず、最新方針では製品上限としても推奨値としても採用しない。10activeを実用運転できず資源待機が発生した条件は10並列目標未達と記録する。
+以下の段階表は調査時点の計画であり、段階ごとの後日実装・承認という進め方はユーザーの指示で撤回した。今回の統合PRで配布runtime、provider、PTY、保存、UI通知、更新helperまで実装・検証し、一括リリースする。表に含まれるUDS/shared memory/journal/別browser hostは比較候補であり、今回採用した構成の未実装部分とは扱わない。現行の構成と測定結果は[performance.md](performance.md)を正とする。現Nodeは既存機能の比較基準・移行中の互換経路として利用できるが、既存資産や検証の早さは最高性能の証明でもNodeを製品の最終構成へ採用する理由でもない。旧版の暫定4activeは未計測の保護案にすぎず、最新方針では製品上限としても推奨値としても採用しない。10activeを実用運転できず資源待機が発生した条件は10並列目標未達と記録する。
 
 | 段階 | 変更/検証 | exit gate / rollback |
 |---|---|---|
@@ -105,7 +105,7 @@ MCPの2025-03-26と2026-07-28ではHTTP transport/session/GET streamの仕様が
 | 3 | browser host/GPU presentation、薄いprovider adapter、イベント監視 | CEF UI機能/拡張互換とcopy/energyを実測。分離が性能を損なえばhost境界を再配置 |
 | 4 | resource-credit/fairness、fault recovery、scaling sweep | 機械の実限界とSLOの境界を測定。10/20を上限にしない。capabilityで旧経路へrollback可能 |
 
-各段階は小さいPRで後日承認して実装する。本報告ではPRを公開しない。rollbackはwriterをdrain→durable cursor保存→単一ownerを切替。破壊的schema migrationを避け、DB backup/restore rehearsalは独立データで先に検証。ユーザー機能はClaude/Codex/shell、既存resume、worktree setup、親子監視/report ACK、通知、入力/resize/replay、browser/download/MCP、GitHub、sleep制御を維持する。plugin/CLI仕様差はadapterで吸収しCLIのglobal設定を書き換えない。
+段階ごとの後日承認や小分けリリースは行わない。今回の[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)にまとめる。実装済みupdaterと初回移行・復旧の仕様は[開発・配布フロー](development-release.md)を参照する。調査時のrollback案はwriterをdrain→durable cursor保存→単一ownerを切替。破壊的schema migrationを避け、DB backup/restore rehearsalは独立データで先に検証。ユーザー機能はClaude/Codex/shell、既存resume、worktree setup、親子監視/report ACK、通知、入力/resize/replay、browser/download/MCP、GitHub、sleep制御を維持する。plugin/CLI仕様差はadapterで吸収しCLIのglobal設定を書き換えない。
 
 ## 計測可能な受入基準（提案、未達成の項目を含む）
 
@@ -126,7 +126,7 @@ MCPの2025-03-26と2026-07-28ではHTTP transport/session/GET streamの仕様が
 
 energy proxy: 同一trace/同一仕事量で既存build62比CPU秒とdisk bytesを30%以上、idle wakeupsを70%以上削減する目標。外部CLIを含む/除く値を併記し、端末処理完了件数で正規化する。powermetrics等によるWatt計測は別の統制試験で行い、proxyから電池寿命を断定しない。timer削減はAppleの省電力原則に沿うが、rateと消費電力の比例を仮定しない。[Apple Energy Efficiency](https://developer.apple.com/library/archive/documentation/Performance/Conceptual/power_efficiency_guidelines_osx/Timers.html)。
 
-復旧試験: isolated daemon/provider/writerを別々に停止、socketを5/30秒切断、writer5s pause、ENOSPC/permission failure、巨大chunk、古いACK/重複event、transcript replace/truncate、睡眠復帰を注入。接続復帰後5s以内にstate一致、control継続p99<500ms（writer故障時は明確なdegraded/拒否）、durable ACK済出力欠落0、未ACK tailは契約上限を検証、結果不明commandの自動再実行0、残留子孫0（明示停止後5s、所有関係のみ）。UI foreground操作・browser modal/menu・Unicode画面snapshotを回帰比較する。**このfault/recovery suiteは今回未実施**。
+復旧試験: isolated daemon/provider/writerを別々に停止、socketを5/30秒切断、writer5s pause、ENOSPC/permission failure、巨大chunk、古いACK/重複event、transcript replace/truncate、睡眠復帰を注入。接続復帰後5s以内にstate一致、control継続p99<500ms（writer故障時は明確なdegraded/拒否）、durable ACK済出力欠落0、未ACK tailは契約上限を検証、結果不明commandの自動再実行0、残留子孫0（明示停止後5s、所有関係のみ）。UI foreground操作・browser modal/menu・Unicode画面snapshotを回帰比較する。**この提案表の全条件を網羅したsuiteは未実施**。実施済みのプロセス終了・キャンセル・crash・予約pressure・移行・出力replay・browser回帰は[検証checkpoint](development-release.md#native統合の検証checkpoint2026-10-29)に記録する。
 
 性能確定の追加gate: 同じPC・同じ仕事量のCLI-only基準に対し、10activeで有用throughputを少なくとも90%維持し、neuraOS管理費用のCPU秒/job・IO bytes/jobを報告する（90%は提案SLOで未測定）。各Nで到着率を上げ、30分backlogが増えずp99を維持できる最大rateを探索する。N増加でjobs/sが伸びなくなる点、p99破綻点、Joule/job最良点はそれぞれ別に示す。最良値の単一試行ではなく反復の信頼区間でRust/Swift/Nodeの優劣を判定する。
 
@@ -274,6 +274,6 @@ python3 scripts/native/sample-architecture.py > /tmp/neura-process-review.json
 - [Apple timeoutIntervalForRequest](https://developer.apple.com/documentation/foundation/urlsessionconfiguration/timeoutintervalforrequest?language=objc): inactivity timeoutの意味を保持し、総operation deadlineは別に定義する。単に15s→250sへ延長して障害を隠さない。
 - [Apple timedOut](https://developer.apple.com/documentation/foundation/urlerror/timedout)、[XPC](https://developer.apple.com/documentation/xpc): web取得はJS/Markdown制約で本文を取得できなかった部分あり。XPCの性能優位を未検証の事実として扱わない。
 - [Claude hooks公式](https://code.claude.com/docs/en/hooks): timeout/lifecycleはCLI版依存。現在の5s/10sはneuraOS側設定で、公式defaultとは区別。Channels受信成功と会話完了を同一視しない。
-- 現行appのCPUがCEF/SwiftTerm/SwiftUIのどこへ分布するか、CLI10子のピークRSS・fork頻度、API retry、長期output/event/operation retention、DB checkpoint stall、wake復帰との相関は未確定。段階0で機密を含まないsignpost/traceを追加して確定させる。
+- 現行appのCPUがCEF/SwiftTerm/SwiftUIのどこへ分布するか、CLI10子のピークRSS・fork頻度、API retry、長期output/event/operation retention、DB checkpoint stall、wake復帰との相関は未確定。これらを断定するには追加の統制測定が必要であり、今回の合成比較から推測しない。
 
 本検討の変更はこの文書、集計JSON、独立harnessのみ。実際のアーキテクチャ変更、PR公開、merge、releaseは行っていない。
