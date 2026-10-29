@@ -15,7 +15,13 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
   const old=process.env.NEURA_CODEX_PATH;process.env.NEURA_CODEX_PATH=root+'/missing';
   await git(repo,['remote','add','origin','https://github.com/owner/repo.git']);
   const expectedHead=(await git(repo,['rev-parse','HEAD'])).trim();
-  const d=await createDaemon(root+'/data',new GitHub(async()=>JSON.stringify({state:'MERGED',headRefOid:expectedHead})));await d.app.listen({host:'127.0.0.1',port:0});
+  const d=await createDaemon(root+'/data',new GitHub(async()=>JSON.stringify({state:'MERGED',headRefOid:expectedHead})));
+  let failStatusLookup=false,statusLookups=0;
+  d.app.addHook('onRequest',async(request,reply)=>{
+    // Allow launchContext's caller lookup; fail only the post-launch receipt lookup.
+    if(failStatusLookup&&request.url==='/v1/agents'&&++statusLookups===2)return reply.code(503).send({error:'status unavailable'});
+  });
+  await d.app.listen({host:'127.0.0.1',port:0});
   const address=d.app.server.address();assert.ok(address&&typeof address!=='string');
   const headers={authorization:`Bearer ${d.token}`};
   const p=(await d.app.inject({method:'POST',url:'/v1/commands',headers,payload:{operationId:randomUUID(),command:{type:'project.add',path:repo}}})).json();
@@ -96,9 +102,33 @@ test('stdio MCP discovers workspaces, preserves failed startup, and deduplicates
     assert.equal(d.store.state().terminals.length,beforeTerminals,'startup provider must never start an agent for workspace_create');
     const oldClaude=process.env.NEURA_CLAUDE_PATH;process.env.NEURA_CLAUDE_PATH=probe;
     try{
-      const started=JSON.parse((await tool('task_start',{operationId:randomUUID(),workspaceId:workspace.id,provider:'claude',prompt:'queued'})).content[0].text);
+      const startArgs={operationId:randomUUID(),workspaceId:workspace.id,provider:'claude',prompt:'queued'};
+      const started=JSON.parse((await tool('task_start',startArgs)).content[0].text);
       assert.equal(started.registrationPending,true);assert.match(started.recovery,/startup confirmation/);
+      assert.equal(started.channelState,'pending');
       assert.match(started.recovery,/Do not create another worker/);
+      const claudeId=randomUUID();
+      const registration={id:claudeId,terminalId:started.id,workspaceId:workspace.id,provider:'claude',name:'receipt test',status:'idle',updatedAt:'',pending:[{id:randomUUID(),text:'queued'}],requests:[]};
+      // Retry the same launch without creating another terminal; read fresh receipt state.
+      for(const channelState of ['pending','unavailable','connected']){
+        d.store.put('agents',{...registration,channelState});
+        const result=JSON.parse((await tool('task_start',startArgs)).content[0].text);
+        assert.equal(result.id,started.id);assert.equal(result.channelState,channelState);
+        assert.equal(result.registrationPending,channelState!=='connected');
+        if(channelState==='connected'){assert.equal(result.agentId,claudeId);assert.equal(result.recovery,undefined);}
+        else {
+          assert.equal(result.agentId,undefined);assert.match(result.recovery,/Do not create another worker/);
+          if(channelState==='unavailable')assert.match(result.recovery,/not acknowledged within 60 seconds/);
+        }
+        assert.equal(d.store.get<any>('agents',claudeId).pending[0].text,'queued','diagnostics must not consume queued work');
+      }
+      failStatusLookup=true;
+      const unknown=JSON.parse((await tool('task_start',startArgs)).content[0].text);
+      assert.equal(unknown.id,started.id);assert.equal(unknown.channelState,'unknown');
+      assert.equal(unknown.registrationPending,true);assert.equal(unknown.agentId,undefined);
+      assert.match(unknown.recovery,/Do not create another worker/);
+      assert.equal(d.store.state().terminals.filter(t=>t.id===started.id).length,1);
+      failStatusLookup=false;
     }finally{if(oldClaude===undefined)delete process.env.NEURA_CLAUDE_PATH;else process.env.NEURA_CLAUDE_PATH=oldClaude;}
     assert.equal((await d.app.inject({url:'/v1/agents'})).statusCode,401);
   }finally{child.kill();lines.close();await d.app.close();if(old===undefined)delete process.env.NEURA_CODEX_PATH;else process.env.NEURA_CODEX_PATH=old;await rm(root,{recursive:true,force:true});}
