@@ -65,6 +65,15 @@ export class SessionNames {
     return this.pending;
   }
   private async update() {
+    // Tab and workspace names often ask for the same session in one refresh.
+    // Share that read only within this refresh so new titles remain observable.
+    const lookups=new Map<string,Promise<SessionName|undefined>>();
+    const read=(provider:'codex'|'claude',path:string,id?:string)=>{
+      const key=JSON.stringify([provider,path,id]);
+      let pending=lookups.get(key);
+      if(!pending){pending=this.readers[provider](path,id).catch(()=>undefined);lookups.set(key,pending);}
+      return pending;
+    };
     const terminals=this.store.list<TerminalRecord>('terminals');
     // Poll running CLIs and read once after exit to collect their final title.
     // A newly observed stopped terminal may have run entirely between polls.
@@ -75,7 +84,7 @@ export class SessionNames {
       if(!terminal.sessionId||terminal.provider==='shell')return;
       const workspace=this.store.get<Workspace>('workspaces',terminal.workspaceId);
       if(!workspace)return;
-      const result=await this.readers[terminal.provider](workspace.path,terminal.sessionId).catch(()=>undefined);
+      const result=await read(terminal.provider,workspace.path,terminal.sessionId);
       const name=displayName(result?.name),current=this.store.get<TerminalRecord>('terminals',terminal.id);
       // A resume/clear or exit can occur while the provider lookup is in flight.
       if(name&&current&&current.sessionId===terminal.sessionId&&current.sessionName===terminal.sessionName&&current.sessionName!==name)
@@ -87,7 +96,7 @@ export class SessionNames {
       if(!active.length)return;
       await Promise.all(active.map(async provider=>{
         const managed=refreshable.filter(t=>t.workspaceId===workspace.id&&t.provider===provider&&t.agentId&&t.sessionId);
-        const candidates=await Promise.all([this.readers[provider](workspace.path).catch(()=>undefined),...managed.map(t=>this.readers[provider](workspace.path,t.sessionId).catch(()=>undefined))]);
+        const candidates=await Promise.all([read(provider,workspace.path),...managed.map(t=>read(provider,workspace.path,t.sessionId))]);
         const name=candidates.filter((n):n is SessionName=>!!n).sort((a,b)=>b.updatedAt-a.updatedAt)[0];
         if(name&&displayName(name.name)&&Number.isFinite(name.updatedAt))this.names.set(`${workspace.id}:${provider}`,name);
       }));

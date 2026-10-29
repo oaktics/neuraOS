@@ -26,6 +26,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   const agents=new Agents(store,()=>controlEndpoint,tokenPath),terminals=new Terminals(store,undefined,agents,{endpoint:()=>controlEndpoint,tokenPath});
   const diagnostics=new Diagnostics(join(dataDir,'diagnostics'));
   diagnostics.record('daemon.start');
+  const stopPerformanceMonitoring=diagnostics.startPerformanceMonitoring();
   const sessionNames=new SessionNames(store);
   const app=Fastify({logger:false,bodyLimit:2*1024*1024});
   app.addHook('onListen',async()=>{const address=app.server.address();if(address&&typeof address!=='string')controlEndpoint=`http://127.0.0.1:${address.port}`;});
@@ -250,7 +251,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     })).then(()=>{}).finally(()=>{folderRefresh=undefined;});
     return folderRefresh;
   }
-  app.get('/v1/state',async()=>{await refreshFolderProjects();await sessionNames.refresh();return {...store.state(),features:daemonFeatures};});
+  app.get('/v1/state',async()=>{await refreshFolderProjects();void sessionNames.refresh().catch(()=>{});return {...store.state(),features:daemonFeatures};});
   app.get('/v1/workspaces/:id/checks',async req=>{const w=workspace((req.params as {id:string}).id);return (w.kind==='folder'||w.kind==='scratch')?{state:'unsupported',checks:[],fetchedAt:new Date().toISOString()}:github.checks(w.path);});
   app.get('/v1/projects/:id/setup-scripts',async req=>{const project=requireValue(store.get<Project>('projects',z.uuid().parse((req.params as {id:string}).id)),'project_missing','プロジェクトがありません。');return {scripts:await detectSetup(project.path)};});
   app.get('/v1/projects/:id/pull-requests',async req=>{
@@ -300,7 +301,7 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
     if(!await validChannelCredential(tokenPath,terminalId,req.headers['x-neura-channel-token']))throw new Fault('channel_forbidden','このターミナルのChannels認証が必要です。',403);
     return agents.acknowledgeChannel(terminalId,z.object({nonce:z.uuid()}).parse(req.body).nonce);
   });
-  app.get('/v1/agents',async()=>({agents:agents.list(),revision:store.state().revision}));
+  app.get('/v1/agents',async()=>({agents:agents.list(),currentSessionIds:Object.fromEntries(store.list<TerminalRecord>('terminals').filter(t=>t.provider==='claude'&&t.sessionId).map(t=>[t.id,t.sessionId])),revision:store.state().revision}));
   app.get('/v1/agents/:id',async req=>agents.read(z.uuid().parse((req.params as {id:string}).id),z.string().max(4096).optional().parse((req.query as {cursor?:string}).cursor)));
   app.get('/v1/terminals/:id/output',async req=>{
     const id=z.uuid().parse((req.params as {id:string}).id),after=z.coerce.number().int().min(0).default(0).parse((req.query as Record<string,string>).after);
@@ -313,6 +314,6 @@ export async function createDaemon(dataDir:string,github=new GitHub(),usage=new 
   app.get('/v1/workspaces/:id/git',async req=>work.gitStatus(gitWorkspace((req.params as {id:string}).id).path));
   app.get('/v1/workspaces/:id/github',async req=>{const w=gitWorkspace((req.params as {id:string}).id);return github.status(w.path,(req.query as {refresh?:string}).refresh==='true',w.pullRequestSource);});
   app.get('/v1/workspaces/:id/diff',async req=>work.diff(gitWorkspace((req.params as {id:string}).id).path,z.string().min(1).max(4096).parse((req.query as Record<string,string>).path)));
-  app.addHook('onClose',async()=>{await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);for(const job of setupJobs.values())job.controller.abort();await Promise.all([...setupJobs.values()].map(job=>job.promise));await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
+  app.addHook('onClose',async()=>{stopPerformanceMonitoring();await Promise.allSettled([queue,githubQueue,workspaceNetworkQueue]);for(const job of setupJobs.values())job.controller.abort();await Promise.all([...setupJobs.values()].map(job=>job.promise));await folderRefresh;await sessionNames.close();await terminals.shutdown();store.close();diagnostics.record('daemon.end');await diagnostics.flush();});
   return {app,store,token};
 }

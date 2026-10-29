@@ -1,3 +1,4 @@
+import {claudeCompletion} from './claude-completion.ts';
 import {revokeChannelCredential} from './channel-credentials.ts';
 import {browserCredential} from './browser-credentials.ts';
 import {codexSessionInstructions} from './session-instructions.ts';
@@ -32,7 +33,7 @@ export interface AgentRecord {
   pending:{id:string;text:string;report?:boolean}[];requests:{id:number|string;method:string;params:unknown}[];
 }
 export class Agents {
-  private claudeLive=new Map<string,{workspace:Workspace;parentTaskId?:string;sessionId?:string;resumeId?:string;initialPrompt?:string;channelNonce:string;probeSentAt?:number;channelConfirmed?:boolean;probeAcked?:boolean;turnStartedAt?:number;interruptedAt?:number;providerTurnId?:string;interrupt:(waiting?:boolean)=>void}>();
+  private claudeLive=new Map<string,{workspace:Workspace;parentTaskId?:string;sessionId?:string;resumeId?:string;initialPrompt?:string;channelNonce:string;probeSentAt?:number;channelConfirmed?:boolean;probeAcked?:boolean;turnStartedAt?:number;interruptedAt?:number;providerTurnId?:string;lastActivityAt?:number;interrupt:(waiting?:boolean)=>void}>();
   private titles=new Map<string,CodexTitles>();
   private backends=new Map<string,CodexRPC>();
   private observers=new Map<string,NodeJS.Timeout>();
@@ -53,15 +54,15 @@ export class Agents {
   }
   claudeEvent(terminalId:string,event:ActivityEvent){
     const live=this.claudeLive.get(terminalId);
-    if(!live||event.agent_id||!event.session_id||! /^[a-f0-9-]{36}$/i.test(event.session_id))return;
+    if(!live||event.agent_id||!event.session_id||! /^[a-f0-9-]{36}$/i.test(event.session_id))return false;
     const id=event.session_id,old=this.store.get<AgentRecord>('agents',id);
     if(event.hook_event_name==='SessionStart'){
       if(old&&(old.provider!=='claude'||old.workspaceId!==live.workspace.id||(old.terminalId!==terminalId&&this.online(old)))){
-        this.store.append(terminalId,'\r\nneuraOS: この会話は別のターミナルで実行中か、別の作業フォルダに属しています。\r\n');live.interrupt();return;
+        this.store.append(terminalId,'\r\nneuraOS: この会話は別のターミナルで実行中か、別の作業フォルダに属しています。\r\n');live.interrupt();return false;
       }
-      if(old?.terminalId===terminalId&&live.sessionId===id&&['compact','startup'].includes(event.source??'')){this.save({...old,transcriptPath:event.transcript_path??old.transcriptPath});return;}
+      if(old?.terminalId===terminalId&&live.sessionId===id&&['compact','startup'].includes(event.source??'')){this.save({...old,transcriptPath:event.transcript_path??old.transcriptPath});return true;}
       if(live.sessionId!==id){
-        live.probeAcked=false;live.turnStartedAt=undefined;live.interruptedAt=undefined;live.providerTurnId=undefined;
+        live.probeAcked=false;live.turnStartedAt=undefined;live.interruptedAt=undefined;live.providerTurnId=undefined;live.lastActivityAt=undefined;
         if(!live.channelConfirmed){live.probeSentAt=undefined;live.channelNonce=randomUUID();}
       }
       live.sessionId=id;live.resumeId=undefined;
@@ -72,28 +73,31 @@ export class Agents {
         this.addParentWatch(id,live.parentTaskId);
         if(live.initialPrompt){const a=this.get(id);this.save({...a,pending:[...a.pending,{id:randomUUID(),text:live.initialPrompt}]});live.initialPrompt=undefined;}
       }catch(error){this.save({...this.get(id),status:'failed',summary:String(error)});this.store.append(terminalId,`\r\nneuraOS: 監督への登録に失敗しました: ${String(error)}\r\n`);}
-      return;
+      return true;
     }
-    if(live.sessionId!==id||!old||old.terminalId!==terminalId||old.transcriptPath!==event.transcript_path)return;
+    if(live.sessionId!==id||!old||old.terminalId!==terminalId||old.transcriptPath!==event.transcript_path)return false;
     const name=event.hook_event_name,observed=Number(event.observed_at);
-    if(Number.isFinite(observed)&&observed<(live.interruptedAt??0))return;
-    if(name!=='UserPromptSubmit'&&event.turn_id&&live.providerTurnId&&event.turn_id!==live.providerTurnId)return;
+    if(Number.isFinite(observed)&&observed<(live.interruptedAt??0))return false;
+    if(name!=='UserPromptSubmit'&&event.turn_id&&live.providerTurnId&&event.turn_id!==live.providerTurnId)return false;
     if(name==='Stop'||name==='StopFailure'){
       const assistantTime=Date.parse(event.assistant_timestamp??'');
-      if((Number.isFinite(observed)&&observed<(live.turnStartedAt??0))||(Number.isFinite(assistantTime)&&assistantTime<(live.turnStartedAt??0)))return;
+      if((Number.isFinite(observed)&&observed<(live.turnStartedAt??0))||(Number.isFinite(assistantTime)&&assistantTime<(live.turnStartedAt??0)))return false;
     }
+    // Idle notifications and duplicate Stop hooks must not move the recovery boundary.
+    if(Number.isFinite(observed)&&['UserPromptSubmit','PreToolUse','PermissionRequest','PostToolUse','PostToolUseFailure','Elicitation','ElicitationResult','PreCompact'].includes(name??''))live.lastActivityAt=Math.max(live.lastActivityAt??0,observed);
     if(name==='UserPromptSubmit'){live.turnStartedAt=Number.isFinite(observed)?observed:Date.now();live.providerTurnId=event.turn_id;}
-    if(old.status==='interrupted'&&!old.turnId&&name!=='UserPromptSubmit'&&name!=='SessionEnd')return;
+    if(old.status==='interrupted'&&!old.turnId&&name!=='UserPromptSubmit'&&name!=='SessionEnd')return false;
     if(['UserPromptSubmit','PreToolUse'].includes(name??''))this.save({...old,status:'working',turnId:old.turnId??randomUUID()});
     if(name==='PermissionRequest'||name==='Elicitation'||(name==='PreToolUse'&&['AskUserQuestion','ExitPlanMode'].includes(event.tool_name??'')))this.save({...this.get(id),status:'waiting'});
     if(name==='PostToolUse'||name==='PostToolUseFailure')this.save({...old,status:'working'});
     if(name==='Stop'||name==='StopFailure'){
-      if(live.probeAcked){live.probeAcked=false;this.save({...old,status:'idle',turnId:undefined});return;}
-      if(!old.turnId)return; // Duplicate Stop must not re-fire a watch.
+      if(live.probeAcked){live.probeAcked=false;this.save({...old,status:'idle',turnId:undefined});return true;}
+      if(!old.turnId)return false; // Duplicate Stop must not re-fire a watch.
       this.save({...old,status:name==='Stop'?'idle':'failed',lastTurnId:old.turnId,lastTurnStatus:name==='Stop'?'completed':'failed',turnId:undefined,summary:event.last_assistant_message?.slice(-16000)});
       this.deliverReports();
     }
     if(name==='SessionEnd'){live.sessionId=undefined;this.save({...old,status:'interrupted',turnId:undefined});}
+    return true;
   }
   claudeInterrupted(terminalId:string,explicit=false){
     const live=this.claudeLive.get(terminalId);
@@ -105,6 +109,19 @@ export class Agents {
     live.probeAcked=false;
     this.save({...a,status:'interrupted',turnId:undefined,...(!probe&&a.turnId?{lastTurnId:a.turnId,lastTurnStatus:'interrupted',summary:undefined}:{})});
     if(!probe&&a.turnId)this.deliverReports();
+  }
+  async claudeCompletion(terminalId:string){
+    const live=this.claudeLive.get(terminalId),id=live?.sessionId;
+    if(!live||!id)return;
+    const a=this.get(id);
+    if(!['working','waiting'].includes(a.status)||!a.transcriptPath)return;
+    const after=Math.max(live.turnStartedAt??0,live.probeSentAt??0,live.lastActivityAt??0,live.interruptedAt??0);
+    const event=await claudeCompletion(a.transcriptPath,id,after);
+    // File I/O may overlap a new turn, interruption, session switch or shutdown.
+    if(this.claudeLive.get(terminalId)!==live||live.sessionId!==id)return;
+    const current=this.get(id);
+    if(current.status!==a.status||current.turnId!==a.turnId||Math.max(live.turnStartedAt??0,live.probeSentAt??0,live.lastActivityAt??0,live.interruptedAt??0)!==after)return;
+    return event;
   }
   channel(terminalId:string){
     if(!this.claudeLive.has(terminalId))throw new Fault('agent_offline','Claudeのターミナルは停止しています。',409);
@@ -302,6 +319,7 @@ export class Agents {
     const sourceId=sourceTerminalId?this.store.get<TerminalRecord>('terminals',sourceTerminalId)?.agentId:undefined;
     const candidate=sourceId?this.store.get<AgentRecord>('agents',sourceId):undefined;
     const source=candidate?.terminalId===sourceTerminalId?candidate:undefined;
+    if(source?.id===id)throw new Fault('report_to_self','task_report.taskId is the RECIPIENT, not your own task ID. Send to parentTaskId'+(source.parentTaskId?': '+source.parentTaskId: ' or another supervisor')+'.',409);
     const report:TaskReport={id:randomUUID(),kind:'manual',text,createdAt:new Date().toISOString(),sourceTerminalId,sourceTaskId:source?.id};
     this.save({...a,reports:[...a.reports!,report]});
     if(this.backends.has(a.terminalId))void this.serial(id,()=>this.flush(id)).catch(()=>{});
