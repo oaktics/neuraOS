@@ -344,7 +344,17 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
         4 * 1024 * 1024
     };
     let result=tokio::time::timeout(Duration::from_secs(if is_gh{60}else{30}),async{
-        let (out,diagnostic,status)=tokio::try_join!(read_capped(stdout,limit),read_capped(stderr,limit),async{child.wait().await.map_err(|_|malformed())})?;
+        let (out,diagnostic,status)=tokio::try_join!(read_capped(stdout,limit),read_capped(stderr,limit),async {
+            let status = child.wait().await.map_err(|_| malformed())?;
+            // A hook may leave a child holding stdout/stderr. Reap owned
+            // descendants as soon as the leader exits, before awaiting EOF.
+            tree.stop().await.map_err(|_| err(
+                "github_failed",
+                "外部処理の終了を確認できません。操作結果を確認してください。",
+                502,
+            ))?;
+            Ok(status)
+        })?;
         if status.success(){return String::from_utf8(out).map_err(|_|malformed());}
         let message=String::from_utf8_lossy(&diagnostic).to_lowercase();
         let (code,description,status)=if ["auth login","not logged","bad credentials","http 401"].iter().any(|s|message.contains(s)){("github_auth","GitHub にログインできません。gh auth login を実行してください。",401)}
@@ -379,6 +389,9 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
         }
     }
 }
+pub async fn run_git(cwd: String, args: Vec<String>) -> Result<String> {
+    run(cwd, args, false).await
+}
 #[derive(Clone)]
 pub struct GitHub {
     gh: Runner,
@@ -397,7 +410,7 @@ impl GitHub {
     pub fn new() -> Self {
         Self {
             gh: Arc::new(|c, a| Box::pin(run(c, a, true))),
-            git: Arc::new(|c, a| Box::pin(run(c, a, false))),
+            git: Arc::new(|c, a| Box::pin(run_git(c, a))),
             status_cache: Cache::default(),
             detail_cache: Cache::default(),
             checks_cache: Cache::default(),
