@@ -62,7 +62,7 @@ pub async fn run(
             503,
         )
     })?;
-    let mut child = Command::new(program)
+    let child = Command::new(program)
         .env(crate::process_tree::OWNER_ENV, tree.token())
         .args(args)
         .current_dir(root)
@@ -74,7 +74,9 @@ pub async fn run(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| ApiError::new("operation_failed", "外部プログラムを起動できません。", 500))?;
-    let pid = child.id().ok_or_else(ApiError::storage)?;
+    // The guard retains the unreaped leader through async cancellation/attach failure.
+    let mut child = crate::process_tree::OwnedChild::new(child, tree.clone());
+    let pid = child.child_mut().id().ok_or_else(ApiError::storage)?;
     tree.attach(pid).await.map_err(|_| {
         ApiError::new(
             "process_monitor_failed",
@@ -82,14 +84,30 @@ pub async fn run(
             500,
         )
     })?;
-    let stdout = child.stdout.take().ok_or_else(ApiError::storage)?;
-    let stderr = child.stderr.take().ok_or_else(ApiError::storage)?;
+    let stdout = child
+        .child_mut()
+        .stdout
+        .take()
+        .ok_or_else(ApiError::storage)?;
+    let stderr = child
+        .child_mut()
+        .stderr
+        .take()
+        .ok_or_else(ApiError::storage)?;
     let result = tokio::time::timeout(Duration::from_secs(seconds), async {
         tokio::try_join!(
             bounded(stdout, 4 * 1024 * 1024),
             bounded(stderr, 64 * 1024),
             async {
-                let status = child.wait().await.map_err(|_| ApiError::storage())?;
+                // Observe exit without reaping: restricted descendants may have no
+                // readable owner token, so the leader's identity/group must remain.
+                tree.wait_exit().await.map_err(|_| {
+                    ApiError::new(
+                        "process_monitor_failed",
+                        "外部処理の終了通知を受信できません。",
+                        500,
+                    )
+                })?;
                 tree.stop().await.map_err(|_| {
                     ApiError::new(
                         "process_cleanup_failed",
@@ -97,7 +115,11 @@ pub async fn run(
                         500,
                     )
                 })?;
-                Ok(status)
+                child
+                    .child_mut()
+                    .wait()
+                    .await
+                    .map_err(|_| ApiError::storage())
             }
         )
     })
@@ -112,13 +134,23 @@ pub async fn run(
     let output = match result {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = child.child_mut().kill().await;
+            child
+                .child_mut()
+                .wait()
+                .await
+                .map_err(|_| ApiError::storage())?;
+            drop(child.into_inner());
             return Err(e);
         }
         Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+            let _ = child.child_mut().kill().await;
+            child
+                .child_mut()
+                .wait()
+                .await
+                .map_err(|_| ApiError::storage())?;
+            drop(child.into_inner());
             return Err(ApiError::new(
                 "operation_timeout",
                 "外部処理が時間内に終了しませんでした。",
@@ -126,6 +158,8 @@ pub async fn run(
             ));
         }
     };
+    // Both successful and failed exit statuses have been reaped after owner stop.
+    drop(child.into_inner());
     if !output.2.success() {
         return Err(ApiError::new(
             "git_failed",
