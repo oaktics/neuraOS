@@ -225,3 +225,16 @@ test('an in-flight final lookup cannot overwrite a pushed terminal title',async(
     assert.equal(store.get<TerminalRecord>('terminals','t')?.sessionName,'Pushed');
   }finally{store.close();}
 });
+
+test('tab and workspace share exact-session reads only for one refresh',async()=>{
+  const store=new Store(':memory:');
+  try{
+    store.put('workspaces',{id:'w',projectId:'p',name:'worktree-test',path:'/repo',branch:'neura/test',kind:'worktree',createdAt:''});
+    store.put('terminals',{id:'t',workspaceId:'w',provider:'claude',status:'running',agentId:'s',sessionId:'s',createdAt:'',cols:80,rows:24});
+    const calls:(string|undefined)[]=[];
+    const names=new SessionNames(store,{codex:async()=>undefined,claude:async(_path,id)=>{calls.push(id);return {name:'Current',updatedAt:1};}},0);
+    await names.refresh();assert.deepEqual(calls,['s',undefined]);
+    await names.refresh();assert.deepEqual(calls,['s',undefined,'s',undefined]);
+    await names.close();
+  }finally{store.close();}
+});
