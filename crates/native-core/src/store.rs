@@ -356,6 +356,71 @@ struct Job {
     reply: oneshot::Sender<Result<Value, ApiError>>,
     _credit: Option<OwnedSemaphorePermit>,
 }
+// Only these DB-only statements can share a transaction. Other handlers may
+// open their own transactions or implement CAS/barrier boundaries.
+fn groupable(job: &Job) -> bool {
+    matches!(job.request.op.as_str(), "operation_start" | "operation_finish")
+}
+const CONTROL_QUANTUM: usize = 8;
+fn ready_group(first: Job, rx: &mut mpsc::Receiver<Job>, pending: &mut Option<Job>, limit: usize) -> Vec<Job> {
+    let mut jobs = vec![first];
+    if !groupable(&jobs[0]) { return jobs; }
+    while jobs.len() < limit {
+        match rx.try_recv() {
+            Ok(job) if groupable(&job) => jobs.push(job),
+            Ok(job) => { *pending = Some(job); break; }
+            Err(_) => break,
+        }
+    }
+    jobs
+}
+fn complete(job: Job, result: Result<Value, ApiError>, changes: &broadcast::Sender<Change>) {
+    if result.is_ok() && (job.request.op != "compare_put" || result.as_ref().ok() == Some(&Value::Bool(true))) {
+        if let Some(change) = change(&job.request) { let _ = changes.send(change); }
+    }
+    let _ = job.reply.send(result);
+}
+// Returns false only if rollback could not restore autocommit. The writer then
+// closes its queues rather than processing further jobs in an uncertain tx.
+fn execute_group(db: &mut Connection, jobs: Vec<Job>, changes: &broadcast::Sender<Change>) -> bool {
+    if jobs.len() == 1 {
+        let job = jobs.into_iter().next().unwrap();
+        let result = handle(db, &job.request).map_err(|_| ApiError::storage());
+        complete(job, result, changes);
+        return db.is_autocommit();
+    }
+    debug_assert!(jobs.iter().all(groupable));
+    if db.execute_batch("BEGIN IMMEDIATE").is_err() {
+        for job in jobs { complete(job, Err(ApiError::storage()), changes); }
+        return db.is_autocommit();
+    }
+    let results: Result<Vec<Value>, String> = jobs.iter().map(|job| handle(db, &job.request)).collect();
+    match results {
+        Ok(results) => {
+            // Never replay a failed COMMIT: its durability outcome may be unknown.
+            // No successful reply or event is published before the FULL commit.
+            let committed = db.execute_batch("COMMIT").is_ok();
+            if !committed && !db.is_autocommit() { let _ = db.execute_batch("ROLLBACK"); }
+            for (job, result) in jobs.into_iter().zip(results) {
+                complete(job, if committed { Ok(result) } else { Err(ApiError::storage()) }, changes);
+            }
+        }
+        Err(_) => {
+            // A duplicate/invalid statement must not fail unrelated accepted
+            // jobs. Retry FIFO individually only after confirmed full rollback.
+            if db.execute_batch("ROLLBACK").is_ok() {
+                for job in jobs {
+                    let result = handle(db, &job.request).map_err(|_| ApiError::storage());
+                    complete(job, result, changes);
+                    if !db.is_autocommit() { return false; }
+                }
+            } else {
+                for job in jobs { complete(job, Err(ApiError::storage()), changes); }
+            }
+        }
+    }
+    db.is_autocommit()
+}
 #[derive(Clone)]
 pub struct StoreHandle {
     events:broadcast::Sender<Change>,
@@ -382,19 +447,19 @@ impl StoreHandle {
    let runtime=tokio::runtime::Builder::new_current_thread().build().expect("store executor");
    runtime.block_on(async {
     let mut control_run=0;
+    let mut pending=None;
     loop {
      // A busy control lane gets at most eight consecutive jobs while bulk is ready.
-     let job=if control_run>=8 {match bulk_rx.try_recv(){Ok(job)=>Some((job,false)),Err(_)=>None}}else{None};
-     let next=if let Some(job)=job {Some(job)}else{tokio::select!{biased;
+     let job=if control_run>=CONTROL_QUANTUM {control_run=0;match bulk_rx.try_recv(){Ok(job)=>Some((job,false)),Err(_)=>None}}else{None};
+     let next=if let Some(job)=job {Some(job)}else if let Some(job)=pending.take(){Some((job,true))}else{tokio::select!{biased;
       job=rx.recv(),if !rx.is_closed()||!rx.is_empty()=>job.map(|j|(j,true)),
       job=bulk_rx.recv(),if !bulk_rx.is_closed()||!bulk_rx.is_empty()=>job.map(|j|(j,false)),
       else=>break,
      }};
      let Some((job,control))=next else{continue;};
-     control_run=if control{control_run+1}else{0};
-     let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());
-     if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=changes.send(change);}}
-     let _=job.reply.send(result);
+     let jobs=if control {ready_group(job,&mut rx,&mut pending,CONTROL_QUANTUM-control_run)}else{vec![job]};
+     control_run=if control{control_run+jobs.len()}else{0};
+     if !execute_group(&mut writer,jobs,&changes){break;}
     }
    });
   }).map_err(|_|ApiError::storage())?;
@@ -804,5 +869,130 @@ mod update_race_tests {
         assert_eq!(current["worktreeStartup"], json!(["claude"]));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod operation_group_tests {
+    use super::*;
+    fn job(op: &str, args: Value) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
+        let (reply, rx) = oneshot::channel();
+        (Job { request: Request { op: op.into(), args }, reply, _credit: None }, rx)
+    }
+    fn start(id: &str) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
+        job("operation_start", json!({"id":id,"hash":"h"}))
+    }
+    fn db() -> Connection {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        // Keep the same handle API exercised by the real writer.
+        handle(&mut db, &Request { op:"barrier".into(), args:Value::Null }).unwrap();
+        db
+    }
+    #[test]
+    fn duplicate_rolls_back_then_replays_db_only_jobs_in_order() {
+        let mut db = db();
+        let (events, mut changes) = broadcast::channel(8);
+        let (a, mut ar) = start("a");
+        let (duplicate, mut dr) = start("a");
+        let (b, mut br) = start("b");
+        let (finish, mut fr) = job("operation_finish", json!({"id":"b","status":"done","result":"{}"}));
+        assert!(execute_group(&mut db, vec![a, duplicate, b, finish], &events));
+        assert!(ar.try_recv().unwrap().is_ok());
+        assert!(dr.try_recv().unwrap().is_err());
+        assert!(br.try_recv().unwrap().is_ok());
+        assert!(fr.try_recv().unwrap().is_ok());
+        assert_eq!(query(&db,"SELECT id,status FROM operations ORDER BY id",&[]).unwrap(),
+            json!([{"id":"a","status":"pending"},{"id":"b","status":"done"}]));
+        assert!(changes.try_recv().is_err());
+        assert!(db.is_autocommit());
+    }
+    #[test]
+    fn failed_commit_never_publishes_success_or_replays_pending_operation() {
+        let mut db = db();
+        db.execute_batch("PRAGMA foreign_keys=ON;
+            CREATE TABLE parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE deferred_child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER fail_commit AFTER UPDATE ON operations BEGIN INSERT INTO deferred_child VALUES(123); END;").unwrap();
+        let (events, mut changes) = broadcast::channel(8);
+        let (a, mut ar) = start("a");
+        let (finish, mut fr) = job("operation_finish", json!({"id":"a","status":"done","result":"{}"}));
+        assert!(execute_group(&mut db, vec![a, finish], &events));
+        assert!(ar.try_recv().unwrap().is_err());
+        assert!(fr.try_recv().unwrap().is_err());
+        assert_eq!(query(&db,"SELECT * FROM operations",&[]).unwrap(),json!([]));
+        assert_eq!(query(&db,"SELECT * FROM deferred_child",&[]).unwrap(),json!([]));
+        assert!(changes.try_recv().is_err());
+        assert!(db.is_autocommit());
+    }
+    #[test]
+    fn grouping_stops_at_barrier_cas_and_nonready_job_without_waiting() {
+        for boundary in ["barrier", "compare_put", "put", "operation", "query"] {
+            let (tx, mut rx) = mpsc::channel(16);
+            let mut pending = None;
+            tx.try_send(job(boundary,Value::Null).0).unwrap();
+            tx.try_send(start("later").0).unwrap();
+            let group = ready_group(start("first").0,&mut rx,&mut pending,8);
+            assert_eq!(group.len(),1);
+            assert_eq!(pending.take().unwrap().request.op,boundary);
+            assert_eq!(rx.try_recv().unwrap().request.args["id"],"later");
+        }
+        let (_tx, mut rx) = mpsc::channel(16);
+        assert_eq!(ready_group(start("alone").0,&mut rx,&mut None,8).len(),1);
+    }
+    #[test]
+    fn grouped_full_wal_commits_reduce_frames_and_survive_reopen() {
+        let dir = std::env::temp_dir().join(format!("neura-operation-wal-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut frames = Vec::new();
+        for grouped in [false,true] {
+            let path=dir.join(if grouped {"grouped.sqlite"} else {"single.sqlite"});
+            let mut db=Connection::open(&path).unwrap();
+            db.execute_batch(SCHEMA).unwrap();
+            db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+            assert_eq!(db.query_row("PRAGMA synchronous",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+            assert_eq!(db.query_row("PRAGMA journal_mode",[],|r|r.get::<_,String>(0)).unwrap(),"wal");
+            let (events,_) = broadcast::channel(8);
+            for chunk in 0..4 {
+                let mut jobs=Vec::new();let mut replies=Vec::new();
+                for i in 0..8 {let(j,r)=start(&format!("{chunk}-{i}"));jobs.push(j);replies.push(r);}
+                if grouped {assert!(execute_group(&mut db,jobs,&events));}
+                else {for j in jobs {assert!(execute_group(&mut db,vec![j],&events));}}
+                for mut r in replies {assert!(r.try_recv().unwrap().is_ok());}
+            }
+            let n:i64=db.query_row("PRAGMA wal_checkpoint(PASSIVE)",[],|r|r.get(1)).unwrap();
+            frames.push(n);
+            drop(db);
+            let db=Connection::open(path).unwrap();
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM operations WHERE status='pending'",[],|r|r.get::<_,i64>(0)).unwrap(),32);
+        }
+        assert!(frames[1]*2<frames[0],"{frames:?}");
+        eprintln!("32 FULL/WAL operation_start: standalone frames={}, grouped frames={}",frames[0],frames[1]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn bulk_fence_observes_at_most_eight_control_jobs_and_cancelled_reply_still_persists() {
+        let dir=std::env::temp_dir().join(format!("neura-operation-fair-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path=dir.join("db");
+        let (events,_) = broadcast::channel(8);
+        let store=StoreHandle::open(&path,events).await.unwrap();
+        let blocker=Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let mut replies=Vec::new();
+        for i in 0..32 {let(j,r)=start(&i.to_string());store.writes.send(j).await.unwrap();replies.push(r);}
+        let (bulk, result)=job("query",json!({"sql":"SELECT COUNT(*) AS n FROM operations","args":[]}));
+        store.bulk.send(bulk).await.unwrap();
+        // Cancel one caller after acceptance: its pending operation is durable,
+        // not removed or resent because no successful reply was observed.
+        drop(replies.remove(0));
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let n=result.await.unwrap().unwrap()[0]["n"].as_i64().unwrap();
+        assert!(n<=8,"bulk waited behind {n} control jobs");
+        store.call("barrier",json!({})).await.unwrap();
+        for r in replies {assert!(r.await.unwrap().is_ok());}
+        let row=store.call("operation",json!({"id":"0"})).await.unwrap();
+        assert_eq!(row["status"],"pending");
+        assert_eq!(store.call("query",json!({"sql":"SELECT COUNT(*) AS n FROM operations","args":[]})).await.unwrap()[0]["n"],32);
     }
 }
