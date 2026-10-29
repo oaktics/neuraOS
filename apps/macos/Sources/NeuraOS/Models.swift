@@ -192,6 +192,7 @@ final class DaemonClient {
     private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
     private let statePulse = EventPulse()
+    private let notificationRetry = FailureRetry()
     private var eventObserver: UUID?
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
@@ -235,7 +236,8 @@ final class DaemonClient {
             }
             if sidebarSpaces.active.selectedWorkspaceId != selectedId {sidebarSpaces.remember(selectedId)}
             if let selectedId, !openedIds.contains(selectedId) {openedIds.insert(selectedId)}
-            await agentNotifications?.receive(next, api: api)
+            let delivered = await agentNotifications?.receive(next, api: api) ?? true
+            notificationRetry.update(failed: !delivered) { [weak self] in self?.statePulse.signal() }
         } catch {updateConnection(false)}
         agentSleep.update(terminals: state.terminals, connected: connected)
     }

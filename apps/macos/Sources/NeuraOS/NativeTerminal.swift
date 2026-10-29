@@ -281,7 +281,7 @@ struct NativeTerminal: NSViewRepresentable {
             outputPulse = EventPulse()
             eventObserver = api.events.observe { [weak self] change in
                 guard let self else {return}
-                if change.type == "ready" || change.terminals?.contains(self.terminal.id) == true {
+                if change.type == "ready" || change.type == "disconnected" || change.terminals?.contains(self.terminal.id) == true {
                     self.outputPulse.signal()
                 }
             }

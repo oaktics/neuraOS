@@ -45,7 +45,7 @@ struct BrowserAutomationError: Error {let code: String}
         if loop == nil {
             eventObserver = api.events.observe { [weak self] change in
                 if change.type == "ready" || change.browser == true {self?.pulse.signal()}
-                if change.type == "disconnected" {self?.cancelJobs()}
+                if change.type == "disconnected" {self?.cancelJobs(); self?.pulse.signal()}
             }
             heartbeat = Task { [weak self] in
                 while !Task.isCancelled {

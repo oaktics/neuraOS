@@ -49,8 +49,8 @@ struct AgentNotificationCursor {
         guard enabled("waiting") || enabled("completed"), let center else {return false}
         return try await center.requestAuthorization(options: [.alert, .sound])
     }
-    func receive(_ snapshot: Snapshot, api: DaemonClient) async {
-        guard snapshot.features?.contains("terminal.notifications") == true, !receiving else {return}
+    func receive(_ snapshot: Snapshot, api: DaemonClient) async -> Bool {
+        guard snapshot.features?.contains("terminal.notifications") == true, !receiving else {return true}
         cursor.baseline(snapshot.revision)
         receiving = true
         defer {receiving = false}
@@ -78,7 +78,11 @@ struct AgentNotificationCursor {
                 if !page.more {break}
                 await Task.yield()
             }
-        } catch {NSLog("Agent notification delivery failed: %@", error.localizedDescription)}
+        } catch {
+            NSLog("Agent notification delivery failed: %@", error.localizedDescription)
+            return false
+        }
+        return true
     }
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
