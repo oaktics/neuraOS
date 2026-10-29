@@ -1,4 +1,5 @@
 import XCTest
+import SwiftTerm
 @testable import NeuraOS
 
 final class BrowserNavigationTests: XCTestCase {
@@ -34,6 +35,31 @@ final class BrowserNavigationTests: XCTestCase {
         }
         XCTAssertEqual(layout.tabs.count, 3)
         XCTAssertEqual(layout.selectedId, selected)
+    }
+
+    @MainActor func testAgentLinksRemainScopedAfterTabRemovalAndReordering() throws {
+        let suite = "BrowserAgentLinks.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {defaults.removePersistentDomain(forName: suite)}
+        for provider in ["codex", "claude"] {
+            let workspace = "workspace-" + provider
+            let conversation = WorkspaceTab(kind: provider, terminalId: provider)
+            var layout = WorkspaceTabState(tabs: [conversation], selectedId: conversation.id)
+            let record = TerminalRecord(id: provider, workspaceId: workspace, provider: provider, status: "running", cols: 80, rows: 24)
+            let coordinator = NativeTerminal.Coordinator(terminal: record, api: DaemonClient(), onError: {_ in XCTFail()})
+            coordinator.openLink = {_ = layout.openBrowser($0, workspaceId: workspace, defaults: defaults)}
+            let view = TerminalView(frame: .zero)
+            for index in 0..<3 {
+                coordinator.requestOpenLink(source: view, link: "https://example.com/\(index)", params: [:])
+                let tab = try XCTUnwrap(layout.tabs.last)
+                XCTAssertEqual(layout.selectedId, tab.id)
+                XCTAssertEqual(defaults.string(forKey: "browser.\(workspace).\(tab.id)"), "https://example.com/\(index)")
+                XCTAssertNil(defaults.string(forKey: "browser.other.\(tab.id)"))
+                layout.tabs.reverse()
+                layout.tabs.removeAll {$0.kind == "browser"}
+                XCTAssertEqual(layout.tabs, [conversation])
+            }
+        }
     }
 
     func testBrowserTitleUsesExistingWorkspaceTabAndRestoresLegacyTabs() throws {

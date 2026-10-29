@@ -6,13 +6,17 @@ import ChromiumBridge
     static var models: [BrowserModel] = []
     static var windows: [NSWindow] = []
     static func run(_ path: String) {
-        guard Bundle.main.bundleIdentifier?.hasPrefix("com.neuraos.browser-smoke.") == true,
-              let data = try? Data(contentsOf: URL(fileURLWithPath:path)),
+        func fail(_ field: String) -> Never {fputs("browser-fixture rejected field: \(field)\n", stderr); exit(2)}
+        guard Bundle.main.bundleIdentifier?.hasPrefix("com.neuraos.browser-smoke.") == true else {fail("CFBundleIdentifier")}
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath:path)),
               let config = try? JSONSerialization.jsonObject(with:data) as? [String:Any],
               let tabs = config["tabs"] as? [[String:String]],
-              let dataDirectory = config["dataDirectory"] as? String, !dataDirectory.isEmpty,
-              Bundle.main.object(forInfoDictionaryKey:"NeuraDataDirectory") as? String == dataDirectory,
-              tabs.allSatisfy({URL(string:$0["url"] ?? "")?.host == "127.0.0.1"}) else {exit(2)}
+              let dataDirectory = config["dataDirectory"] as? String, !dataDirectory.isEmpty else {fail("fixture configuration")}
+        guard Bundle.main.object(forInfoDictionaryKey:"NeuraDataDirectory") as? String == dataDirectory else {fail("NeuraDataDirectory")}
+        guard let endpoint = config["endpoint"] as? String,
+              let url = URL(string: endpoint), url.scheme == "http", url.host == "127.0.0.1", url.port != nil,
+              Bundle.main.object(forInfoDictionaryKey:"NeuraEndpoint") as? String == endpoint else {fail("NeuraEndpoint")}
+        guard tabs.allSatisfy({URL(string:$0["url"] ?? "")?.host == "127.0.0.1"}) else {fail("tab URL")}
         UserDefaults.standard.setVolatileDomain(["NeuraChromiumSmokeData":dataDirectory], forName:"NeuraChromiumSmoke")
         if let error = NCInitializeChromium() {fputs(error,stderr);exit(1)}
         NSApp.setActivationPolicy(.regular)
