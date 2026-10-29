@@ -23,7 +23,11 @@ fn invalid() -> ApiError {
     error("invalid_request", 400)
 }
 fn uuid(value: &str) -> Result<(), ApiError> {
-    Uuid::parse_str(value).map(|_| ()).map_err(|_| invalid())
+    if crate::contracts::valid_uuid(value) {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
 }
 fn field<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
@@ -138,7 +142,7 @@ impl BrowserBroker {
             uuid(&t.workspace_id)?;
             uuid(&t.tab_id)?;
             uuid(&t.project_id)?;
-            if t.url.chars().count() > 8192 || t.title.chars().count() > 2048 {
+            if t.url.encode_utf16().count() > 8192 || t.title.encode_utf16().count() > 2048 {
                 return Err(invalid());
             }
         }
@@ -455,7 +459,7 @@ fn validate_command(mut c: Value) -> Result<Value, ApiError> {
             .get(key)
             .and_then(Value::as_str)
             .ok_or_else(invalid)?
-            .chars()
+            .encode_utf16()
             .count();
         if n < min || n > max {
             Err(invalid())
@@ -672,5 +676,47 @@ mod tests {
             )
             .is_err());
         }
+    }
+    #[tokio::test]
+    async fn independent_tabs_exceed_old_global_request_cap() {
+        let (b, s, mut p, c) = fixture();
+        let template = p["tabs"][0].clone();
+        let mut tabs = Vec::new();
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let mut tab = template.clone();
+            tab["tabId"] = json!(Uuid::new_v4().to_string());
+            tabs.push(tab);
+        }
+        p["tabs"] = json!(tabs);
+        b.poll(p.clone(), &s).unwrap();
+        for tab in &tabs {
+            let bb = b.clone();
+            let ss = s.clone();
+            let mut cc = c.clone();
+            cc["command"]["tabId"] = tab["tabId"].clone();
+            tasks.push(tokio::spawn(async move { bb.call(cc, &ss, true).await }));
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while b.state.lock().unwrap().pending.len() < 64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let update = b.poll(p.clone(), &s).unwrap();
+        let requests = update["requests"].as_array().unwrap();
+        assert_eq!(requests.len(), 64);
+        for batch in requests.chunks(32) {
+            p["results"] = json!(batch
+                .iter()
+                .map(|r| json!({"id":r["id"],"result":{"ok":true}}))
+                .collect::<Vec<_>>());
+            b.poll(p.clone(), &s).unwrap();
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap()["result"]["ok"], true);
+        }
+        b.shutdown();
     }
 }
