@@ -20,6 +20,7 @@ struct Client {
     channel_token: String,
     browser_token: String,
     changes: watch::Receiver<u64>,
+    channel_changes: watch::Receiver<u64>,
 }
 impl Client {
     async fn request(
@@ -379,6 +380,7 @@ pub async fn run() -> Result<()> {
     .trim()
     .to_string();
     let (changes, rx) = watch::channel(0u64);
+    let (channel_changes, channel_rx) = watch::channel(0u64);
     let env = |key| std::env::var(key).unwrap_or_default();
     let client = Client {
         http: reqwest::Client::builder()
@@ -392,6 +394,7 @@ pub async fn run() -> Result<()> {
         channel_token: env("NEURA_CHANNEL_TOKEN"),
         browser_token: env("NEURA_BROWSER_TOKEN"),
         changes: rx,
+        channel_changes: channel_rx,
     };
     let out = Arc::new(Mutex::new(tokio::io::stdout()));
     let mut tasks = JoinSet::new();
@@ -421,6 +424,14 @@ pub async fn run() -> Result<()> {
                             {
                                 retry = Duration::from_millis(250);
                                 changes.send_modify(|v| *v = v.wrapping_add(1));
+                                if e["type"] == "ready"
+                                    || e.get("agentTerminals").is_none()
+                                    || e["agentTerminals"]
+                                        .as_array()
+                                        .is_some_and(|ids| ids.iter().any(|id| id == &c.terminal))
+                                {
+                                    channel_changes.send_modify(|v| *v = v.wrapping_add(1));
+                                }
                             }
                         }
                     }
@@ -433,7 +444,7 @@ pub async fn run() -> Result<()> {
     if channel {
         let c = client.clone();
         let out = out.clone();
-        tasks.spawn(async move{while !*ready.borrow(){if ready.changed().await.is_err(){return}}let mut changed=c.changes.clone();let mut retry=Duration::from_secs(1);loop{changed.borrow_and_update();let event=c.request(&format!("/v1/claude/{}/channel",c.terminal),Some(json!({})),Some(("x-neura-channel-token",&c.channel_token))).await;let failed=event.is_err();if let Ok(event)=event{if event["content"].is_string(){let _=output(&out,json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":event})).await;}}if failed{tokio::select!{result=changed.changed()=>{if result.is_err(){break}},_=tokio::time::sleep(retry)=>{}}retry=(retry*2).min(Duration::from_secs(30));}else{retry=Duration::from_secs(1);if changed.changed().await.is_err(){break}}}});
+        tasks.spawn(async move{while !*ready.borrow(){if ready.changed().await.is_err(){return}}let mut changed=c.channel_changes.clone();let mut retry=Duration::from_secs(1);loop{changed.borrow_and_update();let event=c.request(&format!("/v1/claude/{}/channel",c.terminal),Some(json!({})),Some(("x-neura-channel-token",&c.channel_token))).await;let failed=event.is_err();if let Ok(event)=event{if event["content"].is_string(){let _=output(&out,json!({"jsonrpc":"2.0","method":"notifications/claude/channel","params":event})).await;}}if failed{tokio::select!{result=changed.changed()=>{if result.is_err(){break}},_=tokio::time::sleep(retry)=>{}}retry=(retry*2).min(Duration::from_secs(30));}else{retry=Duration::from_secs(1);if changed.changed().await.is_err(){break}}}});
     }
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
