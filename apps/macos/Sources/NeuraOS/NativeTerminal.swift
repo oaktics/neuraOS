@@ -290,7 +290,7 @@ struct NativeTerminal: NSViewRepresentable {
                 var updates = outputPulse.stream.makeAsyncIterator()
                 while !Task.isCancelled {
                     do {
-                        let output: TerminalOutput = try await api.get("v1/terminals/\(terminal.id)/output", query: ["after": String(cursor)])
+                        let output: TerminalOutput = try await api.get("v1/terminals/\(terminal.id)/output", query: ["after": String(cursor), "chunksOnly": "true"])
                         guard !Task.isCancelled, let view else {return}
                         await applyResponsive(output, to: view)
                         flushWrites()

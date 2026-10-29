@@ -36,7 +36,7 @@ for(const children of counts){
   socket=new WebSocket(url.replace('http:','ws:')+'/v1/stream',{headers:headers()});
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No stream ready')),5000);socket.on('error',reject);socket.on('message',bytes=>{const change=JSON.parse(bytes);if(change.type==='ready'){ready++;for(const r of records.values())r.pulse.signal();clearTimeout(timer);resolve();}else if(change.type==='changed'){changes++;for(const id of change.terminals??[])records.get(id)?.pulse.signal();}});});
  };
- const drain=async record=>{for(;;){const {value}=await request(`/v1/terminals/${record.id}/output?after=${record.cursor}`);record.text+=(value.chunks??[]).map(c=>c.data).join('');record.cursor=value.cursor;record.status=value.status;if(!value.more)return;}};
+ const drain=async record=>{for(;;){const {value}=await request(`/v1/terminals/${record.id}/output?after=${record.cursor}&chunksOnly=true`);record.text+=(value.chunks??[]).map(c=>c.data).join('');record.cursor=value.cursor;record.status=value.status;if(!value.more)return;}};
  try{
   const initial=await launch();if(!legacy&&!initial.features?.includes('state.stream'))throw Error('Native daemon does not advertise state.stream');
   if(!legacy)await stream();
