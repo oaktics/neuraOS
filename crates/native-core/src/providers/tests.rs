@@ -32,6 +32,12 @@ impl ProviderStore for MemoryStore {
                         return Ok(json!(false));
                     }
                     rows.insert(key.into(), args["value"].clone());
+                    if let Some(notification) = args.get("notification").filter(|n| n.is_object()) {
+                        db.entry("notifications".into()).or_default().insert(
+                            notification["id"].as_str().unwrap().into(),
+                            notification.clone(),
+                        );
+                    }
                     Ok(json!(true))
                 }
                 "put" => {
@@ -525,4 +531,193 @@ async fn snapshot_preserves_legacy_claude_session_ids_without_agent_id() {
     );
     providers.shutdown().await.unwrap();
     pty.shutdown().await.unwrap();
+}
+
+async fn codex_fixture() -> (Arc<MemoryStore>, Arc<Agents>, Value) {
+    let (store, agents) = fixture().await;
+    let workspace = json!({"id":"w","path":"/tmp/w","name":"work"});
+    store
+        .call(
+            "put",
+            json!({"table":"terminals","value":{"id":"t","workspaceId":"w","provider":"codex"}}),
+        )
+        .await
+        .unwrap();
+    (store, agents, workspace)
+}
+fn codex_thread(task: &str) -> Value {
+    json!({"id":task,"cwd":"/tmp/w","name":format!("name {task}"),"status":{"type":"idle"}})
+}
+async fn terminal_binding(store: &MemoryStore, terminal: &str) -> Value {
+    let t = store
+        .call("get", json!({"table":"terminals","id":terminal}))
+        .await
+        .unwrap();
+    json!([t["agentId"], t["sessionId"], t["sessionName"]])
+}
+async fn notifications(store: &MemoryStore) -> usize {
+    store
+        .call("list", json!({"table":"notifications"}))
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .len()
+}
+#[tokio::test]
+async fn codex_repeated_discovery_preserves_selection_and_explicit_selection_still_changes_it() {
+    let (store, agents, workspace) = codex_fixture().await;
+    agents
+        .register_codex("t", &workspace, &codex_thread("selected"), None)
+        .await
+        .unwrap();
+    let selected = terminal_binding(&store, "t").await;
+    for tasks in [
+        ["selected", "other"],
+        ["other", "selected"],
+        ["selected", "other"],
+    ] {
+        for task in tasks {
+            assert!(agents
+                .discover_codex("t", &workspace, &codex_thread(task))
+                .await
+                .unwrap());
+            assert_eq!(terminal_binding(&store, "t").await, selected);
+        }
+    }
+    assert_eq!(agents.get("other").await.unwrap().terminal_id, "t");
+    agents
+        .codex_event(
+            "t",
+            &workspace,
+            &json!({"method":"thread/started","params":{"thread":codex_thread("other")}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_binding(&store, "t").await,
+        json!(["other", "other", "name other"])
+    );
+    agents
+        .discover_codex("t", &workspace, &codex_thread("selected"))
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_binding(&store, "t").await,
+        json!(["other", "other", "name other"])
+    );
+    assert_eq!(notifications(&store).await, 0);
+}
+#[tokio::test]
+async fn codex_completion_notifies_only_newly_accepted_turns() {
+    let (store, agents, workspace) = codex_fixture().await;
+    agents
+        .register_codex("t", &workspace, &codex_thread("selected"), None)
+        .await
+        .unwrap();
+    let completion = |task: &str, turn: &str| json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":turn,"status":"completed"}}});
+    agents
+        .codex_event("t", &workspace, &completion("unknown", "one"))
+        .await
+        .unwrap();
+    assert_eq!(notifications(&store).await, 0);
+    agents
+        .codex_event("t", &workspace, &completion("selected", "one"))
+        .await
+        .unwrap();
+    assert_eq!(notifications(&store).await, 1);
+    for _ in 0..3 {
+        agents
+            .discover_codex("t", &workspace, &codex_thread("selected"))
+            .await
+            .unwrap();
+        agents
+            .codex_event("t", &workspace, &completion("selected", "one"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(notifications(&store).await, 1);
+    agents
+        .codex_event(
+            "t",
+            &workspace,
+            &json!({"method":"turn/started","params":{"threadId":"selected","turn":{"id":"two"}}}),
+        )
+        .await
+        .unwrap();
+    agents
+        .codex_event("t", &workspace, &completion("selected", "stale"))
+        .await
+        .unwrap();
+    assert_eq!(
+        agents.get("selected").await.unwrap().turn_id.as_deref(),
+        Some("two")
+    );
+    assert_eq!(notifications(&store).await, 1);
+    agents
+        .codex_event("t", &workspace, &completion("selected", "two"))
+        .await
+        .unwrap();
+    agents
+        .codex_event("t", &workspace, &completion("selected", "two"))
+        .await
+        .unwrap();
+    assert_eq!(notifications(&store).await, 2);
+}
+#[tokio::test]
+async fn codex_discovery_preserves_delegation_and_resume_ownership() {
+    let (store, agents, workspace) = codex_fixture().await;
+    agents
+        .register_codex("parent-terminal", &workspace, &codex_thread("parent"), None)
+        .await
+        .unwrap();
+    agents
+        .register_codex(
+            "t",
+            &workspace,
+            &codex_thread("child"),
+            Some("parent".into()),
+        )
+        .await
+        .unwrap();
+    agents
+        .discover_codex("t", &workspace, &codex_thread("other"))
+        .await
+        .unwrap();
+    agents
+        .discover_codex("t", &workspace, &codex_thread("child"))
+        .await
+        .unwrap();
+    assert_eq!(
+        agents.get("child").await.unwrap().parent_task_id.as_deref(),
+        Some("parent")
+    );
+    assert_eq!(agents.get("parent").await.unwrap().watching.len(), 1);
+    agents
+        .report("parent", "child report", Some("t"))
+        .await
+        .unwrap();
+    let parent = agents.get("parent").await.unwrap();
+    assert_eq!(parent.reports[0].source_task_id.as_deref(), Some("child"));
+    assert_eq!(
+        agents
+            .register_codex("resumed", &workspace, &codex_thread("child"), None)
+            .await
+            .unwrap_err(),
+        "agent_already_running"
+    );
+    agents.close("t").await.unwrap();
+    store.call("put", json!({"table":"terminals","value":{"id":"resumed","workspaceId":"w","provider":"codex"}})).await.unwrap();
+    agents
+        .register_codex("resumed", &workspace, &codex_thread("child"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_binding(&store, "resumed").await,
+        json!(["child", "child", "name child"])
+    );
+    assert_eq!(
+        agents.get("child").await.unwrap().parent_task_id.as_deref(),
+        Some("parent")
+    );
 }

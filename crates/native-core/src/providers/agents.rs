@@ -840,6 +840,26 @@ impl Agents {
         thread: &Value,
         parent: Option<String>,
     ) -> Result<bool> {
+        self.register_codex_session(terminal, workspace, thread, parent, true)
+            .await
+    }
+    pub(super) async fn discover_codex(
+        &self,
+        terminal: &str,
+        workspace: &Value,
+        thread: &Value,
+    ) -> Result<bool> {
+        self.register_codex_session(terminal, workspace, thread, None, false)
+            .await
+    }
+    async fn register_codex_session(
+        &self,
+        terminal: &str,
+        workspace: &Value,
+        thread: &Value,
+        parent: Option<String>,
+        selected: bool,
+    ) -> Result<bool> {
         let Some(task) = thread["id"].as_str() else {
             return Ok(false);
         };
@@ -885,12 +905,15 @@ impl Agents {
         }
         self.save(&mut s, a).await?;
         self.parent_watch(&mut s, task, parent.as_deref()).await?;
-        self.update_terminal(
-            terminal,
-            json!({"agentId":task,"sessionId":task,"sessionName":thread["name"]}),
-            None,
-        )
-        .await?;
+        // Loaded conversations are not evidence of which session the TUI selected.
+        if selected {
+            self.update_terminal(
+                terminal,
+                json!({"agentId":task,"sessionId":task,"sessionName":thread["name"]}),
+                None,
+            )
+            .await?;
+        }
         Ok(true)
     }
     pub async fn codex_event(
@@ -1032,7 +1055,7 @@ impl Agents {
         } else {
             "unknown"
         };
-        let notification = if method == "turn/completed" && p["turn"]["status"] == "completed" {
+        let notification = if completed && p["turn"]["status"] == "completed" {
             Some("completed")
         } else if event.get("id").is_some() {
             Some("waiting")

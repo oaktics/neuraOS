@@ -629,10 +629,7 @@ async fn reconcile_codex(
             if thread["ephemeral"] == true || thread["parentThreadId"].is_string() {
                 continue;
             }
-            if !agents
-                .register_codex(terminal, workspace, thread, None)
-                .await?
-            {
+            if !agents.discover_codex(terminal, workspace, thread).await? {
                 continue;
             }
             rpc.call("thread/resume",json!({"threadId":task,"excludeTurns":true,"developerInstructions":codex::session_instructions()})).await?;
