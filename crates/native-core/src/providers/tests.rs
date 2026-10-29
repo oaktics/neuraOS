@@ -456,3 +456,40 @@ fn tail_skips_partial_utf8_before_decoding_valid_japanese_stop_and_title() {
     assert!(checked, "fixture must start inside a multibyte code point");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn startup_recovery_persists_interruption_and_keeps_pending_reports() {
+    let dir = std::env::temp_dir().join(format!("neura-agent-recovery-{}", id()));
+    std::fs::create_dir(&dir).unwrap();
+    let (events, _) = tokio::sync::broadcast::channel(16);
+    let store = crate::store::StoreHandle::open(&dir.join("test.sqlite"), events)
+        .await
+        .unwrap();
+    let pending = json!([{"id":"instruction","text":"keep queued work"}]);
+    let reports = json!([{"id":"report","kind":"worker","text":"keep unacknowledged report","createdAt":"2026-10-29T00:00:00Z"}]);
+    let row = json!({"id":"recover","terminalId":"terminal","workspaceId":"workspace","name":"recovery","provider":"codex","status":"working","updatedAt":"2026-10-29T00:00:00Z","turnId":"in-flight","requests":[{"id":"approval"}],"pending":pending,"reports":reports,"watching":[]});
+    store.put("agents", row, None).await.unwrap();
+    let agents = Agents::new(Arc::new(store.clone()), Arc::new(RuntimeStub::default()))
+        .await
+        .unwrap();
+    assert_eq!(agents.get("recover").await.unwrap().status, "interrupted");
+    let persisted = store.get("agents", "recover").await.unwrap().unwrap();
+    assert_eq!(persisted["status"], "interrupted");
+    assert!(persisted.get("turnId").is_none());
+    assert_eq!(persisted["requests"], json!([]));
+    assert_eq!(persisted["pending"], pending);
+    assert_eq!(persisted["reports"], reports);
+    // A second startup must see the durable recovery, without losing inboxes.
+    drop(agents);
+    let restarted = Agents::new(Arc::new(store.clone()), Arc::new(RuntimeStub::default()))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(restarted.get("recover").await.unwrap()).unwrap(),
+        persisted
+    );
+    assert_eq!(
+        store.get("agents", "recover").await.unwrap().unwrap(),
+        persisted
+    );
+}
