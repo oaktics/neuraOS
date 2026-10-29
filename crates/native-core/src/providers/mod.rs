@@ -3,6 +3,7 @@ pub mod integration;
 pub use integration::ProviderService;
 pub mod agents;
 pub mod claude;
+mod cleanup;
 pub mod codex;
 pub mod event_queue;
 pub mod mcp;
