@@ -455,3 +455,85 @@ async fn completed_history_is_count_and_byte_bounded_without_losing_unfinished_w
         );
     }
 }
+
+#[tokio::test]
+async fn claude_binding_only_close_and_session_end_are_visible_in_deltas() {
+    for end in ["close", "SessionEnd"] {
+        let (_, a) = fixture().await;
+        let (terminal, task) = claude(&a, None).await;
+        confirm(&a, &terminal, &task).await;
+        event(&a, &terminal, &task, "UserPromptSubmit", json!({})).await;
+        a.claude_interrupted(&terminal, true).await.unwrap();
+        let baseline = a.query(json!({"summaryOnly":true})).await.unwrap();
+        assert_eq!(baseline["currentSessionIds"][&terminal], task);
+        let before = a.get(&task).await.unwrap().revision;
+        if end == "close" {
+            a.close(&terminal).await.unwrap();
+        } else {
+            assert!(event(&a, &terminal, &task, end, json!({})).await);
+        }
+        assert_eq!(
+            a.get(&task).await.unwrap().revision,
+            before,
+            "fixture exercises a save no-op"
+        );
+        let delta=a.query(json!({"summaryOnly":true,"sinceRevision":baseline["revision"],"sinceEpoch":baseline["epoch"],"sinceFilter":baseline["filter"]})).await.unwrap();
+        assert_eq!(
+            delta["unchanged"], false,
+            "binding removal is a list change even without an Agent write"
+        );
+        assert!(delta["revision"].as_u64().unwrap() > baseline["revision"].as_u64().unwrap());
+        assert_eq!(delta["currentSessionIds"], json!({}));
+        assert_eq!(delta["removedSessionTerminalIds"], json!([terminal]));
+        let mut cached = baseline["currentSessionIds"].as_object().unwrap().clone();
+        for id in delta["removedSessionTerminalIds"].as_array().unwrap() {
+            cached.remove(id.as_str().unwrap());
+        }
+        cached.extend(delta["currentSessionIds"].as_object().unwrap().clone());
+        assert_eq!(
+            json!(cached),
+            a.query(json!({"summaryOnly":true})).await.unwrap()["currentSessionIds"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_deltas_cover_rebind_resume_filter_and_workspace_tombstones() {
+    let (_, a) = fixture().await;
+    let (first, task) = claude(&a, None).await;
+    let baseline = a.query(json!({"summaryOnly":true})).await.unwrap();
+    a.close(&first).await.unwrap();
+    let second = id();
+    a.prepare_claude(
+        json!({"id":"w","path":"/tmp/w","name":"work"}),
+        &second,
+        Some(task.clone()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(event(&a, &second, &task, "SessionStart", json!({})).await);
+    let resumed=a.query(json!({"summaryOnly":true,"sinceRevision":baseline["revision"],"sinceEpoch":baseline["epoch"],"sinceFilter":baseline["filter"]})).await.unwrap();
+    assert_eq!(resumed["removedSessionTerminalIds"], json!([first]));
+    assert_eq!(resumed["currentSessionIds"], json!({second.clone():task}));
+    let all = a.query(json!({"summaryOnly":true})).await.unwrap();
+    let filtered = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    let next = id();
+    assert!(event(&a, &second, &next, "SessionStart", json!({})).await);
+    let changed=a.query(json!({"summaryOnly":true,"sinceRevision":all["revision"],"sinceEpoch":all["epoch"],"sinceFilter":all["filter"]})).await.unwrap();
+    assert_eq!(changed["removedSessionTerminalIds"], json!([]));
+    assert_eq!(changed["currentSessionIds"], json!({second.clone():next}));
+    let hidden=a.query(json!({"taskIds":[task],"summaryOnly":true,"sinceRevision":filtered["revision"],"sinceEpoch":filtered["epoch"],"sinceFilter":filtered["filter"]})).await.unwrap();
+    assert_eq!(hidden["removedSessionTerminalIds"], json!([second]));
+    assert_eq!(hidden["currentSessionIds"], json!({}));
+    let before_delete = a.query(json!({"summaryOnly":true})).await.unwrap();
+    a.forget_workspace("w").await;
+    let deleted=a.query(json!({"summaryOnly":true,"sinceRevision":before_delete["revision"],"sinceEpoch":before_delete["epoch"],"sinceFilter":before_delete["filter"]})).await.unwrap();
+    assert_eq!(deleted["removedTaskIds"].as_array().unwrap().len(), 2);
+    assert_eq!(deleted["removedSessionTerminalIds"], json!([second]));
+    assert_eq!(deleted["currentSessionIds"], json!({}));
+}

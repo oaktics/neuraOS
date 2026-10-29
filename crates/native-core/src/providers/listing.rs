@@ -85,12 +85,12 @@ impl Agents {
         let mut ids: Vec<String> = if let Some(after) = o.since_revision {
             s.changes
                 .iter()
-                .filter(|(r, key, workspace)| {
+                .filter(|(r, key, workspace, _)| {
                     *r > after
                         && o.task_ids.as_ref().is_none_or(|ids| ids.contains(key))
                         && o.workspace_id.as_ref().is_none_or(|w| w == workspace)
                 })
-                .map(|(_, id, _)| id.clone())
+                .map(|(_, id, _, _)| id.clone())
                 .collect()
         } else {
             s.agents
@@ -109,6 +109,29 @@ impl Agents {
         let mut rows = vec![];
         let mut removed = vec![];
         let mut current = HashMap::new();
+        let mut removed_sessions = Vec::new();
+        if let Some(after) = o.since_revision {
+            let page: HashSet<_> = ids[offset..end].iter().map(String::as_str).collect();
+            // Include every terminal touched since the baseline, not only the
+            // current terminal: a session may close on T1 and resume on T2.
+            let terminals: HashSet<_> = s
+                .changes
+                .iter()
+                .filter(|(revision, key, _, _)| *revision > after && page.contains(key.as_str()))
+                .map(|(_, _, _, terminal)| terminal.as_str())
+                .collect();
+            for terminal in terminals {
+                let visible = s
+                    .claude
+                    .get(terminal)
+                    .and_then(|live| live.session.as_ref())
+                    .and_then(|id| s.agents.get(id))
+                    .is_some_and(|a| o.matches(a));
+                if !visible {
+                    removed_sessions.push(terminal.to_owned());
+                }
+            }
+        }
         for key in &ids[offset..end] {
             let Some(a) = s.agents.get(key).filter(|a| o.matches(a)) else {
                 removed.push(key.clone());
@@ -128,12 +151,14 @@ impl Agents {
             };
             rows.push(row);
         }
+        removed_sessions.sort();
+        removed_sessions.dedup();
         let next = (end < total).then(|| {
             json!({"revision":revision,"epoch":s.list_epoch,"filter":fingerprint,"offset":end})
                 .to_string()
         });
         Ok(
-            json!({"agents":rows,"removedTaskIds":removed,"revision":revision,"epoch":s.list_epoch,"filter":filter,"delta":o.since_revision.is_some(),"unchanged":o.since_revision == Some(revision),"fullRefreshRequired":false,"nextCursor":next,"currentSessionIds":current}),
+            json!({"agents":rows,"removedTaskIds":removed,"removedSessionTerminalIds":removed_sessions,"revision":revision,"epoch":s.list_epoch,"filter":filter,"delta":o.since_revision.is_some(),"unchanged":o.since_revision == Some(revision),"fullRefreshRequired":false,"nextCursor":next,"currentSessionIds":current}),
         )
     }
 }

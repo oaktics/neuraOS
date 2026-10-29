@@ -120,7 +120,7 @@ struct ClaudeLive {
 struct Registry {
     list_epoch: String,
     list_revision: u64,
-    changes: std::collections::VecDeque<(u64, String, String)>,
+    changes: std::collections::VecDeque<(u64, String, String, String)>,
     agents: HashMap<String, Agent>,
     claude: HashMap<String, ClaudeLive>,
     codex: HashSet<String>,
@@ -186,7 +186,7 @@ impl Agents {
         self.store
             .call("put", json!({"table":"agents","value":a}))
             .await?;
-        changed(s, &a.id, &a.workspace_id);
+        changed(s, &a.id, &a.workspace_id, &a.terminal_id);
         s.agents.insert(a.id.clone(), a);
         Ok(())
     }
@@ -225,9 +225,10 @@ impl Agents {
                 return Err("agent_already_running".into());
             }
         }
-        s.claude.insert(
-            terminal.into(),
-            ClaudeLive {
+        set_claude(
+            &mut s,
+            terminal,
+            Some(ClaudeLive {
                 workspace,
                 parent,
                 session: None,
@@ -241,7 +242,7 @@ impl Agents {
                 interrupted: 0,
                 activity: 0,
                 provider_turn: None,
-            },
+            }),
         );
         Ok(())
     }
@@ -331,7 +332,7 @@ impl Agents {
                     history: vec![],
                 });
             }
-            s.claude.insert(terminal.into(), live.clone());
+            set_claude(&mut s, terminal, Some(live.clone()));
             self.save(&mut s, a).await?;
             self.parent_watch(&mut s, session, live.parent.as_deref())
                 .await?;
@@ -444,7 +445,7 @@ impl Agents {
             }
             _ => {}
         }
-        s.claude.insert(terminal.into(), live);
+        set_claude(&mut s, terminal, Some(live));
         self.save(&mut s, a.clone()).await?;
         self.update_terminal(terminal,json!({"activity":if ["idle","working","waiting"].contains(&a.status.as_str()){a.status.as_str()}else{"unknown"}}),notification).await?;
         if matches!(name, "Stop" | "StopFailure") {
@@ -465,7 +466,7 @@ impl Agents {
             if live.probe_sent.is_none() && a.status == "idle" && a.turn_id.is_none() {
                 live.probe_sent = Some(now());
                 let content=format!("neuraOS Channels receipt test. Call ONLY the neuraos channel_ack tool with nonce {}, then end this turn. Do not perform work, delegate, or report completion. Real instructions remain queued until receipt is confirmed.",live.nonce);
-                s.claude.insert(terminal.into(), live);
+                set_claude(&mut s, terminal, Some(live));
                 return Ok(json!({"content":content,"meta":{"kind":"probe","task_id":session}}));
             }
             if live.probe_sent.is_some_and(|at| now() - at > 60000)
@@ -512,7 +513,7 @@ impl Agents {
             (report_payload(&reports).to_string(), "reports")
         };
         self.save(&mut s, a).await?;
-        s.claude.insert(terminal.into(), live);
+        set_claude(&mut s, terminal, Some(live));
         let mut meta = json!({"kind":kind,"task_id":session});
         if let Some(key) = instruction_id {
             meta["instruction_id"] = json!(key);
@@ -535,7 +536,7 @@ impl Agents {
             let mut a = get(&s, live.session.as_ref().unwrap())?;
             a.channel_state = Some("connected".into());
             self.save(&mut s, a).await?;
-            s.claude.insert(terminal.into(), live);
+            set_claude(&mut s, terminal, Some(live));
         }
         Ok(json!({"ok":true}))
     }
@@ -887,7 +888,7 @@ impl Agents {
         } else {
             a.turn_id = None;
         }
-        s.claude.insert(terminal.into(), live);
+        set_claude(&mut s, terminal, Some(live));
         self.save(&mut s, a).await?;
         if !probe {
             self.deliver(&mut s).await?;
@@ -1269,16 +1270,16 @@ impl Agents {
             .agents
             .values()
             .filter(|a| a.workspace_id == workspace)
-            .map(|a| a.id.clone())
+            .map(|a| (a.id.clone(), a.terminal_id.clone()))
             .collect();
-        for key in removed {
+        for (key, terminal) in removed {
             s.agents.remove(&key);
-            changed(&mut s, &key, workspace);
+            changed(&mut s, &key, workspace, &terminal);
         }
     }
     pub async fn close(&self, terminal: &str) -> Result<()> {
         let mut s = self.state.lock().await;
-        s.claude.remove(terminal);
+        set_claude(&mut s, terminal, None);
         s.codex.remove(terminal);
         let rows: Vec<_> = s
             .agents
@@ -1501,10 +1502,14 @@ fn follows_name(w: &Value) -> bool {
     !explicit || leaf.starts_with("worktree-")
 }
 
-fn changed(s: &mut Registry, key: &str, workspace: &str) {
+fn changed(s: &mut Registry, key: &str, workspace: &str, terminal: &str) {
     s.list_revision += 1;
-    s.changes
-        .push_back((s.list_revision, key.into(), workspace.into()));
+    s.changes.push_back((
+        s.list_revision,
+        key.into(),
+        workspace.into(),
+        terminal.into(),
+    ));
     while s.changes.len() > 4096 {
         s.changes.pop_front();
     }
@@ -1551,4 +1556,29 @@ fn prune_instruction_history(a: &mut Agent) {
         index += 1;
         retain
     });
+}
+
+// Live session membership is part of the list response independently of the
+// persisted Agent row. Journal both sides even when save() is a no-op.
+fn set_claude(s: &mut Registry, terminal: &str, next: Option<ClaudeLive>) {
+    let binding = |live: &ClaudeLive| {
+        live.session.as_ref().map(|key| {
+            (
+                key.clone(),
+                live.workspace["id"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+    };
+    let before = s.claude.get(terminal).and_then(binding);
+    let after = next.as_ref().and_then(binding);
+    if before != after {
+        for (key, workspace) in before.into_iter().chain(after) {
+            changed(s, &key, &workspace, terminal);
+        }
+    }
+    if let Some(live) = next {
+        s.claude.insert(terminal.into(), live);
+    } else {
+        s.claude.remove(terminal);
+    }
 }

@@ -47,7 +47,13 @@ A changed or missing filter fingerprint returns `fullRefreshRequired: true`
 with `reason: filter_changed`; changing a filter needs a fresh baseline, since
 unchanged tasks matching the new filter would otherwise be missing from a delta.
 Apply returned `agents` by ID and
-remove `removedTaskIds`. Removal IDs include changed tasks no longer matching
+remove `removedTaskIds`. For the `currentSessionIds` cache, first remove all
+`removedSessionTerminalIds`, then apply returned map entries. Binding-only
+close/SessionEnd/resume changes advance list revision even if the persisted
+Agent row is unchanged. Tombstones retain prior terminal IDs, so moving the same
+session from one terminal to another or deleting its workspace removes old
+map entries. Apply all pages before advancing the cache revision.
+Removal IDs include changed tasks no longer matching
 the filter, even if the client did not previously cache that ID. They also
 include actual registry deletion. Deleting an absent cache ID is harmless.
 An empty full result (`delta: false`) differs from no new changes
@@ -128,9 +134,10 @@ cancels all queued instructions and watches, now retaining cancellation history.
   atomic supersede, unrelated instruction preservation, delivery after turn end,
   sibling denial, cancel/supersede race, delivery transport failure, restart,
   read-only read/list, deletion/hidden-task deltas, paging and cursor expiration,
-  count/byte retention with unconsumed/unknown bodies preserved across restart.
+  count/byte retention with unconsumed/unknown bodies preserved across restart,
+  binding-only close/SessionEnd, terminal resume, rebind/filter and map deletion.
 - 40 stopped tasks with long pending/report bodies: measured JSON response sizes
-  **1,906,404 bytes full / 19,844 bytes summary** in the isolated Rust fixture.
+  **1,906,435 bytes full / 19,875 bytes summary** in the isolated Rust fixture.
   These are UTF-8 byte lengths for this fixture, not a general reduction target.
 - `tests/native-rust/migration.test.mjs`: real Node → Rust → Node startup
   roundtrip, seeding both old records without lifecycle fields and new records.
