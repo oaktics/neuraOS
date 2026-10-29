@@ -555,7 +555,7 @@ pub async fn process_supervisor() -> Result<i32> {
                                     Err(error) => json!({"event":"exit","token":token,"ok":false,"error":error}),
                                 }).unwrap();
                                 bytes.push(b'\n');
-                                let _ = output.lock().await.write_all(&bytes).await;
+                                write_frame(&output, &bytes).await;
                             });
                         }
                         result
@@ -612,9 +612,21 @@ async fn reply(
     };
     let mut bytes = serde_json::to_vec(&value).unwrap();
     bytes.push(b'\n');
-    let mut output = output.lock().await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), output.write_all(&bytes)).await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), output.flush()).await;
+    write_frame(output, &bytes).await;
+}
+async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(
+    output: &Arc<tokio::sync::Mutex<W>>,
+    bytes: &[u8],
+) {
+    // One total deadline includes mutex contention, the full frame, and flush.
+    // In particular, EOF cleanup must never join an exit notifier indefinitely
+    // because the parent stopped draining the shared stdout pipe.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut output = output.lock().await;
+        output.write_all(bytes).await?;
+        output.flush().await
+    })
+    .await;
 }
 
 #[cfg(test)]
@@ -641,6 +653,22 @@ mod pressure_tests {
             }),
             rx,
         )
+    }
+    #[tokio::test]
+    async fn notification_deadline_includes_full_pipe_and_output_lock() {
+        let (writer, _unread) = tokio::io::duplex(1);
+        let output = Arc::new(tokio::sync::Mutex::new(writer));
+        let (locked_writer, _unused) = tokio::io::duplex(1);
+        let locked_output = Arc::new(tokio::sync::Mutex::new(locked_writer));
+        let guard = locked_output.lock().await;
+        let full = write_frame(&output, b"exit notification");
+        let locked = write_frame(&locked_output, b"exit notification");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(full, locked);
+        })
+        .await
+        .expect("both writer and lock waits must honor the total deadline");
+        drop(guard);
     }
     #[tokio::test]
     async fn cancel_storm_retains_bounded_credit_until_coalesced_stop_ack() {
