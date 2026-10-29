@@ -39,10 +39,20 @@ async function launchContext(a,workspaceId){
 }
 async function startupStatus(terminal){
   if(terminal.provider!=='claude')return terminal;
-  let agent;
-  try{const {agents}=await request('/v1/agents');agent=agents.find(a=>a.terminalId===terminal.id&&a.channelState==='connected');}catch{}
+  let agent,channelState='unknown';
+  try{
+    const {agents,currentSessionIds}=await request('/v1/agents');
+    // /clear retains historical agents on the same terminal. Read identity and receipt state together.
+    agent=agents.find(a=>a.terminalId===terminal.id&&a.id===currentSessionIds?.[terminal.id]);
+    channelState=currentSessionIds?(agent?.channelState??'pending'):'unknown';
+  }catch{}
+  const confirmed=channelState==='connected';
+  const recovery=channelState==='unavailable'
+    ? 'Claude has started, but its Channels receipt probe was not acknowledged within 60 seconds. Instructions remain queued. Inspect this terminal and its MCP connection, account and organization Channels policy; the startup banner alone does not prove a connection failure.'
+    : 'Claude has started but Channels registration is not confirmed. Open this terminal and complete the standard Claude Channels startup confirmation if shown.';
   // A status lookup failure must not erase the terminal identity or invite a duplicate start.
-  return {...terminal,registrationPending:!agent,...(agent?{agentId:agent.id}:{recovery:'Claude has started but Channels registration is not confirmed. Open this terminal and complete the standard Claude Channels startup confirmation if shown. Then check task_list for this terminalId. Do not create another worker or claim its prompt was delivered.'})};
+  // Claude's banner can overlook session-only --mcp-config servers; only the receipt probe confirms delivery.
+  return {...terminal,channelState,registrationPending:!confirmed,...(confirmed?{agentId:agent.id}:{recovery:recovery+' Then check task_list for this terminalId. Do not create another worker or claim its prompt was delivered.'})};
 }
 async function call(name,a){
   switch(name){

@@ -82,6 +82,10 @@ Claude Codeは従来の対話ターミナル画面を維持し、SessionStart/St
 
 Claudeにはセッション限定のMCP、共有指示、フック、`--dangerously-load-development-channels server:neuraos`を渡します。Claude標準の起動確認は維持し、他のMCPとユーザー設定を変更しません。Channelsはresearch previewです。CLI・ログインアカウント・組織設定の対応が必要で、非対応CLIは更新理由を表示します。作業一覧では接続待ちと端末を確認でき、CLIが出すアカウント・組織制限の理由もターミナルに残ります。MCP接続だけでは実指示を配送しません。nonce付きprobeをClaudeが専用channel_ackツールで返すまで指示を保持します。60秒で未確認なら利用不可として表示します。確認probeの完了は子の作業完了として報告しません。
 
+`task_start` / `task_spawn` のClaude起動結果には `channelState` と `registrationPending` が含まれます。`pending` は受信確認待ち、`unavailable` はprobeへのACKが60秒以内に届かなかった状態、`connected` はACK確認済みです。状態の取得自体が失敗した場合は `unknown` として未確認扱いにし、端末IDを保持します。未確認時は同じ端末を `task_list` で確認し、指示の配信成功を宣言したり、別のworkerを重複作成したりしないでください。
+
+Claude Code 2.1.312では、セッション限定の `--mcp-config` で渡したサーバーに対して、接続・受信できていても `server:neuraos · no MCP server configured with that name` と表示されることを確認しています。[上流の同症状報告](https://github.com/anthropics/claude-code/issues/100865)もあります。`Channels (experimental) ... restart without ...` は開発Channelsの案内です。この2行だけで接続失敗と判断せず、監督画面の受信確認状態と実際のMCPエラーを確認してください。`unavailable` をこの表示不具合だけで正常扱いすることもできません。表示を消すためのグローバルMCP登録やChannelsフラグの削除は行いません。前者は端末限定設定を他セッションにも適用し、後者は監督通知を無効にするためです。
+
 Claudeへの指示はChannelsで現在の応答完了後に配送します。実行中へのsteerは非対応でUIも無効化します。質問・承認はClaudeのターミナルから回答します。待機中のキー操作だけでは取消完了と見なさず指示を保持します（Claudeの質問画面はCtrl-Cだけでは終了しない場合があり、画面の取消操作が必要です）。実際のライフサイクル通知後に次の指示を配送します。Claudeが取消後の通知を送らず「回答待ち」が残る場合は、作業一覧の「中断」または現在のturn IDを指定した`task_interrupt`で回復し、その後`task_send(mode: queue)`で必要な指示を送り直してください。明示中断は未送信指示と監視を解除するので、必要な`task_watch`も登録し直します。キー入力だけでは取消完了を推測しません。報告は`kind=reports`の通知であり、実行指示へ変換しません。送信前に通知済みを記録し、不明な送信結果を自動再送しません。報告は`task_ack`まで保持します。Channelsのpollは通常のdaemon認証に加え、daemon内でのみ発行する端末別のランダム資格を要求し、他端末の資格やmaster bearerだけでは通知を消費できません。
 
 compactは実行中ターンを保持します。clear/resumeは現在の会話を切り替え、旧会話の指示を新会話へ配送しません。同じ会話の重複起動、異なるworkspace/providerでの再開を拒否します。停止した会話は中断として保存され、停止後の自動配送は行いません。Claude履歴はbyteカーソルで最大2MBずつ非同期取得し、tool call/resultを含む実行証跡を表示します。巨大な単一記録は省略を明記し、原本のtranscriptは保持します。

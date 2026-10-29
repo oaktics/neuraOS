@@ -161,7 +161,12 @@ struct AgentSupervisor: View {
                         } else {Text("エージェントが操作の確認を待っています。「作業を開く」から確認してください。").font(.callout)}
                     }
                     Divider()
-                    if agent.provider == "claude" {Text(agent.channelState == "connected" ? "Channels受信確認済み。指示は現在の応答後に届きます。" : "Channels受信未確認。指示は保持されています。ターミナルの標準確認、Claudeの対応バージョン・アカウント・組織設定を確認してください。").font(.caption).foregroundStyle(.secondary)}
+                    if agent.provider == "claude" {
+                        Text(agent.channelState == "connected" ? "Channels受信確認済み。" : agent.channelState == "unavailable" ? "Channelsの受信確認が60秒以内に届きませんでした。指示は保持されています。ターミナルのMCP接続・アカウント・組織設定を確認してください。" : "Channels受信確認待ち。指示は保持されています。ターミナルに標準の起動確認が表示されている場合は確認してください。")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Claude Codeでは接続できていても「no MCP server configured with that name」と表示される場合があります。上の受信確認状態で判断してください。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     TextField("このエージェントへの指示", text: $text, axis: .vertical).textFieldStyle(.roundedBorder).lineLimit(2...6)
                     HStack {
                         Toggle("実行中の作業へすぐ反映", isOn: $steer).disabled(agent.turnId == nil || agent.provider == "claude")
