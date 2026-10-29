@@ -161,7 +161,9 @@ commit is measured around COMMIT itself; `store.autocommit.begin/end` includes t
 whole standalone operation statement and its implicit commit, so it must not be
 interpreted as fsync-only time. Group commits attach the same transaction interval
 to every participating request. Background work without an HTTP context receives
-its own UUID. Tasks detached from a request are separate work, not falsely linked.
+its own UUID. Detached `agent.instruction` mutations explicitly inherit the HTTP
+request context so their store intervals remain correlated even after client
+disconnect; unrelated background tasks remain separate work.
 HTTP response time is handler response construction, not socket delivery or client
 body decoding. Cancellation can leave an incomplete HTTP interval; committed store
 work is still recorded even when its reply receiver has gone away.

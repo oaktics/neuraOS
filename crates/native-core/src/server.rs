@@ -733,9 +733,20 @@ async fn command(
     if body["command"]["type"] == "agent.instruction" {
         // Keep the durable row, in-memory registry and operation journal in
         // sync even if the MCP/HTTP caller disconnects during the write.
-        return tokio::spawn(command_inner(State(s), Json(body)))
-            .await
-            .map_err(|_| ApiError::storage())?;
+        // Tokio task-locals are not inherited by spawn. Scope the detached
+        // worker itself so correlation also survives cancellation of its caller.
+        let request = neura_native_core::performance::REQUEST.try_with(Clone::clone).ok();
+        return tokio::spawn(async move {
+            if let Some(request) = request {
+                neura_native_core::performance::REQUEST
+                    .scope(request, command_inner(State(s), Json(body)))
+                    .await
+            } else {
+                command_inner(State(s), Json(body)).await
+            }
+        })
+        .await
+        .map_err(|_| ApiError::storage())?;
     }
     command_inner(State(s), Json(body)).await
 }
