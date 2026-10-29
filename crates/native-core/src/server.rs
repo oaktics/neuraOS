@@ -1,3 +1,4 @@
+use crate::diagnostics::{Diagnostics,Phase};
 use crate::workspace::text;
 use crate::{
     browser::BrowserBroker, contracts, error::ApiError, events::Change, github::GitHub,
@@ -48,7 +49,9 @@ const FEATURES: &[&str] = &[
     "agent.claude-channels",
     "state.stream",
 ];
+struct SetupJob{cancel:tokio::sync::watch::Sender<bool>,task:tokio::task::JoinHandle<Result<(),ApiError>>}
 pub struct AppState {
+    diagnostics:Diagnostics,
     pub store: StoreHandle,
     pub events: broadcast::Sender<Change>,
     pub token: String,
@@ -62,7 +65,7 @@ pub struct AppState {
     mutation: crate::mutation::MutationLocks,
     owners: Mutex<HashMap<String, (String, tokio::time::Instant)>>,
     browser_poll_gate: Mutex<()>,
-    pub setups: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    setups: Mutex<HashMap<String, SetupJob>>,
     pub epoch: String,
     pub closing: tokio::sync::watch::Sender<bool>,
 }
@@ -104,7 +107,9 @@ impl AppState {
                 ..Default::default()
             });
         });
+        let diagnostics=Diagnostics::new(data_dir.join("diagnostics")).map_err(|_|ApiError::storage())?;diagnostics.record(Phase::Start,None,None,None);
         let this = Arc::new(Self {
+            diagnostics,
             store,
             events,
             token,
@@ -218,20 +223,22 @@ impl AppState {
         s["features"] = json!(FEATURES);
         Ok(s)
     }
-    pub async fn shutdown(&self) -> Result<(), ApiError> {
-        self.closing.send_replace(true);
-        self.browser.shutdown();
-        for (_, task) in self.setups.lock().await.drain() {
-            task.abort();
-        }
-        let _ = self.providers.shutdown().await;
-        self.pty.shutdown().await?;
-        self.usage.close().await;
-        self.store.call("barrier", json!({})).await?;
-        Ok(())
+    pub async fn shutdown(&self)->Result<(),ApiError>{
+      self.closing.send_replace(true);self.browser.shutdown();let mut failed=false;
+      let jobs:Vec<_>=self.setups.lock().await.drain().map(|(_,job)|job).collect();
+      for job in &jobs{job.cancel.send_replace(true);}
+      for job in jobs{if !matches!(tokio::time::timeout(Duration::from_secs(12),job.task).await,Ok(Ok(Ok(())))){failed=true;}}
+      if self.providers.shutdown().await.is_err(){failed=true;}
+      if self.pty.shutdown().await.is_err(){failed=true;}
+      self.usage.close().await;
+      if self.store.call("barrier",json!({})).await.is_err(){failed=true;}
+      if failed{self.diagnostics.record(Phase::Failure,None,None,None);}
+      self.diagnostics.record(Phase::End,None,None,None);self.diagnostics.flush().await;
+      if failed{Err(ApiError::new("shutdown_incomplete","所有プロセスまたは保存処理の完了を確認できません。",500))}else{Ok(())}
     }
     async fn claim(&self, id: &str, client: &str) -> Result<(), ApiError> {
         let mut owners = self.owners.lock().await;
+        owners.retain(|_,(_,until)|*until>tokio::time::Instant::now());
         if let Some((old, until)) = owners.get(id) {
             if old != client && *until > tokio::time::Instant::now() {
                 return Err(ApiError::new(
@@ -598,12 +605,14 @@ async fn browser_call(
     let snapshot = s.snapshot().await?;
     Ok(Json(s.browser.call(body, &snapshot, verified).await?))
 }
-async fn stream(State(s): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
-    ws.max_message_size(1024)
+async fn stream(State(s): State<Arc<AppState>>,Query(query):Query<HashMap<String,String>>, ws: WebSocketUpgrade) -> Result<Response,ApiError> {
+    let native_id=query.get("nativeId").cloned();if let Some(key)=&native_id{id(key)?;}
+    Ok(ws.max_message_size(1024)
         .max_frame_size(1024)
-        .on_upgrade(move |socket| stream_session(socket, s))
+        .on_upgrade(move |socket| stream_session(socket, s,native_id)))
 }
-async fn stream_session(socket: WebSocket, s: Arc<AppState>) {
+async fn stream_session(socket: WebSocket, s: Arc<AppState>,native_id:Option<String>) {
+    let _browser_lease=match native_id{Some(key)=>match s.browser.attach_stream(&key){Ok(lease)=>Some(lease),Err(_)=>return},None=>None};
     let mut closing = s.closing.subscribe();
     if *closing.borrow() {
         return;
@@ -634,6 +643,7 @@ async fn command(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let (op, c) = contracts::envelope(body)?;
+    let started=std::time::Instant::now();let traced=!["terminal.input","terminal.resize"].contains(&c["type"].as_str().unwrap_or(""));if traced{s.diagnostics.record(Phase::Received,c["type"].as_str(),Some(&op),None);}
     let digest = work::hash(&c.to_string());
     let lock = {
         let mut locks = s.operations.lock().await;
@@ -677,7 +687,9 @@ async fn command(
     s.store
         .call("operation_start", json!({"id":op,"hash":digest}))
         .await?;
+    if traced{s.diagnostics.record(Phase::Executing,c["type"].as_str(),Some(&op),Some(started.elapsed().as_secs_f64()*1000.0));}
     let result = execute(s.clone(), &c, &op).await;
+    if traced||result.is_err(){s.diagnostics.record(if result.is_ok(){Phase::Success}else{Phase::Failure},c["type"].as_str(),Some(&op),Some(started.elapsed().as_secs_f64()*1000.0));}
     let (status, value) = match &result {
         Ok(value) => ("done", value.clone()),
         Err(e) => (
@@ -1021,6 +1033,7 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                 w["setup"] = json!({"status":"running","script":p["worktreeSetup"],"output":""});
             } else {
                 for provider in startup {
+                if *s.closing.borrow(){return Err(ApiError::new("setup_cancelled","終了処理中です。",500));}
                     if let Some(provider) = provider.as_str() {
                         if s.open(w.clone(), provider, false, &json!({}))
                             .await
@@ -1414,6 +1427,7 @@ async fn start_setup(
     )
     .await?;
     let (begin, wait) = tokio::sync::oneshot::channel();
+    let(cancel,mut cancelled)=tokio::sync::watch::channel(false);
     let task_key = key.clone();
     let owner = s.clone();
     let task = tokio::spawn(async move {
@@ -1439,7 +1453,7 @@ async fn start_setup(
             .map_err(|_| ApiError::new("setup_failed", "setup scriptを起動できません。", 500))?;
             // Only the host keeps this pipe. Dropping this task (or the daemon dying)
             // produces EOF; the host remains alive to terminate and reap descendants.
-            let lease = child.stdin.take();
+            let mut lease = child.stdin.take();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
             async fn read(
                 mut stream: impl tokio::io::AsyncRead + Unpin,
@@ -1489,7 +1503,7 @@ async fn start_setup(
             let b = tokio::spawn(read(stderr, tx));
             let until = tokio::time::Instant::now() + Duration::from_secs(15 * 60);
             let mut last = tokio::time::Instant::now();
-            let completed = async {
+            let status={let completed = async {
                 while let Some(bytes) = rx.recv().await {
                     output.push_str(&bytes);
                     if output.len() > 65536 {
@@ -1511,13 +1525,11 @@ async fn start_setup(
                 }
                 child.wait().await.map_err(|_| ApiError::storage())
             };
-            let status = tokio::time::timeout_at(until, completed).await;
-            drop(lease);
-            a.abort();
-            b.abort();
-            let status = status.map_err(|_| {
-                ApiError::new("setup_timeout", "setup scriptが15分を超えました。", 500)
-            })??;
+            tokio::pin!(completed);
+            let status=tokio::select!{value=&mut completed=>Some(value),_=cancelled.changed()=>None,_=tokio::time::sleep_until(until)=>None};
+            match status{Some(value)=>value,None=>{drop(lease.take());let drained=tokio::time::timeout(Duration::from_secs(10),&mut completed).await;match drained{Ok(Err(e))=>Err(e),Ok(Ok(_))=>Err(ApiError::new("setup_cancelled","setup scriptを中断しました。",500)),Err(_)=>Err(ApiError::new("setup_stop_timeout","setup終了を確認できません。",500))}}}
+            };
+            drop(lease);a.abort();b.abort();let status=status?;
             if !status.success() {
                 return Err(ApiError::new(
                     "setup_failed",
@@ -1526,6 +1538,7 @@ async fn start_setup(
                 ));
             }
             for provider in startup {
+                if *s.closing.borrow(){return Err(ApiError::new("setup_cancelled","終了処理中です。",500));}
                 if let Some(provider) = provider.as_str() {
                     if s.open(w.clone(), provider, false, &json!({}))
                         .await
@@ -1538,14 +1551,16 @@ async fn start_setup(
             Ok(())
         }
         .await;
+        let cleanup_error=result.as_ref().err().filter(|e|!["setup_cancelled","setup_failed"].contains(&e.error.as_str())).cloned();
         let setup = match result {
             Ok(()) => json!({"status":"succeeded","script":script,"output":output}),
             Err(e) => json!({"status":"failed","script":script,"output":output,"error":e.message}),
         };
-        let _ = setup_update(&s, &task_key, setup).await;
+        let persisted=setup_update(&s, &task_key, setup).await;
         s.setups.lock().await.remove(&task_key);
+        persisted?;if let Some(e)=cleanup_error{Err(e)}else{Ok(())}
     });
-    owner.setups.lock().await.insert(key, task.abort_handle());
+    owner.setups.lock().await.insert(key, SetupJob{cancel,task});
     let _ = begin.send(());
     Ok(())
 }

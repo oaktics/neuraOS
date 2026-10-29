@@ -8,9 +8,23 @@ pub fn hash(s:&str)->String{format!("{:x}",Sha256::digest(s.as_bytes()))}
 pub fn text<'a>(v:&'a Value,k:&str)->Result<&'a str,ApiError>{v.get(k).and_then(Value::as_str).ok_or_else(||ApiError::new("invalid_request","要求の形式が正しくありません。",400))}
 pub async fn git(root:&str,args:&[&str])->Result<String,ApiError>{run(root,"git",&[&["--no-optional-locks","-c","core.quotepath=false"][..],args].concat(),30).await}
 pub async fn run(root:&str,program:&str,args:&[&str],seconds:u64)->Result<String,ApiError>{
- let mut command=Command::new(program);command.args(args).current_dir(root).env("GIT_TERMINAL_PROMPT","0").kill_on_drop(true);let output=tokio::time::timeout(Duration::from_secs(seconds),command.output()).await.map_err(|_|ApiError::new("operation_timeout","外部処理が時間内に終了しませんでした。",504))?.map_err(|_|ApiError::new("operation_failed","外部プログラムを起動できません。",500))?;
- if output.stdout.len()>4*1024*1024{return Err(ApiError::new("output_too_large","外部処理の出力が大きすぎます。",413));}
- if !output.status.success(){return Err(ApiError::new("git_failed",String::from_utf8_lossy(&output.stderr).chars().take(2000).collect::<String>(),400));}Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+ use std::process::Stdio;use tokio::io::AsyncReadExt;
+ async fn bounded(reader:impl tokio::io::AsyncRead+Unpin,limit:u64)->Result<Vec<u8>,ApiError>{
+  let mut data=Vec::new();reader.take(limit+1).read_to_end(&mut data).await.map_err(|_|ApiError::storage())?;
+  if data.len()as u64>limit{return Err(ApiError::new("output_too_large","外部処理の出力が大きすぎます。",413));}Ok(data)
+ }
+ let token=Uuid::new_v4().to_string();
+ let mut child=Command::new(program).env(crate::process_tree::OWNER_ENV,&token).args(args).current_dir(root).env("GIT_TERMINAL_PROMPT","0").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|ApiError::new("operation_failed","外部プログラムを起動できません。",500))?;
+ let pid=child.id().ok_or_else(ApiError::storage)?;
+ let tree=tokio::task::spawn_blocking(move||crate::process_tree::ProcessTree::new_with_token(pid,token)).await.map_err(|_|ApiError::storage())?.map_err(|_|ApiError::new("process_monitor_failed","外部処理の所有確認ができません。",500))?;
+ let stdout=child.stdout.take().ok_or_else(ApiError::storage)?;let stderr=child.stderr.take().ok_or_else(ApiError::storage)?;
+ let result=tokio::time::timeout(Duration::from_secs(seconds),async{
+  tokio::try_join!(bounded(stdout,4*1024*1024),bounded(stderr,64*1024),async{let status=child.wait().await.map_err(|_|ApiError::storage())?;tree.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","外部処理の終了を確認できません。",500))?;Ok(status)})
+ }).await;
+ tree.stop().await.map_err(|_|ApiError::new("process_cleanup_failed","外部処理の終了を確認できません。",500))?;
+ let output=match result{Ok(Ok(v))=>v,Ok(Err(e))=>{let _=child.kill().await;let _=child.wait().await;return Err(e);},Err(_)=>{let _=child.kill().await;let _=child.wait().await;return Err(ApiError::new("operation_timeout","外部処理が時間内に終了しませんでした。",504));}};
+ if !output.2.success(){return Err(ApiError::new("git_failed",String::from_utf8_lossy(&output.1).chars().take(2000).collect::<String>(),400));}
+ Ok(String::from_utf8_lossy(&output.0).into_owned())
 }
 pub async fn project_folder(path:&str)->Result<(String,bool),ApiError>{let path=fs::canonicalize(path).await.map_err(|_|ApiError::new("not_directory","フォルダを選択してください。",400))?;if !fs::metadata(&path).await.map_err(|_|ApiError::storage())?.is_dir(){return Err(ApiError::new("not_directory","フォルダを選択してください。",400));}let p=path.to_string_lossy().into_owned();Ok(match git(&p,&["rev-parse","--show-toplevel"]).await{Ok(root)=>(root.trim().into(),true),Err(_)=>(p,false)})}
 fn valid_path(path:&str,git_allowed:bool)->Result<(),ApiError>{if Path::new(path).is_absolute()||path.contains('\0')||path.split(['/', '\\']).any(|p|p==".."||(!git_allowed&&p==".git")){return Err(ApiError::new("invalid_path","このパスにはアクセスできません。",400));}Ok(())}
@@ -25,3 +39,15 @@ async fn clean(root:&str)->Result<(),ApiError>{if !git(root,&["status","--porcel
 pub async fn sync_default(root:&str,target:&Value)->Result<Value,ApiError>{clean(root).await?;let branch=text(target,"branch")?;let commit=text(target,"commit")?;if git(root,&["branch","--show-current"]).await?.trim().is_empty(){return Err(ApiError::new("detached_head","ブランチに切り替えてください。",409));}let reference=format!("refs/heads/{branch}");let exists=git(root,&["for-each-ref","--format=%(refname)",&reference]).await?.lines().any(|l|l==reference);if exists&&git(root,&["merge-base","--is-ancestor",&reference,commit]).await.is_err(){return Err(ApiError::new("local_commits","リモート未反映のコミットがあります。",409));}let ignored=git(root,&["ls-files","--others","--ignored","--exclude-standard","--directory","-z"]).await?;let tracked=git(root,&["ls-tree","-r","--name-only","-z",commit]).await?;for i in ignored.split('\0').filter(|s|!s.is_empty()){let i=i.trim_end_matches('/');if tracked.split('\0').any(|t|t==i||t.starts_with(&format!("{i}/"))||i.starts_with(&format!("{t}/"))){return Err(ApiError::new("ignored_collision","更新先と重なる無視対象ファイルがあります。",409));}}clean(root).await?;if exists{git(root,&["switch","--no-overwrite-ignore",branch]).await?;}else{git(root,&["switch","--no-overwrite-ignore","-c",branch,commit]).await?;}git(root,&["-c","merge.autostash=false","merge","--ff-only",commit]).await?;Ok(target.clone())}
 pub async fn setup_path(root:&str,path:&str)->Result<PathBuf,ApiError>{valid_path(path,true)?;let base=fs::canonicalize(root).await.map_err(|_|ApiError::storage())?;let target=fs::canonicalize(base.join(path)).await.map_err(|_|ApiError::new("setup_missing","setup scriptが見つかりません。",400))?;if target==base||!target.starts_with(base)||!fs::metadata(&target).await.map_err(|_|ApiError::storage())?.is_file(){return Err(ApiError::new("invalid_setup_path","リポジトリ内のファイルを指定してください。",400));}Ok(target)}
 pub async fn detect_setup(root:&str)->Value{let mut paths=Vec::new();for p in ["scripts/worktree-setup.sh","worktree-setup.sh",".orca/setup.sh",".neuraos/setup.sh","scripts/setup.sh","setup.sh"]{if setup_path(root,p).await.is_ok(){paths.push(p);}}json!({"scripts":paths})}
+
+#[cfg(test)]
+mod runner_tests {
+ use super::*;
+ #[tokio::test]
+ async fn bounds_stdout_and_stderr_while_draining(){
+  for script in ["import sys;sys.stdout.write('x'*5000000)","import sys;sys.stderr.write('x'*100000)"]{
+   let error=run("/tmp","/usr/bin/python3",&["-c",script],5).await.unwrap_err();assert_eq!(error.error,"output_too_large");
+  }
+  assert_eq!(run("/tmp","/usr/bin/python3",&["-c","import sys;sys.stderr.write('x'*50000);print('ok')"],5).await.unwrap(),"ok\n");
+ }
+}
