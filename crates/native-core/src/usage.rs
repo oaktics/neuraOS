@@ -178,7 +178,9 @@ pub async fn read_codex_usage(program: Option<PathBuf>) -> Result<Value> {
         .kill_on_drop(true);
     let tree = crate::process_tree::reserve().await.map_err(|_| UsageError::Unavailable)?;
     command.env(crate::process_tree::OWNER_ENV, tree.token());
-    let mut child = command.spawn().map_err(|_| UsageError::Unavailable)?;
+    let child = command.spawn().map_err(|_| UsageError::Unavailable)?;
+    let mut owned = crate::process_tree::OwnedChild::new(child, tree.clone());
+    let child = owned.child_mut();
     let pid = child.id().ok_or(UsageError::Unavailable)?;
     if tree.attach(pid).await.is_err() {
         let _ = tree.stop().await;
@@ -203,6 +205,7 @@ pub async fn read_codex_usage(program: Option<PathBuf>) -> Result<Value> {
     drop(input);
     let stopped = tree.stop().await;
     let _ = child.kill().await;
+    drop(owned.into_inner());
     if stopped.is_err() {
         return Err(UsageError::Unavailable);
     }

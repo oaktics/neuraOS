@@ -327,9 +327,11 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
     command
         .env(crate::process_tree::OWNER_ENV, tree.token())
         .args(args);
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|_| err("github_failed", "コマンドを開始できません。", 502))?;
+    let mut owned = crate::process_tree::OwnedChild::new(child, tree.clone());
+    let child = owned.child_mut();
     let pid = child.id().ok_or_else(malformed)?;
     if tree.attach(pid).await.is_err() {
         let _ = tree.stop().await;
@@ -345,7 +347,7 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
     };
     let result=tokio::time::timeout(Duration::from_secs(if is_gh{60}else{30}),async{
         let (out,diagnostic,status)=tokio::try_join!(read_capped(stdout,limit),read_capped(stderr,limit),async {
-            let status = child.wait().await.map_err(|_| malformed())?;
+            tree.wait_exit().await.map_err(|_| malformed())?;
             // A hook may leave a child holding stdout/stderr. Reap owned
             // descendants as soon as the leader exits, before awaiting EOF.
             tree.stop().await.map_err(|_| err(
@@ -353,7 +355,7 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
                 "外部処理の終了を確認できません。操作結果を確認してください。",
                 502,
             ))?;
-            Ok(status)
+            child.wait().await.map_err(|_| malformed())
         })?;
         if status.success(){return String::from_utf8(out).map_err(|_|malformed());}
         let message=String::from_utf8_lossy(&diagnostic).to_lowercase();
@@ -373,7 +375,7 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
             502,
         ));
     }
-    match result {
+    let result = match result {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => {
             let _ = child.kill().await;
@@ -387,7 +389,10 @@ async fn run(cwd: String, args: Vec<String>, is_gh: bool) -> Result<String> {
                 504,
             ))
         }
-    }
+    };
+    // The lease has stopped and the leader has been reaped on every path.
+    drop(owned.into_inner());
+    result
 }
 pub async fn run_git(cwd: String, args: Vec<String>) -> Result<String> {
     run(cwd, args, false).await
