@@ -2,6 +2,7 @@ import type {Store as LegacyStore} from './store.ts';
 /** Adapter-facing async API. LegacyStore is retained only for old unit fixtures/benchmarks. */
 type Awaitable<T> = T | Promise<T>;
 export interface StoreAPI {
+  subscribe?:(listener:(change:{state:boolean;terminals:string[]})=>void)=>()=>void;
   list<T>(table:'projects'|'workspaces'|'terminals'|'agents'):Awaitable<T[]>;
   get<T>(table:'projects'|'workspaces'|'terminals'|'agents',id:string):Awaitable<T|undefined>;
   put<T extends {id:string}>(table:'projects'|'workspaces'|'terminals'|'agents',value:T,notification?:Parameters<LegacyStore['put']>[2]):Awaitable<void>;
