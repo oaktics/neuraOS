@@ -83,7 +83,7 @@ final class DaemonClient {
         config.timeoutIntervalForRequest = 15
         self.session = session ?? URLSession(configuration: config)
     }
-    func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {try await request(path, query: query, timeout: (path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15)}
+    func get<T: Decodable>(_ path: String, query: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> T {try await request(path, query: query, timeout: timeout ?? ((path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15))}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
         try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)

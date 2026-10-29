@@ -1,3 +1,4 @@
+import {browserPreflight, monitorBrowserChild} from './browser-preflight.mjs';
 import {createServer} from 'node:http';
 import {createInterface} from 'node:readline';
 import {inflateSync} from 'node:zlib';
@@ -41,6 +42,9 @@ const externalDaemon=Boolean(process.env.NEURA_BROWSER_SMOKE_DAEMON);
 if(externalDaemon&&process.env.NEURA_BROWSER_REAL_CLI==='1')throw Error('Real CLI mode uses the legacy daemon harness; external mode uses only the isolated fixture Claude.');
 const port=Number(process.env.NEURA_DEV_PORT??44319);
 if(!/^\/(?:private\/)?tmp\/neura-browser[^/]+$/.test(resolve(data)))throw Error('An isolated browser smoke data directory is required');
+if(!Number.isInteger(port)||port<1024||port>65535)throw Error('Browser preflight requires an isolated port');
+const executable=await browserPreflight(resolve(process.env.NEURA_APP_OUTPUT??'apps/macos/dist/neuraOS.app'),{data,endpoint:`http://127.0.0.1:${port}`});
+console.log('Browser preflight passed (browser operations not yet tested)');
 await mkdir(data,{recursive:true});
 const submitted=new Set<string>();
 const fixture=createServer((req,res)=>{
@@ -84,10 +88,12 @@ terminal={id:randomUUID(),workspaceId:workspaces[0].id,provider:'codex' as const
 daemonToken=d.token;browserToken=issueBrowserCredential(terminal.id);
 }
 const tabs=workspaces.map((w,i)=>({workspaceId:w.id,projectId:w.projectId,tabId:randomUUID(),url,...(i===1?{hidden:'true'}:{})}));
-const config=data+'/fixture.json';await writeFile(config,JSON.stringify({dataDirectory:data,tabs}));
-const executable=resolve(process.env.NEURA_APP_OUTPUT??'apps/macos/dist/neuraOS.app','Contents/MacOS/NeuraOS');
+const config=data+'/fixture.json';await writeFile(config,JSON.stringify({dataDirectory:data,endpoint:`http://127.0.0.1:${port}`,tabs}));
+evidence.phase='app-ready';
 const app=spawn(executable,['--browser-fixture',config],{stdio:['ignore','pipe','pipe']});cleanupApp=app;app.on('error',error=>{appLog+=String(error)});
-app.stdout.on('data',b=>{appLog+=b;process.stdout.write(b)});app.stderr.on('data',b=>appLog+=b);
+const appMonitor=monitorBrowserChild(app);
+let ready=false;
+app.stdout.on('data',b=>{appLog+=b;ready ||= appLog.includes('browser-fixture-ready');process.stdout.write(b)});app.stderr.on('data',b=>appLog+=b);
 evidence.tabs=tabs;
 const headers={authorization:`Bearer ${daemonToken}`,'x-neura-browser-token':browserToken};
 const mcp=spawn(mcpLaunch.command,mcpLaunch.args,{env:{...process.env,NEURA_SUPERVISION_URL:`http://127.0.0.1:${port}`,NEURA_SUPERVISION_TOKEN_FILE:data+'/daemon-token',NEURA_SUPERVISION_WORKSPACE:terminal.workspaceId,NEURA_SUPERVISION_TERMINAL:terminal.id,NEURA_BROWSER_TOKEN:headers['x-neura-browser-token']},stdio:'pipe'});
@@ -95,8 +101,8 @@ cleanupMCP=mcp;mcp.on('error',error=>{appLog+=String(error)});mcp.stderr.on('dat
 let sequence=0;const pending=new Map<number,(value:any)=>void>();
 mcp.once('exit',()=>{for(const resolve of pending.values())resolve({result:{isError:true,content:[{type:'text',text:'MCP exited'}]}});pending.clear()});
 createInterface({input:mcp.stdout}).on('line',line=>{const message=JSON.parse(line);pending.get(message.id)?.(message);pending.delete(message.id);});
-const rpc=(method:string,params:any={})=>new Promise<any>((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>reject(Error('MCP response timeout')),40000);pending.set(id,message=>{clearTimeout(timer);resolve(message.result)});mcp.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
-await rpc('initialize');assert.ok((await rpc('tools/list')).tools.some((t:any)=>t.name==='browser_screenshot'));
+const rpc=(method:string,params:any={})=>new Promise<any>((resolve,reject)=>{const id=++sequence;const timer=setTimeout(()=>reject(Error('MCP response timeout')),40000);timer.unref();pending.set(id,message=>{clearTimeout(timer);resolve(message.result)});mcp.stdin.write(JSON.stringify({jsonrpc:'2.0',id,method,params})+'\n');});
+await appMonitor.race(rpc('initialize'));assert.ok((await appMonitor.race(rpc('tools/list'))).tools.some((t:any)=>t.name==='browser_screenshot'));
 const call=async(action:string,args:any={},i=0)=>{
  const response=await rpc('tools/call',{name:'browser_'+action,arguments:{...(action==='list'?{}:{workspaceId:tabs[i].workspaceId,tabId:tabs[i].tabId}),...args}});
  if(response.isError)throw Error(response.content[0].text);
@@ -106,8 +112,25 @@ const call=async(action:string,args:any={},i=0)=>{
 };
 const snap=async(i=0)=>(await call('snapshot',{},i)).result;
 const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===name);assert.ok(element,`Missing ${name}: ${JSON.stringify(s)}`);return element.ref;};
- for(let i=0;i<300;i++){try{const listed=(await call('list')).tabs;if(listed.length===2&&listed.every((t:any)=>t.title==='Browser fixture'&&!t.loading))break;}catch{}await new Promise(r=>setTimeout(r,200));}
- assert.ok((await call('list')).tabs.every((t:any)=>t.title==='Browser fixture'),'CEF fixture must finish initial navigation before DevTools attach');
+ const deadline=Date.now()+60000;
+ evidence.phase='app-ready';
+ const pause=()=>appMonitor.race(new Promise(r=>setTimeout(r,200)));
+ while(!ready){appMonitor.check();if(Date.now()>deadline)throw Error('Browser readiness timeout: app-ready');await pause();}
+ evidence.phase='native-connection';
+ let initialTabs:any[]=[];
+ while(Date.now()<deadline){
+  appMonitor.check();
+  try {initialTabs=(await appMonitor.race(call('list'))).tabs;if(initialTabs.length===2)break;}
+  catch(error){appMonitor.check();evidence.lastReadinessError=String(error);}
+  await pause();
+ }
+ assert.equal(initialTabs.length,2,'Browser readiness timeout: native-connection');
+ evidence.phase='initial-navigation';
+ while(!initialTabs.every((t:any)=>t.title==='Browser fixture'&&!t.loading)){
+  if(Date.now()>deadline)throw Error('Browser readiness timeout: initial-navigation');
+  await pause();initialTabs=(await appMonitor.race(call('list'))).tabs;
+ }
+ evidence.phase='browser-operations';
  assert.equal((await call('list')).tabs.length,2);evidence.checks.push('same-project list; foreign project excluded');
  await call('wait',{text:'neuraOS MCP fixture',timeoutMs:10000});
  let s=await snap();assert.ok(!JSON.stringify(s).includes('fixture-secret'));evidence.checks.push('CEF DOM snapshot; password excluded');
@@ -164,8 +187,10 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  });assert.ok(renderers.length>0);for(const pid of renderers)process.kill(pid,'SIGKILL');await crashed;evidence.checks.push('renderer crash explicitly cancels pending operation');
  await stopChild(app);await new Promise(r=>setTimeout(r,3300));await assert.rejects(call('list'),/browser_disconnected/);evidence.checks.push('app disconnect reported');
  const restarted=spawn(executable,['--browser-fixture',config],{stdio:['ignore','pipe','pipe']});cleanupApp=restarted;
+ const restartMonitor=monitorBrowserChild(restarted);
  restarted.on('error',error=>{appLog+=String(error)});restarted.stdout.on('data',b=>appLog+=b);restarted.stderr.on('data',b=>appLog+=b);
- for(let i=0;i<300;i++){try{if((await call('list')).tabs.length===2)break;}catch{}await new Promise(r=>setTimeout(r,200));}
+ evidence.phase='restart-native-connection';
+ for(let i=0;i<300;i++){restartMonitor.check();try{if((await restartMonitor.race(call('list'))).tabs.length===2)break;}catch{restartMonitor.check();}await restartMonitor.race(new Promise(r=>setTimeout(r,200)));}
  assert.equal((await call('list')).tabs.length,2);await assert.rejects(call('snapshot'),/browser_disabled/);evidence.checks.push('app restart reconnects registry and preserves user disconnect');
  evidence.passed=true;
 }catch(error){evidence.error=String(error);throw error;}finally{
