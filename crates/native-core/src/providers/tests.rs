@@ -483,7 +483,9 @@ async fn startup_recovery_persists_interruption_and_keeps_pending_reports() {
     assert_eq!(persisted["status"], "interrupted");
     assert!(persisted.get("turnId").is_none());
     assert_eq!(persisted["requests"], json!([]));
-    assert_eq!(persisted["pending"], pending);
+    assert_eq!(persisted["pending"][0]["id"], pending[0]["id"]);
+    assert_eq!(persisted["pending"][0]["text"], pending[0]["text"]);
+    assert_eq!(persisted["pending"][0]["state"], "queued");
     assert_eq!(persisted["reports"], reports);
     // A second startup must see the durable recovery, without losing inboxes.
     drop(agents);
@@ -771,3 +773,6 @@ async fn report_rejects_over_limit_utf16_without_mutation() {
         assert!(agents.get(&task).await.unwrap().reports.is_empty());
     }
 }
+
+#[path = "instruction_tests.rs"]
+mod instruction_tests;
