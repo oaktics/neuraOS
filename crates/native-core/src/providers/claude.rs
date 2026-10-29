@@ -82,13 +82,18 @@ impl CompletionReader {
         if bytes.len() as u64 != before.size - start || bytes.last() != Some(&b'\n') {
             return Ok(None);
         }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+        let first = if start > 0 && !incremental {
+            match bytes.iter().position(|b| *b == b'\n') {
+                Some(index) => index + 1,
+                None => return Ok(None),
+            }
+        } else {
+            0
+        };
+        let Ok(text) = std::str::from_utf8(&bytes[first..]) else {
             return Ok(None);
         };
-        let mut lines = text.split_terminator('\n');
-        if start > 0 && !incremental {
-            lines.next();
-        }
+        let lines = text.split_terminator('\n');
         let mut summary = if incremental {
             self.summary.clone()
         } else {
