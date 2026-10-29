@@ -13,3 +13,5 @@ pub mod workspace;
 mod pty_tests;
 
 pub mod mutation;
+
+pub mod diagnostics;
