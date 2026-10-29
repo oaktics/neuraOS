@@ -4,7 +4,11 @@
 `provider-host <program> <args...>` CLI entry. Keep its stdin pipe exclusively in
 the parent; EOF, SIGTERM/HUP/INT or leader exit triggers cleanup. The program's
 stdin is `/dev/null`; stdout/stderr are inherited. Exit status is preserved.
-No Node runtime or `ps` subprocess is involved.
+No Node runtime or `ps` subprocess is involved. Long-lived Codex App Servers
+are spawned directly under the shared reservation API below; there is no
+per-Codex provider-host or monitor process. Close, startup cancellation and Drop
+retain their Child handles until an explicit wait completes, in addition to
+stopping the owned descendants.
 
 Before opening the daemon DB/store, call
 `ensure_supervisor(binary: &Path, lock_path: &Path).await`. It launches the real
