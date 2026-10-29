@@ -75,18 +75,33 @@ struct Session {
     offset: usize,
     utf8: Vec<u8>,
     pending: Option<String>,
+    resize: Option<Resize>,
+    resizing: bool,
     registered: bool,
     interest: u8,
     eof: bool,
     exit_code: Option<u32>,
 }
+struct Resize {
+    cols: u16,
+    rows: u16,
+    done: tokio::sync::oneshot::Sender<Result<(), ApiError>>,
+}
 struct Output {
     terminal_id: String,
     data: String,
+    resize: Option<Resize>,
     exit_code: Option<u32>,
 }
 struct Inner {
     supervised: bool,
+    #[cfg(test)]
+    output_gate: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     sessions: Mutex<HashMap<String, Session>>,
     tokens: Mutex<HashMap<usize, String>>,
     dirty: Mutex<HashSet<String>>,
@@ -106,9 +121,20 @@ struct Inner {
 pub struct PtyRuntime {
     inner: Arc<Inner>,
 }
-fn fail(inner:&Inner){if !inner.fault.swap(true,Ordering::AcqRel){inner.store.signal_change(crate::events::Change{state:true,..Default::default()});}inner.sessions_changed.notify_waiters();}
+fn fail(inner: &Inner) {
+    if !inner.fault.swap(true, Ordering::AcqRel) {
+        inner.store.signal_change(crate::events::Change {
+            state: true,
+            ..Default::default()
+        });
+    }
+    inner.sessions_changed.notify_waiters();
+}
 fn interest(s: &Session) -> Option<Interest> {
-    match (s.pending.is_none() && !s.eof, !s.input.is_empty()) {
+    match (
+        s.pending.is_none() && !s.eof && !s.resizing,
+        !s.input.is_empty(),
+    ) {
         (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
         (true, false) => Some(Interest::READABLE),
         (false, true) => Some(Interest::WRITABLE),
@@ -116,7 +142,8 @@ fn interest(s: &Session) -> Option<Interest> {
     }
 }
 fn register(inner: &Inner, s: &mut Session) {
-    let bits = u8::from(s.pending.is_none() && !s.eof) | u8::from(!s.input.is_empty()) << 1;
+    let bits =
+        u8::from(s.pending.is_none() && !s.eof && !s.resizing) | u8::from(!s.input.is_empty()) << 1;
     if bits == s.interest && s.registered {
         return;
     }
@@ -173,6 +200,13 @@ impl PtyRuntime {
         Self::create(store, true)
     }
     fn create(store: StoreHandle, supervised: bool) -> Result<Self, ApiError> {
+        Self::create_with_capacity(store, supervised, 128)
+    }
+    fn create_with_capacity(
+        store: StoreHandle,
+        supervised: bool,
+        capacity: usize,
+    ) -> Result<Self, ApiError> {
         cancel_reaper()?;
         let mut poll = Poll::new().map_err(|_| ApiError::storage())?;
         let registry = poll
@@ -184,6 +218,8 @@ impl PtyRuntime {
         let (exits, _) = broadcast::channel(256);
         let inner = Arc::new(Inner {
             supervised,
+            #[cfg(test)]
+            output_gate: Mutex::new(None),
             sessions: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashSet::new()),
@@ -199,18 +235,32 @@ impl PtyRuntime {
             fault: AtomicBool::new(false),
             sessions_changed: tokio::sync::Notify::new(),
         });
-        let (tx, mut rx) = mpsc::channel::<Output>(128);
+        let (tx, mut rx) = mpsc::channel::<Output>(capacity);
         let io = inner.clone();
         tokio::spawn(async move {
             while let Some(first) = rx.recv().await {
+                #[cfg(test)]
+                {
+                    let gate = io.output_gate.lock().unwrap().take();
+                    if let Some((entered, release)) = gate {
+                        let _ = entered.send(());
+                        let _ = release.await;
+                    }
+                }
                 let mut rows = Vec::new();
                 let mut exits = Vec::new();
+                let mut resize = None;
                 let mut bytes = 0;
                 let until = tokio::time::Instant::now() + std::time::Duration::from_millis(8);
                 let mut next = Some(first);
                 while let Some(row) = next.take() {
                     if let Some(code) = row.exit_code {
                         exits.push((row.terminal_id, code));
+                        break;
+                    }
+                    if let Some(request) = row.resize {
+                        rows.push(json!({"terminalId":row.terminal_id,"data":"","cols":request.cols,"rows":request.rows}));
+                        resize = Some((row.terminal_id, request));
                         break;
                     }
                     bytes += row.data.len();
@@ -229,6 +279,41 @@ impl PtyRuntime {
                     let _ = io.waker.wake();
                     break;
                 }
+                if let Some((id, request)) = resize {
+                    // The commit is complete before SIGWINCH can produce new output.
+                    // Cancellation of the caller never cancels an accepted marker/ioctl pair.
+                    let result = {
+                        let mut all = io.sessions.lock().unwrap();
+                        let result = all
+                            .get_mut(&id)
+                            .ok_or_else(ApiError::storage)
+                            .and_then(|s| {
+                                s.master
+                                    .resize(PtySize {
+                                        cols: request.cols,
+                                        rows: request.rows,
+                                        pixel_width: 0,
+                                        pixel_height: 0,
+                                    })
+                                    .map_err(|_| ApiError::storage())?;
+                                s.resizing = false;
+                                register(&io, s);
+                                Ok(())
+                            });
+                        io.dirty.lock().unwrap().insert(id);
+                        result
+                    };
+                    let failed = result.is_err();
+                    if failed {
+                        fail(&io);
+                        io.closed.store(true, Ordering::Release);
+                    }
+                    let _ = request.done.send(result);
+                    let _ = io.waker.wake();
+                    if failed {
+                        break;
+                    }
+                }
                 for (id, code) in exits {
                     if store
                         .call("pty_exit", json!({"terminalId":id,"exitCode":code}))
@@ -244,6 +329,10 @@ impl PtyRuntime {
                     });
                 }
                 let _ = io.waker.wake();
+            }
+            // Release callers whose requests were still waiting for FIFO capacity.
+            for session in io.sessions.lock().unwrap().values_mut() {
+                session.resize.take();
             }
             io.done.store(true, Ordering::Release);
             io.drained.notify_waiters();
@@ -273,12 +362,33 @@ impl PtyRuntime {
                                 match tx.try_send(Output {
                                     terminal_id: id.clone(),
                                     data,
+                                    resize: None,
                                     exit_code: None,
                                 }) {
                                     Ok(()) => {
                                         io.pressured.lock().unwrap().remove(&id);
                                     }
                                     Err(e) => s.pending = Some(e.into_inner().data),
+                                }
+                            }
+                            if s.pending.is_none() {
+                                if let Some(request) = s.resize.take() {
+                                    match tx.try_send(Output {
+                                        terminal_id: id.clone(),
+                                        data: String::new(),
+                                        resize: Some(request),
+                                        exit_code: None,
+                                    }) {
+                                        Ok(()) => {
+                                            io.pressured.lock().unwrap().remove(&id);
+                                        }
+                                        Err(e) => {
+                                            s.resize = e.into_inner().resize;
+                                            #[cfg(test)]
+                                            io.sessions_changed.notify_one();
+                                            io.pressured.lock().unwrap().insert(id.clone());
+                                        }
+                                    }
                                 }
                             }
                             register(&io, s);
@@ -317,7 +427,7 @@ impl PtyRuntime {
                                 s.offset = 0;
                             }
                         }
-                        if s.pending.is_none() && !s.eof {
+                        if s.pending.is_none() && !s.eof && !s.resizing {
                             let mut bytes = [0u8; 32768];
                             let n =
                                 unsafe { libc::read(s.fd, bytes.as_mut_ptr().cast(), bytes.len()) };
@@ -327,6 +437,7 @@ impl PtyRuntime {
                                     if let Err(e) = tx.try_send(Output {
                                         terminal_id: id.clone(),
                                         data,
+                                        resize: None,
                                         exit_code: None,
                                     }) {
                                         s.pending = Some(e.into_inner().data);
@@ -350,11 +461,12 @@ impl PtyRuntime {
                             }
                         }
                         register(&io, s);
-                        if s.eof && s.pending.is_none() && s.exit_code.is_some() {
+                        if s.eof && s.pending.is_none() && !s.resizing && s.exit_code.is_some() {
                             if tx
                                 .try_send(Output {
                                     terminal_id: id.clone(),
                                     data: String::new(),
+                                    resize: None,
                                     exit_code: s.exit_code,
                                 })
                                 .is_ok()
@@ -490,6 +602,8 @@ impl PtyRuntime {
             offset: 0,
             utf8: Vec::new(),
             pending: None,
+            resize: None,
+            resizing: false,
             registered: false,
             interest: 0,
             eof: false,
@@ -559,33 +673,31 @@ impl PtyRuntime {
     }
     pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), ApiError> {
         self.check_healthy()?;
-        if self.pid(id).is_none() {
-            return Err(ApiError::new(
-                "terminal_stopped",
-                "ターミナルは停止しています。",
-                409,
-            ));
+        let (done, response) = tokio::sync::oneshot::channel();
+        {
+            let mut all = self.inner.sessions.lock().unwrap();
+            self.check_healthy()?;
+            let s = all.get_mut(id).ok_or_else(|| {
+                ApiError::new("terminal_stopped", "ターミナルは停止しています。", 409)
+            })?;
+            if s.resizing {
+                return Err(ApiError::new(
+                    "terminal_busy",
+                    "リサイズ処理の完了を待ってください。",
+                    409,
+                ));
+            }
+            // The reactor holds this same lock while reading/enqueuing bytes. Pause
+            // reads until its pending bytes and this marker have crossed the FIFO.
+            s.resizing = true;
+            s.resize = Some(Resize { cols, rows, done });
+            register(&self.inner, s);
+            self.inner.dirty.lock().unwrap().insert(id.into());
         }
-        self.inner
-            .store
-            .call(
-                "append",
-                json!([{"terminalId":id,"data":"","cols":cols,"rows":rows}]),
-            )
-            .await?;
-        let all = self.inner.sessions.lock().unwrap();
-        all.get(id)
-            .ok_or_else(|| ApiError::new("terminal_stopped", "ターミナルは停止しています。", 409))?
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|_| ApiError::storage())?;
-        Ok(())
+        let _ = self.inner.waker.wake();
+        response.await.map_err(|_| ApiError::storage())?
     }
+
     pub async fn stop(&self, id: &str) -> Result<(), ApiError> {
         let owner = self
             .inner
@@ -750,5 +862,217 @@ mod cancellation_tests {
         .await
         .unwrap();
         reaped(pid).await;
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+    use std::time::Duration;
+
+    async fn scenario(cancel: bool, reject: u8, exit: bool) {
+        let directory = std::env::temp_dir().join(format!("neura-resize-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("state.sqlite");
+        let (events, _) = broadcast::channel(32);
+        let store = StoreHandle::open(&database, events.clone()).await.unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        store
+            .put("terminals", json!({"id":id,"status":"running"}), None)
+            .await
+            .unwrap();
+        if reject != 0 {
+            let condition = if reject == 1 {
+                "WHEN NEW.cols IS NOT NULL"
+            } else {
+                ""
+            };
+            store.call("transaction", json!([{"sql":format!("CREATE TRIGGER reject_resize BEFORE INSERT ON output {condition} BEGIN SELECT RAISE(ABORT,'fixture'); END"),"args":[]}])).await.unwrap();
+        }
+        let runtime = PtyRuntime::create_with_capacity(store.clone(), false, 1).unwrap();
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        *runtime.inner.output_gate.lock().unwrap() = Some((entered, gate));
+        runtime
+            .spawn(
+                &id,
+                "/bin/sh",
+                vec![
+                    "-c".into(),
+                    if exit {
+                        r"stty -echo; printf before; read -r line; printf '\245after'".into()
+                    } else {
+                        "stty -echo; printf before; read -r line; printf after; read -r hold".into()
+                    },
+                ],
+                directory.to_str().unwrap(),
+                HashMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        // Reproduce the reactor's full-channel spill slot without scheduler timing.
+        {
+            let mut sessions = runtime.inner.sessions.lock().unwrap();
+            let session = sessions.get_mut(&id).unwrap();
+            session.pending = Some("pending".into());
+            if exit {
+                assert_eq!(decode(session, &[0xe6, 0x97], false), "");
+            }
+            runtime.inner.pressured.lock().unwrap().insert(id.clone());
+        }
+        let pressured = runtime.inner.sessions_changed.notified();
+        let mut resize = Box::pin(runtime.resize(&id, 47, 19));
+        assert!(futures_util::poll!(&mut resize).is_pending());
+        assert_eq!(
+            runtime.resize(&id, 50, 20).await.unwrap_err().error,
+            "terminal_busy"
+        );
+        tokio::time::timeout(Duration::from_secs(5), pressured)
+            .await
+            .unwrap();
+        assert!(runtime.inner.sessions.lock().unwrap()[&id].resize.is_some());
+        // Input remains accepted while the durable output consumer is paused.
+        runtime.input(&id, "go\n").await.unwrap();
+        assert_eq!(
+            runtime.inner.sessions.lock().unwrap()[&id]
+                .master
+                .get_size()
+                .unwrap()
+                .cols,
+            100
+        );
+        let before = store
+            .call("output", json!({"terminalId":id,"after":0}))
+            .await
+            .unwrap();
+        assert_eq!(before["chunks"].as_array().unwrap().len(), 0);
+        if exit {
+            // Reproduce the reaper winning the race while the marker is blocked.
+            // The real child still owns its handle and is reaped by the normal path.
+            runtime
+                .inner
+                .sessions
+                .lock()
+                .unwrap()
+                .get_mut(&id)
+                .unwrap()
+                .exit_code = Some(0);
+        }
+        if cancel {
+            drop(resize);
+        } else {
+            release.send(()).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), &mut resize)
+                .await
+                .unwrap();
+            drop(resize);
+            if reject != 0 {
+                assert!(result.is_err());
+                assert_eq!(
+                    runtime.inner.sessions.lock().unwrap()[&id]
+                        .master
+                        .get_size()
+                        .unwrap()
+                        .cols,
+                    100
+                );
+                assert_eq!(
+                    runtime.input(&id, "x").await.unwrap_err().error,
+                    "terminal_runtime_failed"
+                );
+                assert!(runtime.shutdown().await.is_err());
+                drop(runtime);
+                drop(store);
+                std::fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            result.unwrap();
+            finish(runtime, store, &id, &database, events, exit).await;
+            std::fs::remove_dir_all(directory).unwrap();
+            return;
+        }
+        release.send(()).unwrap();
+        finish(runtime, store, &id, &database, events, exit).await;
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    async fn finish(
+        runtime: PtyRuntime,
+        store: StoreHandle,
+        id: &str,
+        database: &std::path::Path,
+        events: broadcast::Sender<crate::events::Change>,
+        exit: bool,
+    ) {
+        // Wait on durable-change notifications, not a timing assumption about batching.
+        let mut changes = events.subscribe();
+        let output = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = store
+                    .call("output", json!({"terminalId":id,"after":0}))
+                    .await
+                    .unwrap();
+                if output["data"].as_str().unwrap().ends_with("after") {
+                    break output;
+                }
+                changes.recv().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let chunks = output["chunks"].as_array().unwrap();
+        let marker = chunks.iter().position(|v| v["cols"] == 47).unwrap();
+        assert_eq!(
+            chunks[..marker]
+                .iter()
+                .map(|v| v["data"].as_str().unwrap())
+                .collect::<String>(),
+            "beforepending"
+        );
+        assert_eq!(chunks[marker]["rows"], 19);
+        assert_eq!(
+            chunks[marker + 1..]
+                .iter()
+                .map(|v| v["data"].as_str().unwrap())
+                .collect::<String>(),
+            if exit { "日after" } else { "after" }
+        );
+        if let Some(session) = runtime.inner.sessions.lock().unwrap().get(id) {
+            assert_eq!(session.master.get_size().unwrap().cols, 47);
+        } else {
+            assert!(exit);
+        }
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+        drop(store);
+        let reopened = StoreHandle::open(database, events).await.unwrap();
+        let replay = reopened
+            .call("output", json!({"terminalId":id,"after":0}))
+            .await
+            .unwrap();
+        assert_eq!(replay["chunks"], output["chunks"]);
+    }
+    #[tokio::test]
+    async fn resize_orders_buffered_pending_and_racing_output_and_replays() {
+        scenario(false, 0, false).await;
+    }
+    #[tokio::test]
+    async fn cancelled_resize_finishes_durable_marker_and_ioctl() {
+        scenario(true, 0, false).await;
+    }
+    #[tokio::test]
+    async fn failed_resize_commit_never_changes_pty_and_fails_closed() {
+        scenario(false, 1, false).await;
+    }
+    #[tokio::test]
+    async fn failed_preceding_output_releases_queued_resize_without_ioctl() {
+        scenario(false, 2, false).await;
+    }
+    #[tokio::test]
+    async fn partial_utf8_survives_resize_and_exit_with_replay() {
+        scenario(true, 0, true).await;
     }
 }
