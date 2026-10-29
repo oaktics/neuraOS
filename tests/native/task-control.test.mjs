@@ -80,7 +80,20 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   const lite=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,limit:10})).value;
   assert.equal(lite.agents.length,1);assert.equal(lite.agents[0].pendingCount,2);assert.equal(lite.agents[0].pending,undefined);
   for(const filter of [{workspaceId:randomUUID()},{workspaceId:workspace.id,status:'idle'}])assert.deepEqual((await tool('task_list',{...filter,taskIds:[task.id],summaryOnly:true})).value.agents,[]);
-  const delta=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,sinceRevision:lite.revision,sinceEpoch:lite.epoch})).value;assert.equal(delta.unchanged,true);assert.deepEqual(delta.agents,[]);
+  const delta=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,sinceRevision:lite.revision,sinceEpoch:lite.epoch,sinceFilter:lite.filter})).value;assert.equal(delta.unchanged,true);assert.deepEqual(delta.agents,[]);
+  const changedFilter=(await tool('task_list',{taskIds:[task.id],summaryOnly:true,sinceRevision:lite.revision,sinceEpoch:lite.epoch,sinceFilter:lite.filter})).value;
+  assert.equal(changedFilter.fullRefreshRequired,true);assert.equal(changedFilter.reason,'filter_changed');
+  const denied=await fetch(base+'/v1/commands',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({operationId:randomUUID(),command:{type:'agent.instruction'}})});
+  assert.equal(denied.status,401);
+  // An MCP launched for an unregistered terminal cannot impersonate the real
+  // terminal through sourceTerminalId, even though trusted HTTP permits it.
+  const foreign=spawn(resolve(binary),['mcp'],{env:{...env,NEURA_SUPERVISION_URL:base,NEURA_SUPERVISION_TOKEN_FILE:join(data,'daemon-token'),NEURA_SUPERVISION_TERMINAL:randomUUID()},stdio:['pipe','pipe','pipe']});
+  const foreignEnd=new Promise(r=>foreign.once('exit',r));
+  try {
+   const response=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('foreign MCP timeout')),15000);createInterface({input:foreign.stdout}).once('line',line=>{clearTimeout(timer);resolve(JSON.parse(line));});});
+   foreign.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'task_instruction',arguments:{operationId:randomUUID(),taskId:task.id,instructionId:keep.messageId,expectedRevision:bounded.revision,expectedTurnId:bounded.turnId,expectedState:'queued',action:'cancel',sourceTerminalId:terminal.id}}})+'\n');
+   const rejected=(await response).result;assert.equal(rejected.isError,true);assert.equal(JSON.parse(rejected.content[0].text).error,'instruction_forbidden');
+  } finally {foreign.stdin.end();await foreignEnd;}
   mcp.stdin.end();assert.equal(await mcpEnd,0);mcp=null;
   await stop();await start();
   const recovered=(await request('/v1/agents')).agents.find(a=>a.id===task.id);
@@ -88,7 +101,7 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   assert.equal(recovered.instructions.some(i=>i.id===old.messageId),false);assert.equal(recovered.instructionHistoryPruned,3);
   const {operationId,taskId,...args}=replacement;
   assert.deepEqual(await command({...args,type:'agent.instruction',agentId:taskId,sourceTerminalId:terminal.id},operationId),changed.value);
-  const expired=await request('/v1/agents?options='+encodeURIComponent(JSON.stringify({sinceRevision:lite.revision,sinceEpoch:lite.epoch})));assert.equal(expired.fullRefreshRequired,true);
+  const expired=await request('/v1/agents?options='+encodeURIComponent(JSON.stringify({sinceRevision:lite.revision,sinceEpoch:lite.epoch,sinceFilter:lite.filter})));assert.equal(expired.fullRefreshRequired,true);
   t.diagnostic(`native tools/list UUID descriptions, validation, operation replay, read-only read, list delta, supersede and SQLite restart passed; full bytes=${JSON.stringify(full).length}, summary bytes=${JSON.stringify(lite).length}`);
  }finally{mcp?.kill();if(daemon?.exitCode===null){await stop();}await rm(root,{recursive:true,force:true});}
 });

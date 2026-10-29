@@ -126,17 +126,19 @@ async fn read_does_not_consume_or_ack_and_list_delta_pages_are_consistent() {
     assert!(lite["agents"][0].get("pending").is_none());
     let revision = lite["revision"].clone();
     let epoch = lite["epoch"].clone();
+    let filter = lite["filter"].clone();
+    let idle = a.query(json!({"status":"idle"})).await.unwrap();
     let unchanged = a
-        .query(json!({"sinceRevision":revision,"sinceEpoch":epoch,"summaryOnly":true}))
+        .query(json!({"taskIds":[task],"sinceRevision":revision,"sinceEpoch":epoch,"sinceFilter":filter,"summaryOnly":true}))
         .await
         .unwrap();
     assert_eq!(unchanged["unchanged"], true);
     a.send(&task, "additional", "queue", None).await.unwrap();
-    let delta = a.query(json!({"taskIds":[task],"sinceRevision":revision,"sinceEpoch":epoch,"summaryOnly":true})).await.unwrap();
+    let delta = a.query(json!({"taskIds":[task],"sinceRevision":revision,"sinceEpoch":epoch,"sinceFilter":filter,"summaryOnly":true})).await.unwrap();
     assert_eq!(delta["agents"].as_array().unwrap().len(), 1);
     assert_eq!(delta["agents"][0]["pendingCount"], 2);
     let hidden = a
-        .query(json!({"status":"idle","sinceRevision":revision,"sinceEpoch":epoch}))
+        .query(json!({"status":"idle","sinceRevision":idle["revision"],"sinceEpoch":idle["epoch"],"sinceFilter":idle["filter"]}))
         .await
         .unwrap();
     assert_eq!(hidden["removedTaskIds"], json!([task]));
@@ -145,14 +147,14 @@ async fn read_does_not_consume_or_ack_and_list_delta_pages_are_consistent() {
         .unwrap();
     assert_eq!(
         restart
-            .query(json!({"sinceRevision":revision,"sinceEpoch":epoch}))
+            .query(json!({"taskIds":[task],"summaryOnly":true,"sinceRevision":revision,"sinceEpoch":epoch,"sinceFilter":filter}))
             .await
             .unwrap()["fullRefreshRequired"],
         true
     );
     a.forget_workspace(workspace["id"].as_str().unwrap()).await;
     assert_eq!(
-        a.query(json!({"sinceRevision":revision,"sinceEpoch":epoch}))
+        a.query(json!({"taskIds":[task],"summaryOnly":true,"sinceRevision":revision,"sinceEpoch":epoch,"sinceFilter":filter}))
             .await
             .unwrap()["removedTaskIds"],
         json!([task])
@@ -182,6 +184,12 @@ async fn large_lightweight_fixture_paging_and_cursor_expiry() {
         .query(json!({"summaryOnly":true,"limit":7}))
         .await
         .unwrap();
+    let changed_filter = a
+        .query(json!({"summaryOnly":false,"limit":7,"cursor":first["nextCursor"]}))
+        .await
+        .unwrap();
+    assert_eq!(changed_filter["fullRefreshRequired"], true);
+    assert_eq!(changed_filter["reason"], "filter_changed");
     let mut ids = Vec::new();
     let mut page = first.clone();
     loop {
@@ -277,6 +285,14 @@ async fn delivery_race_and_restart_never_claim_cancellation_or_redeliver_unknown
     runtime.release.notify_one();
     assert_eq!(worker.await.unwrap().unwrap_err(), "transport_lost");
     assert_eq!(a.get(&task).await.unwrap().instructions[0].state, "unknown");
+    let key = snapshot.instructions[0].id.clone();
+    for action in ["consume", "cancel", "supersede"] {
+        let command = mutation(&a, &task, "t", &key, action).await;
+        assert_eq!(
+            a.instruction(&command).await.unwrap_err(),
+            "instruction_not_retractable"
+        );
+    }
 }
 #[tokio::test]
 async fn simultaneous_cancel_and_supersede_only_one_wins_and_sibling_is_denied() {
@@ -362,15 +378,19 @@ async fn list_rejects_invalid_boundaries_and_expires_old_revision() {
         .await
         .unwrap();
     a.send(&task, "one", "queue", None).await.unwrap();
+    let other = id();
+    let other_base = a.query(json!({"taskIds":[other]})).await.unwrap();
+    a.send(&task, "two", "queue", None).await.unwrap();
     let unrelated = a
         .query(
-            json!({"taskIds":[id()],"sinceRevision":full["revision"],"sinceEpoch":full["epoch"]}),
+            json!({"taskIds":[other],"sinceRevision":other_base["revision"],"sinceEpoch":other_base["epoch"],"sinceFilter":other_base["filter"]}),
         )
         .await
         .unwrap();
     assert_eq!(unrelated["agents"], json!([]));
     assert_eq!(unrelated["removedTaskIds"], json!([]));
     assert_eq!(unrelated["unchanged"], false);
+    assert_eq!(a.query(json!({"taskIds":[other],"summaryOnly":true,"sinceRevision":full["revision"],"sinceEpoch":full["epoch"],"sinceFilter":full["filter"]})).await.unwrap()["reason"], "filter_changed");
     a.close(&terminal).await.unwrap();
 }
 

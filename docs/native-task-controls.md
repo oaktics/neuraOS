@@ -42,7 +42,11 @@ revision and epoch. A concurrent change invalidates the cursor and returns
 `fullRefreshRequired: true`; discard incomplete pages and start again.
 
 For deltas, reuse the query response's `revision` as `sinceRevision` and `epoch`
-as `sinceEpoch`, keeping the same filters. Apply returned `agents` by ID and
+as `sinceEpoch`, and `filter` as `sinceFilter`, keeping the same filters.
+A changed or missing filter fingerprint returns `fullRefreshRequired: true`
+with `reason: filter_changed`; changing a filter needs a fresh baseline, since
+unchanged tasks matching the new filter would otherwise be missing from a delta.
+Apply returned `agents` by ID and
 remove `removedTaskIds`. Removal IDs include changed tasks no longer matching
 the filter, even if the client did not previously cache that ID. They also
 include actual registry deletion. Deleting an absent cache ID is harmless.
@@ -51,7 +55,7 @@ An empty full result (`delta: false`) differs from no new changes
 with `unchanged: false`; still advance the revision after all pages are applied.
 The change journal retains the last 4096 changes. Old/future revisions, missing
 or mismatched epochs and restart boundaries require an explicit full refresh.
-Only then restart without `sinceRevision`, `sinceEpoch` and `cursor`.
+Only then restart without `sinceRevision`, `sinceEpoch`, `sinceFilter` and `cursor`.
 
 Filtering/projection happen under the daemon's registry lock before serialization;
 summary mode never clones or serializes the long body fields. Query responses
@@ -104,7 +108,11 @@ persisted `delivering` to `unknown`, never back to queued. Claude persists
 **dispatch, not proof of actual CLI receipt or completion**. Lost Channels responses are
 not retried automatically. Both providers retain instruction ID and history.
 Delivered/unknown/in-flight instructions cannot be reported as successfully
-cancelled or superseded. Explicit self-consume records actual processing.
+cancelled or superseded. Explicit self-consume is the owner's processing
+acknowledgment, not daemon proof of external side effects.
+No lifecycle operation rolls back or stops already executing CLI work. Unknown
+Codex delivery rejects consume as well as cancel/supersede; inspect the
+conversation and provider state instead of treating uncertainty as success.
 
 Lifecycle HTTP operations complete their registry write and operation journal
 even when the caller disconnects. A process crash between those commits retains
@@ -122,11 +130,20 @@ cancels all queued instructions and watches, now retaining cancellation history.
   read-only read/list, deletion/hidden-task deltas, paging and cursor expiration,
   count/byte retention with unconsumed/unknown bodies preserved across restart.
 - 40 stopped tasks with long pending/report bodies: measured JSON response sizes
-  **1,906,328 bytes full / 19,768 bytes summary** in the isolated Rust fixture.
+  **1,906,404 bytes full / 19,844 bytes summary** in the isolated Rust fixture.
   These are UTF-8 byte lengths for this fixture, not a general reduction target.
+- `tests/native-rust/migration.test.mjs`: real Node → Rust → Node startup
+  roundtrip, seeding both old records without lifecycle fields and new records.
+  Verifies queued defaults, complete pending history, consumed/cancelled/
+  superseded/delivered/unknown history, delivering-to-unknown recovery, revision
+  and pruning counters. Native API/SQLite and rollback Node API/SQLite remain
+  equal even after a legacy `agent.ack` write. Existing journal/output/settings
+  assertions remain. This tests rollback data preservation, not availability of
+  the new lifecycle API in the legacy runtime.
 - `tests/native/task-control.test.mjs`: real native daemon + native MCP stdio +
   synthetic external CLI; tools/list descriptions, HTTP and MCP diagnostics,
-  same-operation replay, supersede replay, SQLite restart persistence and query
+  same-operation replay, supersede replay, no-token HTTP rejection, launch-bound
+  MCP caller spoof rejection, SQLite restart persistence and query
   forwarding. It does not contact a model or use an installed daemon profile.
 
 Run with `cargo test --manifest-path crates/native-core/Cargo.toml -j 2 --lib`

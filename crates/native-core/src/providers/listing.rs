@@ -11,6 +11,7 @@ struct Options {
     summary_only: bool,
     since_revision: Option<u64>,
     since_epoch: Option<String>,
+    since_filter: Option<String>,
     limit: Option<usize>,
     cursor: Option<String>,
 }
@@ -39,6 +40,11 @@ impl Agents {
         {
             return Err("invalid_list_options".into());
         }
+        if let Some(ids) = &mut o.task_ids {
+            ids.sort();
+            ids.dedup();
+        }
+        let filter = format!("{:x}", Sha256::digest(json!({"taskIds":o.task_ids,"workspaceId":o.workspace_id,"status":o.status,"summaryOnly":o.summary_only}).to_string().as_bytes()));
         let cursor = o.cursor.take();
         let fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&o).unwrap()));
         let s = self.state.lock().await;
@@ -52,7 +58,9 @@ impl Agents {
         if let Some(cursor) = cursor {
             let c: Value = serde_json::from_str(&cursor).map_err(|_| "invalid_list_cursor")?;
             if c["filter"] != fingerprint {
-                return Err("invalid_list_cursor".into());
+                return Ok(
+                    json!({"agents":[],"removedTaskIds":[],"revision":revision,"epoch":s.list_epoch,"fullRefreshRequired":true,"reason":"filter_changed"}),
+                );
             }
             if c["revision"] != revision || c["epoch"] != s.list_epoch {
                 return Ok(
@@ -67,6 +75,11 @@ impl Agents {
         if expired {
             return Ok(
                 json!({"agents":[],"removedTaskIds":[],"revision":revision,"epoch":s.list_epoch,"fullRefreshRequired":true,"reason":"revision_expired"}),
+            );
+        }
+        if o.since_revision.is_some() && o.since_filter.as_deref() != Some(&filter) {
+            return Ok(
+                json!({"agents":[],"removedTaskIds":[],"revision":revision,"epoch":s.list_epoch,"fullRefreshRequired":true,"reason":"filter_changed"}),
             );
         }
         let mut ids: Vec<String> = if let Some(after) = o.since_revision {
@@ -120,7 +133,7 @@ impl Agents {
                 .to_string()
         });
         Ok(
-            json!({"agents":rows,"removedTaskIds":removed,"revision":revision,"epoch":s.list_epoch,"delta":o.since_revision.is_some(),"unchanged":o.since_revision == Some(revision),"fullRefreshRequired":false,"nextCursor":next,"currentSessionIds":current}),
+            json!({"agents":rows,"removedTaskIds":removed,"revision":revision,"epoch":s.list_epoch,"filter":filter,"delta":o.since_revision.is_some(),"unchanged":o.since_revision == Some(revision),"fullRefreshRequired":false,"nextCursor":next,"currentSessionIds":current}),
         )
     }
 }

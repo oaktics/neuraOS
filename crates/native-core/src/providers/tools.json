@@ -74,7 +74,7 @@
   },
   {
     "name": "task_list",
-    "description": "Discover ALL registered Codex and Claude sessions, regardless of launch order or parent. A completed turn does not prove the task is done. Optional filters and summaryOnly run in the daemon without reading reports. Nonempty options use a separate list revision; reuse revision and epoch with identical filters for sinceRevision/sinceEpoch. Delta removedTaskIds includes deleted or no-longer-matching tasks. Page with nextCursor and identical options. On fullRefreshRequired discard cached pages and retry without cursor/sinceRevision. Empty arguments retain the full legacy response.",
+    "description": "Discover ALL registered Codex and Claude sessions, regardless of launch order or parent. A completed turn does not prove the task is done. Optional filters and summaryOnly run in the daemon without reading reports. Nonempty options use a separate list revision; reuse revision, epoch and filter for sinceRevision/sinceEpoch/sinceFilter. Delta removedTaskIds includes deleted or no-longer-matching tasks. Page with nextCursor and identical options. On fullRefreshRequired discard cached pages and retry without cursor/sinceRevision. Empty arguments retain the full legacy response.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -117,6 +117,10 @@
         "sinceEpoch": {
           "type": "string",
           "description": "Use epoch from the same filtered response with sinceRevision; missing/mismatched epoch requires full refresh."
+        },
+        "sinceFilter": {
+          "type": "string",
+          "description": "Pass filter from the previous query response with sinceRevision; changed or missing filter requires full refresh."
         }
       },
       "required": [],
