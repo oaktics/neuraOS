@@ -11,6 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{oneshot, Mutex};
+#[path = "process_tree/supervisor.rs"]
+mod supervisor;
+pub use supervisor::{process_supervisor, reserve, ProcessReservation};
 pub const OWNER_ENV: &str = "NEURA_PROCESS_OWNER";
 type Result<T> = std::result::Result<T, String>;
 
@@ -38,7 +41,7 @@ impl ProcessTree {
         Self::attach(pid, Some(token), None)
     }
     fn attach(pid: u32, token: Option<String>, group: Option<Identity>) -> Result<Self> {
-        if pid <= 1 || pid == std::process::id() {
+        if (pid <= 1 && token.is_none()) || pid == std::process::id() {
             return Err("refusing to own self/init".into());
         }
         let monitor = MONITOR
@@ -54,6 +57,20 @@ impl ProcessTree {
             monitor,
             stopped: Mutex::new(None),
         })))
+    }
+    fn reserved(token: String) -> Result<Self> {
+        Self::attach(0, Some(token), None)
+    }
+    async fn attach_pid(&self, pid: u32) -> Result<()> {
+        if pid <= 1 || pid == std::process::id() {
+            return Err("invalid attach pid".into());
+        }
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .monitor
+            .send(Control::Attach(self.0.id.clone(), pid, tx));
+        rx.await
+            .map_err(|_| "process monitor stopped".to_string())?
     }
     /// Idempotent and cancellation-safe. TERM once, KILL after 1.5 seconds;
     /// resolves after every discovered identity has exited, or returns an error.
@@ -79,6 +96,7 @@ struct Monitor {
     kq: i32,
 }
 enum Control {
+    Attach(String, u32, oneshot::Sender<Result<()>>),
     Add(
         String,
         u32,
@@ -306,6 +324,24 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                         },
                     );
                     let _ = ack.send(Ok(()));
+                }
+                Control::Attach(id, pid, ack) => {
+                    let result = if let Some(tree) = trees.get_mut(&id) {
+                        if tree.stopping.is_some() {
+                            Err("process lease already stopping".into())
+                        } else {
+                            if let Some(root) = identity(pid as i32) {
+                                if root.pid == root.group {
+                                    tree.group = Some(root);
+                                }
+                                tree.owned.insert(root.unique, root);
+                            }
+                            Ok(())
+                        }
+                    } else {
+                        Err("unknown process lease".into())
+                    };
+                    let _ = ack.send(result);
                 }
                 Control::Stop(id, waiter) => {
                     if let Some(tree) = trees.get_mut(&id) {

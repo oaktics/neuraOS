@@ -6,7 +6,19 @@ the parent; EOF, SIGTERM/HUP/INT or leader exit triggers cleanup. The program's
 stdin is `/dev/null`; stdout/stderr are inherited. Exit status is preserved.
 No Node runtime or `ps` subprocess is involved.
 
-For direct commands, set `OWNER_ENV` (`NEURA_PROCESS_OWNER`) to a fresh UUID
+For daemon-owned external commands, first call `reserve().await` to receive a
+`ProcessReservation` from the single shared native `process-supervisor` helper.
+This waits for the reservation ACK **before spawn**. Inject
+`OWNER_ENV=reservation.token()`, spawn while retaining the unreaped child handle,
+then immediately `reservation.attach(pid).await`. Keep the cloneable lease until
+exit; await `stop()` for confirmed cleanup, or let final Drop enqueue cleanup.
+The helper is spawned directly, never recursively under provider-host. Parent
+pipe EOF (including daemon SIGKILL) stops all reservations, including a child
+spawned before attach. IPC control messages are small lifecycle records and
+never carry provider output. The helper's native monitor is shared across all
+reservations, with no fixed live-process cap.
+
+Low-level direct `ProcessTree` users set `OWNER_ENV` (`NEURA_PROCESS_OWNER`) to a fresh UUID
 before spawning, then call `ProcessTree::new_with_token(pid, token)` immediately.
 Keep the cloneable handle until exit. `stop().await` is idempotent, serializes
 concurrent callers, and continues in the native monitor if the await is cancelled.
@@ -19,6 +31,12 @@ snapshots follow events, control commands, shutdown deadlines and a 60-second
 consistency check. Idle 10/20/32-tree fixtures observed zero snapshots in 1.6s,
 versus the old per-child 250ms `ps` loop's at least 60/120/192 subprocess launches.
 There is no fixed concurrency cap. NOTE_TRACK/NOTE_CHILD are not used.
+provider-host remains a dedicated live PGID leader while its program runs. It
+can recover non-setsid fast orphans, including restricted Apple binaries, by
+matching that still-live leader's unique identity. A cached PGID alone never
+proves ownership, and group-wide kill is never used; each member is individually
+signalled through its audit token. Direct trees use a group only while their
+original dedicated leader is alive.
 
 An inherited random ownership token recovers detached/reparented descendants
 before their transient ancestry can be observed. KERN_PROCARGS2 buffers are
@@ -43,7 +61,10 @@ Evidence: `tests/native/provider-process-tree.test.mjs` compiles the synthetic C
 fixture and verifies EOF, SIGTERM, parent SIGKILL, setsid/double-fork and natural
 leader exit; all owned PIDs disappear and writes stop despite ignored TERM.
 Rust tests exercise stale audit generation, concurrent/idempotent stop, Drop,
-and independent 10/20/32 idle monitoring. These fixtures never invoke models.
+and independent 10/20/32 idle monitoring. Shared-helper subprocess tests stop
+10 reservations on pipe EOF, 20 after parent SIGKILL, 32 on concurrent timeout
+requests, and an orphan created between reserve and attach. All terminate
+TERM-ignoring detached descendants and verify that writes cease. These fixtures never invoke models.
 
 Primary API definitions and behavior:
 - https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/event.h
