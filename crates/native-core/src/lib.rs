@@ -8,3 +8,6 @@ pub mod pty;
 pub mod store;
 pub mod usage;
 pub mod workspace;
+
+#[cfg(test)]
+mod pty_tests;
