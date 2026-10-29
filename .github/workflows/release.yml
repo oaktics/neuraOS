@@ -38,6 +38,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.required == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-15
+    env:
+      NEURA_SIGN_IDENTITY: ${{ github.event_name == 'pull_request' && '-' || vars.APPLE_SIGN_IDENTITY }}
+      NEURA_REQUIRE_DEVELOPER_ID: ${{ github.event_name == 'pull_request' && '0' || '1' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -52,7 +55,19 @@ jobs:
       - run: pnpm test
       - run: node --test tests/release/*.test.mjs
       - run: xcrun metal --version || xcodebuild -downloadComponent MetalToolchain
-      - run: pnpm test:macos
+      - uses: ./.github/actions/native-cache
+      - run: pnpm test:macos --force-resolved-versions
+      - name: Import release certificate and notarization credentials
+        if: github.event_name != 'pull_request'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          node scripts/native/signing/ci-keychain.mjs setup
+          echo "NEURA_SIGN_KEYCHAIN=$RUNNER_TEMP/neura-signing.keychain-db" >> "$GITHUB_ENV"
       - run: pnpm build
         env:
           NEURA_BUILD_NUMBER: ${{ github.run_number }}
@@ -90,16 +105,27 @@ jobs:
         with:
           name: neuraOS-symbols-arm64
           path: apps/macos/dist/neuraOS.app.dSYM
-          retention-days: 90
+          retention-days: 1
+      - name: Notarize and staple release
+        if: github.event_name != 'pull_request'
+        env:
+          NEURA_NOTARY_PROFILE: neura-release
+        run: node scripts/native/signing/notarize.mjs
+      - name: Remove release keychain
+        if: always() && github.event_name != 'pull_request'
+        run: node scripts/native/signing/ci-keychain.mjs cleanup
       - name: Archive
+        if: github.event_name != 'pull_request'
         run: |
           test "$(node -p process.arch)" = 'arm64'
           ditto -c -k --sequesterRsrc --keepParent apps/macos/dist/neuraOS.app neuraOS-darwin-arm64.zip
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: neuraOS-arm64
           path: neuraOS-darwin-arm64.zip
-          retention-days: 7
+          compression-level: 0
+          retention-days: 1
   build:
     if: always()
     needs: [changes, native-build]

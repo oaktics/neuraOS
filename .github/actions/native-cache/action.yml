@@ -1,0 +1,20 @@
+name: Native build cache
+description: Reuse CEF and Swift compilation with matching toolchain and dependencies
+runs:
+  using: composite
+  steps:
+    - id: toolchain
+      shell: bash
+      run: |
+        fingerprint=$( { xcodebuild -version; swift --version; xcrun --show-sdk-version; } | shasum -a 256 | cut -d ' ' -f 1)
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/neuraOS/cef
+        key: cef-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/native/chromium/version.json') }}
+    - uses: actions/cache@v4
+      with:
+        path: apps/macos/.build
+        key: swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-${{ hashFiles('apps/macos/Sources/**', 'apps/macos/Tests/**') }}
+        restore-keys: |
+          swift-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-

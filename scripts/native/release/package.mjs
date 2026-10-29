@@ -1,4 +1,4 @@
-import {signApplication} from '../signing/sign.mjs';
+import {signApplication, selectIdentity} from '../signing/sign.mjs';
 import {cp, mkdir, readFile, realpath, readdir, symlink, rm, copyFile, writeFile, chmod} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {join, resolve, dirname, relative} from 'node:path';
@@ -7,6 +7,7 @@ import {execFileSync} from 'node:child_process';
 // Copy the installed, lockfile-resolved dependency graph, including native addons.
 // No registry resolution or install scripts run during packaging or installation.
 const root = resolve(import.meta.dirname, '../../..');
+const signingIdentity = selectIdentity();
 const app = resolve(process.env.NEURA_APP_OUTPUT ?? join(root, 'apps/macos/dist/neuraOS.app'));
 const runtime = join(app, 'Contents/Resources/Runtime');
 await rm(runtime, {recursive: true, force: true});
@@ -59,7 +60,7 @@ async function signTree(path) {
     }
   }
 }
-await signTree(runtime);
-signApplication(app);
+if (signingIdentity === '-') await signTree(runtime);
+signApplication(app, signingIdentity);
 execFileSync('codesign', ['--verify', '--deep', '--strict', app], {stdio: 'inherit'});
 console.log(app);

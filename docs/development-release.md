@@ -19,12 +19,13 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 - `staging`向け機能PRでは型チェック、Daemon等のテスト、更新処理のテスト、Swiftテスト、アプリの配布ビルド・パッケージ作成・同梱Daemonのsmoke試験を行う。週次・手動の通常CIも同じフル検証を行う。
 - `staging`へのpushではmacOSで型チェック・Daemon等のテスト・更新処理のテストだけを行う。PTY統合テストをアプリと同じOSで検証する。Swift・配布パッケージの再検証は省略する。
-- `main`向けPRでは`native-release`だけが動き、上記のフル検証にChromiumのsmoke試験とZIP作成を加える。マージ後の`main`では公開対象コミットを再検証して配布する。
+- `main`向けPRでは`native-release`だけが動き、上記のフル検証にChromiumのsmoke試験を加える。マージ後の`main`では公開対象コミットを証明書付きでビルド・検証し、公証後のZIPを配布する。PRでは公開用ZIPの圧縮・転送を省略する。
 - 機能ブランチのpushではCIを起動せず、PR作成・更新で実行する。`staging`へのマージ後は統合されたソースを軽量検証する。`main`へのpushはリリース側で検証する。
 - ルートのMarkdown、`docs/`、PRテンプレート、Issueテンプレートだけの変更は、軽量な変更判定と必須チェックの完了だけを行う。macOS検証・成果物作成・Release公開を省略する。その他の場所にあるMarkdown（テストfixture等）は検証対象。mainのpushは直前のpushではなく最後に公開したReleaseとの差分で判定し、待機中のコード変更がドキュメントpushで置き換わっても未公開コードを配布する。初回Releaseは必ず検証・公開する。週次・手動実行は変更内容によらず検証する。
 - 必須チェック`macos`と`build`は結果集約用のUbuntuジョブ。変更判定の失敗や必要な検証の失敗・キャンセルを成功として扱わない。ワークフロー自体をpath filterで省略しないため、ドキュメントPRでも必須チェックがPendingのまま残らない。
 - 同じPR／ブランチの通常CIと、同じリリースPRの配布検証は、新しい更新が来たら古い実行をキャンセルする。公開処理を含む`main`のリリースは、実行中の1件をキャンセルせず完了させる。待機は最新の1件だけを保持し、さらに更新が来た場合は古い待機分を置き換える。すべての中間コミットを個別配布する保証はなく、まとめて最新の変更を配布する運用とする。
-- pnpmのダウンロードキャッシュを再利用する。Swiftテストはネイティブ側のコンパイルも行うため、通常CIでもコンパイル時間は必要。
+- pnpm、CEF SDK、Swiftの`.build`をキャッシュする。SwiftキャッシュはOS・CPU・Xcode/Swift/SDK・依存lockfile・CEFバージョンを分離し、同じ条件の過去のコンパイル結果を再利用する。ソース変更の判定と再ビルドはSwiftPMが行い、テストは毎回実行する。DebugテストとReleaseビルドの検証は維持する。
+- ZIPは既に圧縮済みのためartifact転送時の再圧縮を省く。配布ZIPとcrash symbolsのActions artifactは1日保持とし、不要な長期保存を減らす。公開済みGitHub ReleaseのZIPは引き続き取得できる。
 - 手動の通常CIは任意のブランチで実行できる。手動リリースは`main`を指定する。`staging`等を選んだ場合はビルド・公開ともスキップする。
 
 ## 配布と初回導入
@@ -35,18 +36,35 @@ Node.js、tsx、Daemon、依存パッケージとネイティブPTYをアプリ�
 
 公開リポジトリはGitHub APIとHTTPSから直接更新する。非公開リポジトリは`gh auth login --hostname github.com`済みのGitHub CLIが必要。認証情報をアプリへコピー・保存しない。公開／非公開の設定自体はこの変更では変更しない。
 
-現在は個人利用向けad-hoc署名で、Apple Developer ID署名・公証は未導入。ダウンロードしたアプリの初回起動がGatekeeperで止まった場合は、出所を確認してmacOSの「システム設定 → プライバシーとセキュリティ」から許可する。一般配布で警告なしに起動するにはDeveloper ID証明書と公証用資格情報の設定が別途必要。
+公開用ビルドはDeveloper ID Application署名・Appleの公証・チケット添付・Gatekeeper検証を必須とする。資格情報が未設定、署名失敗、公証がAccepted以外の場合は公開しない。設定手順とローカル開発時のKeychain許可については[macOS署名と公証](macos-signing.md)を参照。通常のPR検証は明示的なad-hoc署名で実行し、署名用の秘密鍵を渡さない。
 
 ## 更新の保証範囲
 
 - 更新番号はreleaseワークフローの`github.run_number`。アプリへ同じ番号を埋め込み、現在より新しい番号だけを案内する。
 - Apple Silicon向けの成果物をDraft ReleaseへアップロードしてからLatestとして公開する。ビルド・試験失敗時は公開しない。
-- アーキテクチャ、GitHub assetのSHA-256、署名整合性、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、Developer IDによる作者証明ではない。
+- アーキテクチャ、GitHub assetのSHA-256、署名整合性、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、更新プログラム自体は署名者のTeam IDを固定していない。公開時のDeveloper ID署名・公証・Gatekeeper検証とは別の保証範囲である。
 - 明示的な更新操作後にアプリを終了し、ユーザー所有の`~/Applications/neuraOS.app`を入れ替え、Daemonを再登録する。実行中のPTY／エージェントは終了する。保存済みプロジェクト・履歴は既存のDeveloperディレクトリを引き継ぐ。
 - 旧アプリは`~/Applications/neuraOS.app.previous`へ保存する。起動確認失敗時はアプリとLaunchAgent設定を戻す。更新前の実行プロセスそのものやDBの巻き戻しはしない。将来のDB変更は旧版互換の追加方式とし、破壊的な変更には別途バックアップ・復元設計が必要。
 - 更新失敗は`~/Library/Application Support/neuraOS/Updates/last-error.txt`へ記録する。インストーラーが強制終了した場合は、更新処理が動いていないことを確認して同フォルダの`install.lock`を削除して再試行する。
 
 ## ローカル検証
+
+### 追加料金なしで待ち時間を減らす選択肢
+
+2026-10-29時点の比較。直近の[release実行](https://github.com/oaktics/neuraOS/actions/runs/40811010465)は約8分37秒で、Swiftテスト2分20秒、Releaseビルド1分49秒、ZIP圧縮34秒・artifact upload11秒だった。公証導入前の実測であり、公証待ち時間は含まない。キャッシュ追加後の短縮幅はCIで別途測る。
+
+| 方式 | 追加料金なしの範囲 | neuraOSへの適合 |
+| --- | --- | --- |
+| GitHub標準runner＋キャッシュ | 公開リポジトリの標準runner実行は無料 | 現構成を維持できる。まずCEF・Swiftキャッシュと不要なZIP処理を削減 |
+| Xcode Cloud | Developer Programに月25 compute hoursが付属 | Xcode project/workspace・共有scheme・archive設定が必要。現状のSwiftPM＋独自パッケージ処理からの移行工数がある |
+| CircleCI Free | 月30,000 credits。M4 Pro Mediumは200 credits/分なので計算上約150分/月（他用途の消費前） | 現在の頻度では枠が小さい。移すだけで高速になる実測根拠はない |
+| 自前Mac runner | GitHubの実行料金は無料。所有Macの電力・保守は別 | キャッシュを保持できるが、常時稼働と他作業との負荷分離が必要。署名鍵のある普段のユーザーで外部PRを自動実行しない |
+
+GitHub以外への移行はまだ行っていない。まず標準runnerでキャッシュ後の時間を比較し、必要ならXcode Cloudまたは専用Macで同じコミットを試す。公証はApple側の処理なので、CI提供元を変更してもその待ち時間は残る。
+
+出典: [GitHub billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)、[self-hosted runners](https://docs.github.com/en/actions/concepts/runners/self-hosted-runners)、[Xcode Cloud](https://developer.apple.com/xcode-cloud/)、[Xcode Cloudの構成要件](https://developer.apple.com/documentation/xcode/Setting-up-your-project-to-use-Xcode-Cloud)、[CircleCI Free](https://circleci.com/pricing/)、[CircleCI単価](https://circleci.com/pricing/price-list/)。無料の実行枠とartifact/cache容量は別条件。Actions artifactの保持を短くし、cacheを10 GBの標準枠内で運用する。
+
+### コマンド
 
 ```sh
 pnpm install --frozen-lockfile
