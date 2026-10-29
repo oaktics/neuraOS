@@ -38,6 +38,7 @@ Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・termin
 | `workspace_create` | agentを起動せず登録worktreeを作成 |
 | `task_spawn` | worktree作成とproviderを選んだagent起動・初期指示 |
 | `task_start` | 既存worktreeで起動、停止済みの会話を再開 |
+| `task_instruction` | exact ID/revision/turn/stateによる指示のconsume・cancel・supersede（[契約と権限](native-task-controls.md)） |
 | `task_send` | 実行指示の順番待ち／実行中への方向修正（進捗報告には使わない） |
 | `task_report` | 進捗・完了を報告専用受信箱へ送信 |
 | `task_ack` | 読んだ報告IDを受領確認（実行指示は削除しない） |

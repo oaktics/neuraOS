@@ -5,6 +5,10 @@ use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 
 const REPORT_LIMIT: usize = 32;
+// Only terminal instruction records are evictable. Unconsumed/uncertain work
+// must never disappear to satisfy a history budget.
+const INSTRUCTION_HISTORY_COUNT: usize = 128;
+const INSTRUCTION_HISTORY_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
@@ -34,10 +38,24 @@ pub struct Watch {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default = "queued")]
+    pub state: String,
+    #[serde(default)]
+    pub history: Vec<Value>,
     pub id: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub report: bool,
+}
+fn queued() -> String {
+    "queued".into()
+}
+impl Message {
+    fn transition(&mut self, state: &str, actor: Option<&str>) {
+        self.state = state.into();
+        self.history
+            .push(json!({"state":state,"at":stamp(),"actorTaskId":actor}));
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +85,12 @@ pub struct Agent {
     #[serde(default)]
     pub pending: Vec<Message>,
     #[serde(default)]
+    pub instructions: Vec<Message>,
+    #[serde(default)]
+    pub instruction_history_pruned: u64,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
     pub requests: Vec<Value>,
     #[serde(default)]
     pub watching: Vec<Watch>,
@@ -94,6 +118,9 @@ struct ClaudeLive {
 }
 #[derive(Default)]
 struct Registry {
+    list_epoch: String,
+    list_revision: u64,
+    changes: std::collections::VecDeque<(u64, String, String, String)>,
     agents: HashMap<String, Agent>,
     claude: HashMap<String, ClaudeLive>,
     codex: HashSet<String>,
@@ -106,7 +133,11 @@ pub struct Agents {
 impl Agents {
     pub async fn new(store: Store, runtime: Runtime) -> Result<Self> {
         let rows = store.call("list", json!({"table":"agents"})).await?;
-        let mut state = Registry::default();
+        let mut state = Registry {
+            list_epoch: id(),
+            list_revision: (now() as u64) * 1000,
+            ..Default::default()
+        };
         for row in rows.as_array().ok_or("invalid agents")? {
             // Keep the persisted pre-recovery value as save's comparison baseline.
             // Inserting the recovered value here would make save skip the DB write.
@@ -126,6 +157,11 @@ impl Agents {
                 a.turn_id = None;
                 a.requests.clear();
                 migrate(&mut a);
+                for m in &mut a.instructions {
+                    if m.state == "delivering" {
+                        m.transition("unknown", None);
+                    }
+                }
                 this.save(&mut state, a).await?;
             }
             this.deliver(&mut state).await?;
@@ -133,6 +169,12 @@ impl Agents {
         Ok(this)
     }
     async fn save(&self, s: &mut Registry, mut a: Agent) -> Result<()> {
+        prune_instruction_history(&mut a);
+        for m in &mut a.pending {
+            if m.history.is_empty() {
+                m.transition("queued", None);
+            }
+        }
         if s.agents
             .get(&a.id)
             .is_some_and(|old| serde_json::to_value(old).ok() == serde_json::to_value(&a).ok())
@@ -140,9 +182,11 @@ impl Agents {
             return Ok(());
         }
         a.updated_at = stamp();
+        a.revision = s.agents.get(&a.id).map_or(1, |old| old.revision + 1);
         self.store
             .call("put", json!({"table":"agents","value":a}))
             .await?;
+        changed(s, &a.id, &a.workspace_id, &a.terminal_id);
         s.agents.insert(a.id.clone(), a);
         Ok(())
     }
@@ -181,9 +225,10 @@ impl Agents {
                 return Err("agent_already_running".into());
             }
         }
-        s.claude.insert(
-            terminal.into(),
-            ClaudeLive {
+        set_claude(
+            &mut s,
+            terminal,
+            Some(ClaudeLive {
                 workspace,
                 parent,
                 session: None,
@@ -197,7 +242,7 @@ impl Agents {
                 interrupted: 0,
                 activity: 0,
                 provider_turn: None,
-            },
+            }),
         );
         Ok(())
     }
@@ -283,9 +328,11 @@ impl Agents {
                     id: id(),
                     text,
                     report: false,
+                    state: queued(),
+                    history: vec![],
                 });
             }
-            s.claude.insert(terminal.into(), live.clone());
+            set_claude(&mut s, terminal, Some(live.clone()));
             self.save(&mut s, a).await?;
             self.parent_watch(&mut s, session, live.parent.as_deref())
                 .await?;
@@ -398,7 +445,7 @@ impl Agents {
             }
             _ => {}
         }
-        s.claude.insert(terminal.into(), live);
+        set_claude(&mut s, terminal, Some(live));
         self.save(&mut s, a.clone()).await?;
         self.update_terminal(terminal,json!({"activity":if ["idle","working","waiting"].contains(&a.status.as_str()){a.status.as_str()}else{"unknown"}}),notification).await?;
         if matches!(name, "Stop" | "StopFailure") {
@@ -419,7 +466,7 @@ impl Agents {
             if live.probe_sent.is_none() && a.status == "idle" && a.turn_id.is_none() {
                 live.probe_sent = Some(now());
                 let content=format!("neuraOS Channels receipt test. Call ONLY the neuraos channel_ack tool with nonce {}, then end this turn. Do not perform work, delegate, or report completion. Real instructions remain queued until receipt is confirmed.",live.nonce);
-                s.claude.insert(terminal.into(), live);
+                set_claude(&mut s, terminal, Some(live));
                 return Ok(json!({"content":content,"meta":{"kind":"probe","task_id":session}}));
             }
             if live.probe_sent.is_some_and(|at| now() - at > 60000)
@@ -438,6 +485,17 @@ impl Agents {
             .iter()
             .position(|m| !m.report)
             .map(|i| a.pending.remove(i));
+        if let Some(mut m) = message.clone() {
+            m.transition(
+                if a.provider == "claude" {
+                    "delivered"
+                } else {
+                    "delivering"
+                },
+                None,
+            );
+            a.instructions.push(m);
+        }
         let reports: Vec<_> = a.reports.iter().filter(|r| !r.notified).cloned().collect();
         if message.is_none() && reports.is_empty() {
             return Ok(json!({}));
@@ -445,6 +503,7 @@ impl Agents {
         live.started = now();
         a.status = "working".into();
         a.turn_id = Some(id());
+        let instruction_id = message.as_ref().map(|m| m.id.clone());
         let (content, kind) = if let Some(m) = message {
             (m.text, "instruction")
         } else {
@@ -454,8 +513,12 @@ impl Agents {
             (report_payload(&reports).to_string(), "reports")
         };
         self.save(&mut s, a).await?;
-        s.claude.insert(terminal.into(), live);
-        Ok(json!({"content":content,"meta":{"kind":kind,"task_id":session}}))
+        set_claude(&mut s, terminal, Some(live));
+        let mut meta = json!({"kind":kind,"task_id":session});
+        if let Some(key) = instruction_id {
+            meta["instruction_id"] = json!(key);
+        }
+        Ok(json!({"content":content,"meta":meta}))
     }
     pub async fn acknowledge_channel(&self, terminal: &str, nonce: &str) -> Result<Value> {
         let mut s = self.state.lock().await;
@@ -473,7 +536,7 @@ impl Agents {
             let mut a = get(&s, live.session.as_ref().unwrap())?;
             a.channel_state = Some("connected".into());
             self.save(&mut s, a).await?;
-            s.claude.insert(terminal.into(), live);
+            set_claude(&mut s, terminal, Some(live));
         }
         Ok(json!({"ok":true}))
     }
@@ -679,6 +742,8 @@ impl Agents {
             id: message_id.clone(),
             text: text.into(),
             report: false,
+            state: queued(),
+            history: vec![],
         });
         self.save(&mut s, a).await?;
         drop(s);
@@ -696,10 +761,22 @@ impl Agents {
             .iter()
             .position(|m| !m.report)
             .map(|i| a.pending.remove(i));
+        if let Some(mut m) = message.clone() {
+            m.transition(
+                if a.provider == "claude" {
+                    "delivered"
+                } else {
+                    "delivering"
+                },
+                None,
+            );
+            a.instructions.push(m);
+        }
         let reports: Vec<_> = a.reports.iter().filter(|r| !r.notified).cloned().collect();
         if message.is_none() && reports.is_empty() {
             return Ok(());
         }
+        let delivered_id = message.as_ref().map(|m| m.id.clone());
         let params = if let Some(m) = message {
             json!({"threadId":target,"input":[{"type":"text","text":m.text}],"clientUserMessageId":m.id})
         } else {
@@ -711,9 +788,35 @@ impl Agents {
         a.status = "working".into();
         self.save(&mut s, a.clone()).await?;
         drop(s);
-        let result = self.runtime.rpc(&a.terminal_id, "turn/start", params).await;
+        let result = self
+            .runtime
+            .rpc(&a.terminal_id, "turn/start", params)
+            .await
+            .and_then(|v| {
+                if v["turn"]["id"]
+                    .as_str()
+                    .is_some_and(crate::contracts::valid_uuid)
+                {
+                    Ok(v)
+                } else {
+                    Err("instruction_delivery_unknown".into())
+                }
+            });
         let mut s = self.state.lock().await;
         let mut current = get(&s, target)?;
+        if let Some(key) = delivered_id {
+            if let Some(m) = current.instructions.iter_mut().find(|m| m.id == key) {
+                m.transition(
+                    if result.is_ok() {
+                        "delivered"
+                    } else {
+                        "unknown"
+                    },
+                    None,
+                );
+            }
+            self.save(&mut s, current.clone()).await?;
+        }
         match result {
             Ok(result) => {
                 let turn = result["turn"]["id"].as_str();
@@ -739,7 +842,10 @@ impl Agents {
         if a.turn_id.as_deref() != Some(expected) {
             return Err("agent_turn_changed".into());
         }
-        a.pending.clear();
+        for mut m in a.pending.drain(..) {
+            m.transition("cancelled", None);
+            a.instructions.push(m);
+        }
         a.watching.clear();
         self.save(&mut s, a.clone()).await?;
         drop(s);
@@ -782,7 +888,7 @@ impl Agents {
         } else {
             a.turn_id = None;
         }
-        s.claude.insert(terminal.into(), live);
+        set_claude(&mut s, terminal, Some(live));
         self.save(&mut s, a).await?;
         if !probe {
             self.deliver(&mut s).await?;
@@ -1091,6 +1197,7 @@ impl Agents {
     pub async fn command(&self, command: &Value) -> Result<Value> {
         let target = command["agentId"].as_str().ok_or("agent_missing")?;
         match command["type"].as_str().unwrap_or("") {
+            "agent.instruction" => self.instruction(command).await,
             "agent.send" => {
                 self.send(
                     target,
@@ -1159,11 +1266,20 @@ impl Agents {
     }
     pub async fn forget_workspace(&self, workspace: &str) {
         let mut s = self.state.lock().await;
-        s.agents.retain(|_, a| a.workspace_id != workspace);
+        let removed: Vec<_> = s
+            .agents
+            .values()
+            .filter(|a| a.workspace_id == workspace)
+            .map(|a| (a.id.clone(), a.terminal_id.clone()))
+            .collect();
+        for (key, terminal) in removed {
+            s.agents.remove(&key);
+            changed(&mut s, &key, workspace, &terminal);
+        }
     }
     pub async fn close(&self, terminal: &str) -> Result<()> {
         let mut s = self.state.lock().await;
-        s.claude.remove(terminal);
+        set_claude(&mut s, terminal, None);
         s.codex.remove(terminal);
         let rows: Vec<_> = s
             .agents
@@ -1285,6 +1401,9 @@ fn fresh(session: &str, terminal: &str, workspace: &Value, provider: &str) -> Ag
         summary: None,
         parent_task_id: None,
         pending: vec![],
+        instructions: vec![],
+        instruction_history_pruned: 0,
+        revision: 0,
         requests: vec![],
         watching: vec![],
         reports: vec![],
@@ -1381,4 +1500,85 @@ fn follows_name(w: &Value) -> bool {
         suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit())
     });
     !explicit || leaf.starts_with("worktree-")
+}
+
+fn changed(s: &mut Registry, key: &str, workspace: &str, terminal: &str) {
+    s.list_revision += 1;
+    s.changes.push_back((
+        s.list_revision,
+        key.into(),
+        workspace.into(),
+        terminal.into(),
+    ));
+    while s.changes.len() > 4096 {
+        s.changes.pop_front();
+    }
+}
+#[path = "instructions.rs"]
+mod instructions;
+#[path = "listing.rs"]
+mod listing;
+
+fn prune_instruction_history(a: &mut Agent) {
+    let mut count = 0;
+    let mut bytes = 2; // enclosing JSON array
+    let mut keep = vec![true; a.instructions.len()];
+    // Completion order can differ from dispatch order. Retain most recently
+    // completed audit records using their final transition's timestamp.
+    let mut completed: Vec<_> = a
+        .instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.state.as_str(), "consumed" | "cancelled" | "superseded"))
+        .collect();
+    completed.sort_by(|(ia, a), (ib, b)| {
+        b.history
+            .last()
+            .and_then(|v| v["at"].as_str())
+            .cmp(&a.history.last().and_then(|v| v["at"].as_str()))
+            .then_with(|| ib.cmp(ia))
+    });
+    for (index, m) in completed {
+        let size = serde_json::to_vec(m).map_or(usize::MAX, |v| v.len() + usize::from(count > 0));
+        if count < INSTRUCTION_HISTORY_COUNT
+            && size <= INSTRUCTION_HISTORY_BYTES.saturating_sub(bytes)
+        {
+            count += 1;
+            bytes += size;
+        } else {
+            keep[index] = false;
+            a.instruction_history_pruned += 1;
+        }
+    }
+    let mut index = 0;
+    a.instructions.retain(|_| {
+        let retain = keep[index];
+        index += 1;
+        retain
+    });
+}
+
+// Live session membership is part of the list response independently of the
+// persisted Agent row. Journal both sides even when save() is a no-op.
+fn set_claude(s: &mut Registry, terminal: &str, next: Option<ClaudeLive>) {
+    let binding = |live: &ClaudeLive| {
+        live.session.as_ref().map(|key| {
+            (
+                key.clone(),
+                live.workspace["id"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+    };
+    let before = s.claude.get(terminal).and_then(binding);
+    let after = next.as_ref().and_then(binding);
+    if before != after {
+        for (key, workspace) in before.into_iter().chain(after) {
+            changed(s, &key, &workspace, terminal);
+        }
+    }
+    if let Some(live) = next {
+        s.claude.insert(terminal.into(), live);
+    } else {
+        s.claude.remove(terminal);
+    }
 }
