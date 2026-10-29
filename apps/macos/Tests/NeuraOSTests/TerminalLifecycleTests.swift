@@ -27,6 +27,29 @@ final class TerminalLifecycleTests: XCTestCase {
     private func output(_ text: String, cursor: Int) -> TerminalOutput {
         TerminalOutput(data: text, chunks: [TerminalChunk(data: text, cols: nil, rows: nil)], cursor: cursor, more: false, status: "running", cols: 100, rows: 30)
     }
+    @MainActor func testResponsiveReplayPreservesUTF8AndResizeWhileYielding() async {
+        let (session, view) = renderer()
+        let (_, reference) = renderer()
+        // A multibyte scalar crosses the 8192-byte feed boundary.
+        let text = String(repeating: "x", count: 8191) + "日本語😀\r\n" + String(repeating: "line\r\n", count: 2000)
+        let page = TerminalOutput(data: "", chunks: [TerminalChunk(data: text, cols: 100, rows: 30),
+            TerminalChunk(data: "final日本語", cols: 120, rows: 40)], cursor: 123, more: false, status: "running", cols: 120, rows: 40)
+        for chunk in page.chunks {
+            reference.getTerminal().resize(cols: chunk.cols!, rows: chunk.rows!)
+            reference.feed(text: chunk.data)
+        }
+        var yielded = false
+        let observer = Task { @MainActor in yielded = session.cursor == 0 }
+        await session.applyResponsive(page, to: view)
+        await observer.value
+        XCTAssertTrue(yielded)
+        XCTAssertEqual(session.cursor, 123)
+        XCTAssertTrue(session.caughtUp)
+        for row in 0..<30 {
+            XCTAssertEqual(view.getTerminal().getLine(row: row)?.translateToString(),
+                           reference.getTerminal().getLine(row: row)?.translateToString())
+        }
+    }
     @MainActor func testSwitchesRetainEmulatorCursorAndScrollback() {
         let (session, view) = renderer()
         session.apply(output((0..<100).map {"line-\($0)\r\n"}.joined(), cursor: 256), to: view)
