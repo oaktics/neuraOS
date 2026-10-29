@@ -1,0 +1,70 @@
+{
+  "kind": "legacy-daemon-pty-http",
+  "realProvider": false,
+  "realBatteryMeasurement": false,
+  "results": [
+    {
+      "children": 10,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 2245.605,
+      "httpStateP95Ms": 23.930708000000322,
+      "httpStateP99Ms": 25.09008300000005,
+      "inputP99Ms": 87.17933300000004,
+      "httpErrors": 0,
+      "changeMessages": 0,
+      "streamReady": 0,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    },
+    {
+      "children": 20,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 2964.6666250000007,
+      "httpStateP95Ms": 45.31829199999993,
+      "httpStateP99Ms": 156.0185420000007,
+      "inputP99Ms": 175.0350410000001,
+      "httpErrors": 0,
+      "changeMessages": 0,
+      "streamReady": 0,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    },
+    {
+      "children": 32,
+      "rowsPerTerminal": 1024,
+      "bytesPerRow": 2048,
+      "durationMs": 7985.8960000000025,
+      "httpStateP95Ms": 107.81108300000051,
+      "httpStateP99Ms": 182.60583300000144,
+      "inputP99Ms": 426.4225000000006,
+      "httpErrors": 0,
+      "changeMessages": 0,
+      "streamReady": 0,
+      "idleChanges": 0,
+      "loss": 0,
+      "duplicates": 0,
+      "unicodeIntact": true,
+      "restartReplay": true
+    }
+  ],
+  "environment": {
+    "hardware": "MacBookPro17,1",
+    "physicalCores": 8,
+    "logicalCores": 8,
+    "memoryBytes": 17179869184,
+    "otherBuildsActive": true
+  },
+  "limitations": [
+    "Synthetic shell producers, not Claude Code API workload",
+    "No battery or whole-system energy measurement",
+    "Concurrent development builds can affect timings"
+  ]
+}

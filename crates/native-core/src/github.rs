@@ -176,7 +176,7 @@ impl Cache {
                 }
             }
             entries
-                .entry(key)
+                .entry(key.clone())
                 .or_insert_with(|| {
                     Arc::new(Slot {
                         state: Mutex::new(Cached {
@@ -194,7 +194,18 @@ impl Cache {
             let s = slot.state.lock().unwrap();
             s.version + if force && s.pending { 2 } else { 1 }
         };
-        let _gate = slot.gate.lock().await;
+        let gate = slot.gate.lock().await;
+        let replaced = force
+            && !self
+                .entries
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &slot));
+        if replaced {
+            drop(gate);
+            return Box::pin(self.read(key, force, fetch)).await;
+        }
         {
             let mut s = slot.state.lock().unwrap();
             if let Some(v) = &s.value {
@@ -1315,5 +1326,46 @@ mod tests {
         );
         assert!(g.verify_cleanup("/tmp", 1, "other").await.is_err());
         assert!(g.verify_cleanup("/tmp", 1, "exact").await.is_ok());
+    }
+    #[tokio::test]
+    async fn forced_read_after_invalidation_updates_current_slot() {
+        let cache = Cache::default();
+        let hold = Arc::new(tokio::sync::Notify::new());
+        let c = cache.clone();
+        let h = hold.clone();
+        let initial = tokio::spawn(async move {
+            c.read("key".into(), false, || async {
+                h.notified().await;
+                Ok(json!(1))
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        let c = cache.clone();
+        let forced =
+            tokio::spawn(
+                async move { c.read("key".into(), true, || async { Ok(json!(3)) }).await },
+            );
+        tokio::task::yield_now().await;
+        cache.invalidate("key");
+        assert_eq!(
+            cache
+                .read("key".into(), false, || async { Ok(json!(2)) })
+                .await
+                .unwrap(),
+            json!(2)
+        );
+        hold.notify_one();
+        assert_eq!(initial.await.unwrap().unwrap(), json!(1));
+        assert_eq!(forced.await.unwrap().unwrap(), json!(3));
+        assert_eq!(
+            cache
+                .read("key".into(), false, || async {
+                    panic!("new cache discarded")
+                })
+                .await
+                .unwrap(),
+            json!(3)
+        );
     }
 }
