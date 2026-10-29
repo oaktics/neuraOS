@@ -91,6 +91,7 @@ struct Pending {
 struct State {
     instance: String,
     native: String,
+    streams: HashMap<String, String>,
     lease_until: Option<Instant>,
     lease_timer: Option<AbortHandle>,
     generation: u64,
@@ -103,12 +104,43 @@ pub struct BrowserBroker {
     state: Arc<Mutex<State>>,
     notify: Arc<dyn Fn() + Send + Sync>,
 }
+pub struct BrowserStreamLease {
+    broker: BrowserBroker,
+    native_id: String,
+    connection: String,
+}
+impl Drop for BrowserStreamLease {
+    fn drop(&mut self) {
+        let mut s = self.broker.state.lock().unwrap();
+        if s.streams.get(&self.native_id) != Some(&self.connection) {
+            return;
+        }
+        s.streams.remove(&self.native_id);
+        if s.native != self.native_id {
+            return;
+        }
+        if let Some(timer) = s.lease_timer.take() {
+            timer.abort();
+        }
+        s.generation += 1;
+        s.lease_until = None;
+        s.tabs.clear();
+        let ids: Vec<_> = s.pending.keys().cloned().collect();
+        for id in ids {
+            settle(&mut s, &id, None, Some("browser_disconnected"));
+        }
+        s.pending.clear();
+        drop(s);
+        (self.broker.notify)();
+    }
+}
 impl BrowserBroker {
     pub fn new(notify: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
                 instance: Uuid::new_v4().to_string(),
                 native: String::new(),
+                streams: HashMap::new(),
                 lease_until: None,
                 lease_timer: None,
                 generation: 0,
@@ -118,6 +150,22 @@ impl BrowserBroker {
             })),
             notify: Arc::new(notify),
         }
+    }
+    pub fn attach_stream(&self, native_id: &str) -> Result<BrowserStreamLease, ApiError> {
+        uuid(native_id)?;
+        let mut state = self.state.lock().unwrap();
+        if state.closed {
+            return Err(error("browser_disconnected", 503));
+        }
+        let connection = Uuid::new_v4().to_string();
+        state
+            .streams
+            .insert(native_id.to_owned(), connection.clone());
+        Ok(BrowserStreamLease {
+            broker: self.clone(),
+            native_id: native_id.to_owned(),
+            connection,
+        })
     }
     pub fn shutdown(&self) {
         let mut s = self.state.lock().unwrap();
@@ -159,6 +207,9 @@ impl BrowserBroker {
         let live = s.lease_until.is_some_and(|t| t > Instant::now());
         if !s.native.is_empty() && s.native != b.native_id && live {
             return Err(error("browser_native_busy", 409));
+        }
+        if b.stream && !s.streams.contains_key(&b.native_id) {
+            return Err(error("browser_disconnected", 503));
         }
         if s.native != b.native_id {
             let ids: Vec<_> = s.pending.keys().cloned().collect();
@@ -530,7 +581,7 @@ fn validate_command(mut c: Value) -> Result<Value, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> (BrowserBroker, Value, Value, Value) {
+    fn fixture() -> (BrowserBroker, Value, Value, Value, BrowserStreamLease) {
         let w = Uuid::new_v4().to_string();
         let p = Uuid::new_v4().to_string();
         let t = Uuid::new_v4().to_string();
@@ -540,8 +591,9 @@ mod tests {
         let call =
             json!({"terminalId":t,"command":{"action":"snapshot","workspaceId":w,"tabId":tab}});
         let b = BrowserBroker::new(|| {});
+        let lease = b.attach_stream(poll["nativeId"].as_str().unwrap()).unwrap();
         b.poll(poll.clone(), &snapshot).unwrap();
-        (b, snapshot, poll, call)
+        (b, snapshot, poll, call, lease)
     }
     async fn dispatch(
         b: &BrowserBroker,
@@ -559,8 +611,27 @@ mod tests {
         (task, result["requests"][0].clone())
     }
     #[tokio::test]
+    async fn stream_drop_cancels_immediately_and_old_connection_cannot_close_replacement() {
+        let (b, s, p, c, old) = fixture();
+        let replacement = b.attach_stream(p["nativeId"].as_str().unwrap()).unwrap();
+        drop(old);
+        let (task, _) = dispatch(&b, &s, &p, &c).await;
+        drop(replacement);
+        assert_eq!(
+            task.await.unwrap().unwrap_err().error,
+            "browser_disconnected"
+        );
+        assert_eq!(
+            b.poll(p.clone(), &s).unwrap_err().error,
+            "browser_disconnected"
+        );
+        let _new = b.attach_stream(p["nativeId"].as_str().unwrap()).unwrap();
+        b.poll(p, &s).unwrap();
+        b.shutdown();
+    }
+    #[tokio::test]
     async fn scopes_credentials_and_native_ownership() {
-        let (b, s, p, c) = fixture();
+        let (b, s, p, c, _lease) = fixture();
         assert_eq!(
             b.call(c.clone(), &s, false).await.unwrap_err().error,
             "browser_caller_unauthorized"
@@ -585,7 +656,7 @@ mod tests {
     }
     #[tokio::test]
     async fn results_release_locks_and_errors_preserve_codes() {
-        let (b, s, mut p, c) = fixture();
+        let (b, s, mut p, c, _lease) = fixture();
         let (task, r) = dispatch(&b, &s, &p, &c).await;
         assert_eq!(
             b.call(c.clone(), &s, true).await.unwrap_err().error,
@@ -603,7 +674,7 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn timeout_quarantines_until_acknowledged() {
-        let (b, s, mut p, mut c) = fixture();
+        let (b, s, mut p, mut c, _lease) = fixture();
         c["command"]["action"] = json!("wait");
         c["command"]["text"] = json!("missing");
         c["command"]["timeoutMs"] = json!(100);
@@ -629,7 +700,7 @@ mod tests {
     }
     #[tokio::test]
     async fn abandoned_http_call_cancels_without_releasing_dispatched_lock() {
-        let (b, s, p, c) = fixture();
+        let (b, s, p, c, _lease) = fixture();
         let (task, r) = dispatch(&b, &s, &p, &c).await;
         task.abort();
         let _ = task.await;
@@ -640,7 +711,7 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn lease_expiry_cancels_and_new_native_resets_registry() {
-        let (b, s, mut p, c) = fixture();
+        let (b, s, mut p, c, _lease) = fixture();
         let (task, _) = dispatch(&b, &s, &p, &c).await;
         // Keep the call's 30s budget beyond a legacy 3s lease.
         p["stream"] = json!(false);
@@ -679,7 +750,7 @@ mod tests {
     }
     #[tokio::test]
     async fn independent_tabs_exceed_old_global_request_cap() {
-        let (b, s, mut p, c) = fixture();
+        let (b, s, mut p, c, _lease) = fixture();
         let template = p["tabs"][0].clone();
         let mut tabs = Vec::new();
         let mut tasks = Vec::new();
