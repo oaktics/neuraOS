@@ -74,6 +74,7 @@ public struct UpdateEngine {
     }
     public func service(_ action: String, daemon: URL) throws -> String {
         switch action {
+        case "ensure": try bootstrap(daemon: daemon); return "neuraOS Daemon available (running service preserved)."
         case "install": try installService(daemon: daemon); return "neuraOS native Daemon installed."
         case "stop": return try execute("/bin/launchctl", ["bootout", "\(domain)/\(Self.serviceID)"])
         case "restart": return try execute("/bin/launchctl", ["kickstart", "-k", "\(domain)/\(Self.serviceID)"])
@@ -81,8 +82,8 @@ public struct UpdateEngine {
         default: throw UpdateFailure("Unknown service action")
         }
     }
-    public func bootstrap() throws {
-        let daemon = helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")
+    public func bootstrap(daemon requestedDaemon: URL? = nil) throws {
+        let daemon = requestedDaemon ?? helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")
         // Opening a second/relocated app must never stop an existing daemon or
         // its terminals. Only explicit install/apply may replace a live service.
         if let status = try? service("status", daemon: daemon),

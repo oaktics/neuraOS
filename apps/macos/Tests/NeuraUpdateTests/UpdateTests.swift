@@ -113,6 +113,26 @@ final class UpdateTests: XCTestCase {
             try engine.bootstrap(); XCTAssertTrue(started)
         }
     }
+    func testDevelopmentEnsurePreservesLiveServiceAndUsesExplicitNativePathWhenStopped() throws {
+        for running in [true, false] {
+            let (home, original) = try fixture(); var engine = original
+            let daemon = home.appendingPathComponent("development-native-core")
+            try Data("fixture".utf8).write(to: daemon)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: daemon.path)
+            var installed = false
+            engine.run = {_, args, _ in
+                if args.first == "print" {return running ? CommandResult(output: "pid = 12345\n") : CommandResult(status: 113)}
+                if args.first == "bootstrap" {installed = true}
+                return CommandResult()
+            }
+            _ = try engine.service("ensure", daemon: daemon)
+            XCTAssertEqual(installed, !running)
+            if !running {
+                let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: Data(contentsOf: engine.plist), format: nil) as? [String: Any])
+                XCTAssertEqual(plist["ProgramArguments"] as? [String], [daemon.path])
+            }
+        }
+    }
     func testHealthyInstallKeepsBackupAndStartsNativeService() async throws {
         let (_, original) = try fixture(); var engine = original
         let stage = try staged(engine); var calls: [[String]] = []
