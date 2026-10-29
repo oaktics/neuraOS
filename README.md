@@ -6,7 +6,7 @@ macOS向けの、自分用のAI開発ワークスペース。SwiftUIのネイテ
 
 ## 起動
 
-Node.js 24.13以降の24系、pnpm 11.9、XcodeのSwiftツールチェーン・Metal Toolchain、Gitが必要です。UIの対象はmacOS 14以降（実機確認環境はmacOS 26）。Codex／Claude Codeは各公式CLIをインストール・ログインして使います。
+ソースからの開発にはNode.js 24.13以降の24系、pnpm 11.9、Rust（Cargo）、XcodeのSwiftツールチェーン・Metal Toolchain、Gitが必要です。Node.jsとpnpmはビルド・検証用です。UIの対象はmacOS 14以降（実機確認環境はmacOS 26）。Codex／Claude Codeは各公式CLIをインストール・ログインして使います。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -31,7 +31,7 @@ pnpm service restart
 
 `install`と`restart`は既存DaemonのPTYを終了します。作業中は実行しないでください。アプリのウィンドウを閉じる／アプリを終了するだけならPTYは継続します。Daemon自身の再起動やログアウト・PC停止後は履歴を復元し、中断として表示します。生きていたプロセスを復元したとは表示しません。
 
-ローカル開発ビルドのDaemonはこのチェックアウトとNode環境を参照します。mainへのマージ後はCIがNode／Daemon同梱の配布版をビルドし、GitHub Releasesへ公開します。neuraOSメニューの「アップデートを確認…」から更新できます。更新時はDaemonも再起動するため、作業を保存してください。現在は個人利用向けad-hoc署名で、公証は未導入です。初回導入・PR・検証・復旧手順は[開発・配布フロー](docs/development-release.md)を参照してください。
+DaemonはRust製のネイティブ実行ファイルです。mainへのマージ後はCIがDaemon同梱の配布版をビルドし、GitHub Releasesへ公開します。配布版のneuraOS常駐処理にNode.jsは不要です。neuraOSメニューの「アップデートを確認…」から更新できます。更新時はDaemonも再起動するため、作業を保存してください。公開版はDeveloper ID署名・Apple公証付きです。ローカル検証ではad-hoc署名も使用します。初回導入・PR・検証・復旧手順は[開発・配布フロー](docs/development-release.md)を参照してください。
 
 ## 最初の作業
 
@@ -138,13 +138,15 @@ GitHubに接続できない場合は「PRなし」と扱わずエラーを表示
 ## 構成
 
 ```text
-apps/macos/           SwiftUI / AppKit / WebKitクライアント
-apps/daemon/          Node.js / TypeScript / node-pty / SQLite
+apps/macos/           SwiftUI / AppKit / CEFクライアント
+crates/native-core/   Rust Daemon / PTY / SQLite / provider監督
+apps/daemon/          旧TypeScript実装（比較・互換検証用）
 scripts/native/       ビルドとLaunchAgent管理
-tests/native/         Daemonの統合・復旧試験
+tests/native-rust/    ネイティブDaemonのHTTP・復旧試験
+tests/native/         既存契約とproviderの回帰試験
 ```
 
-UIはGit・プロセス・プロジェクトファイルを直接操作しません。認証付きの`/v1` HTTP APIからDaemonへ要求します。端末出力と状態イベントには順序を持たせ、再接続時に再取得できます。通信契約は`apps/daemon/src/contracts.ts`、Swift側のモデルは`apps/macos/Sources/NeuraOS/Models.swift`です。
+UIはGit・プロセス・プロジェクトファイルを直接操作しません。認証付きの`/v1` HTTP APIからDaemonへ要求します。端末出力と状態イベントには順序を持たせ、再接続時に再取得できます。通信契約の検証は`crates/native-core/src/contracts.rs`、Swift側のモデルは`apps/macos/Sources/NeuraOS/Models.swift`です。
 
 現在は`127.0.0.1:4318`限定で待ち受けます。UIとDaemonの接続に使うローカルトークンは権限0600のファイル、データディレクトリは0700です。ブラウザOrigin付き要求は拒否します。
 
@@ -185,7 +187,7 @@ worktree行の右端には、エージェントの作業中をローダー、回
 
 macOS通知はCodex／Claude Codeの「回答・承認待ち」と「応答完了」に対応します。初回の通知許可を有効にし、メニューバーの「通知」で種類別にオン／オフを切り替えられます。通知をクリックすると該当のWorkspaceとターミナルを開きます。本文は作業名のみで、会話内容は含めません。通知イベントは順序付きで永続保存し、ポーリング間に続いた回答待ち・完了もそれぞれ取得します。取得途中の切断後は続きから再開します。アプリ起動時の過去イベントや同じイベントを繰り返し通知せず、中断・エラー・セッション終了も完了扱いにしません。neuraOSアプリが起動中（ウィンドウを閉じた状態を含む）で、対応Daemon（`terminal.notifications`）と下記の状態連携が必要です。通常の文章での質問は応答完了として通知します。macOS側で通知が無効の場合は「通知 → macOSの通知設定を開く…」から許可してください。
 
-状態連携は更新後にneuraOSから新しく起動・再開したCLIで有効になります。監督機能に対応するCodexではApp Serverイベントを利用し、以下のフック設定は従来方式のCodexとClaude Codeに適用します。既に実行中のセッションには後からフックを挿入しません。Codexがフックの信頼確認を表示した場合は、そのセッションの `/hooks` でneuraOSの `agent-activity-hook.mjs` を確認してください。信頼確認や管理者によるフック無効化は迂回しません。Claude Codeは2.1.306以降、Codexはフック信頼確認と `--no-daemon` に対応したCLIを対象とします。対応していないCLI、無効なフック、イベントを通知しない特殊なツール経路は正確な状態を取得できない場合があります。通常の文章で尋ねてターンを終了した場合は「次の指示待ち」で、構造化された質問ツールによる回答待ちとは区別します。
+状態連携は更新後にneuraOSから新しく起動・再開したCLIで有効になります。監督機能に対応するCodexではApp Serverイベントを利用し、以下のフック設定は従来方式のCodexとClaude Codeに適用します。既に実行中のセッションには後からフックを挿入しません。Codexがフックの信頼確認を表示した場合は、そのセッションの `/hooks` でneuraOSのネイティブ `activity-hook` を確認してください。信頼確認や管理者によるフック無効化は迂回しません。Claude Codeは2.1.306以降、Codexはフック信頼確認と `--no-daemon` に対応したCLIを対象とします。対応していないCLI、無効なフック、イベントを通知しない特殊なツール経路は正確な状態を取得できない場合があります。通常の文章で尋ねてターンを終了した場合は「次の指示待ち」で、構造化された質問ツールによる回答待ちとは区別します。
 
 フックはその起動にだけ追加し、ユーザーやリポジトリの設定ファイルを書き換えません。通知するのは状態判定に必要なイベント識別情報だけで、プロンプト・回答・ツール引数は保存しません。監督機能に対応したCodexは専用App Serverのイベントから状態を取得します。従来方式のCodexはターミナルごとの環境を保持するため `--no-daemon` で起動します。
 

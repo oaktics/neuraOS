@@ -32,7 +32,7 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 GitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時、Daemonが未登録なら同梱版をLaunchAgentに登録する。既存Daemonが稼働中の場合は勝手に再起動しない。ソース版からの初回移行は、更新機能入りのソース版を一度ビルドして「更新して再起動」を使うか、作業を保存して旧Daemonを`pnpm service stop`で止めてから配布版を開く。
 
-Node.js、tsx、Daemon、依存パッケージとネイティブPTYをアプリに同梱する。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Gitなどの開発CLIは引き続き各自の環境を使う。
+Rust製のDaemon実行ファイルとネイティブPTY処理をアプリに同梱する。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Gitなどの開発CLIは引き続き各自の環境を使う。
 
 公開リポジトリはGitHub APIとHTTPSから直接更新する。非公開リポジトリは`gh auth login --hostname github.com`済みのGitHub CLIが必要。認証情報をアプリへコピー・保存しない。公開／非公開の設定自体はこの変更では変更しない。
 
@@ -79,11 +79,11 @@ node scripts/native/release/package.mjs
 node scripts/native/release/smoke.mjs
 ```
 
-実行時依存はルートの`package.json`の`dependencies`から同梱する（TypeScript起動用の`tsx`も含む）。パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱Node／Daemon／SQLite／PTYを実行する。開発環境の`node_modules`に依存した同梱漏れを検出する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
+パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱のネイティブDaemon／SQLite／PTYを実行する。ソースチェックアウトや開発環境の`node_modules`に依存しないことを確認する。Node.jsはこの試験を起動する開発ツールとして使用する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
 
 ## Chromium browser
 
-Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions are not included.
+Browser pages use CEF (Chromium), with one page per existing workspace tab, alongside Terminal/Codex. Popup pages join that same tab bar. There is no nested browser tab bar. Extensions share the Chromium profile. Chrome-style management windows provide extension installation and toolbar popups. See [browser extensions](browser-extensions.md) and [1Password setup](1password-browser.md).
 
 `pnpm build` and `pnpm test:macos` prepare the pinned CEF SDK from `scripts/native/chromium/version.json`. Direct `swift build/test` users must first run `node scripts/native/chromium/prepare.mjs`. Downloads and extracted SDKs are shared across worktrees in `~/Library/Caches/neuraOS/cef/<architecture>-<archive checksum>/` (override with `NEURA_CEF_CACHE_DIR`). Each worktree keeps an ignored `apps/macos/.cef/sdk` symlink; generated helpers stay local. Completed cache entries are published atomically, so concurrent builds never consume a partial extraction. Simultaneous first-time preparations may download independently; subsequent preparations reuse the SDK. Old worktree-local SDK directories are replaced with links on preparation. Direct Swift commands still require preparation once per worktree. The archive checksum is verified before extraction; updating Chromium requires updating both architecture entries in the manifest and rerunning the packaged smoke test. Chromium is bundled with the application, so security updates require a new neuraOS release.
 
