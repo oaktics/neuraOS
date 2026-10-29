@@ -6,7 +6,7 @@
 
 ## 実装と検証の現在地
 
-製品の常駐daemon・PTY管理・保存・provider監督・MCPはRustへ統合する。Swift UI、CEF、外部の`claude`・`codex`・`git`・`gh`は役割を保つ。「外部CLIを使う」はneuraOS自身にNode runtimeを残す意味ではない。ビルド・回帰試験用Nodeと、外部CLI側が必要とするランタイムは配布daemonと区別する。
+製品の常駐daemon・PTY管理・保存・provider監督・MCPはRustへ統合する。process hostのイベント監視・所有token・macOS上の制約は[native process ownership](native-process-ownership.md)を参照する。Swift UI、CEF、外部の`claude`・`codex`・`git`・`gh`は役割を保つ。「外部CLIを使う」はneuraOS自身にNode runtimeを残す意味ではない。ビルド・回帰試験用Nodeと、外部CLI側が必要とするランタイムは配布daemonと区別する。
 
 統合中の実装は認証付きHTTP command＋WebSocket変更通知＋cursor付き出力取得を使う。UIのstate/terminal/browser定期pollを通知へ置換し、入力と出力取得の待ち行列を分ける。PTYは共有mio reactor、保存は単一SQLite writerと出力read threadを持ち、control/bulkのcreditとFIFOを分離する。bulkが満杯でもcontrolを受け付け、barrierは両laneの受理済み書込みを待つ。端末数の固定上限とは異なる。出力の`data`と`chunks`の二重転送は新UIでは行わない。CEFはネイティブUIの埋込みを維持し、callback駆動pumpと33ms fallbackを使う。
 
@@ -144,6 +144,10 @@ energy proxy: 同一trace/同一仕事量で既存build62比CPU秒とdisk bytes�
 
 拡張担当のビルド/検証が重なる今回の標本は参考資料にとどめる。統制試験では他作業の無い専用窓を用意し、同期していたビルド・compiler/リンク・disk scanを記録して外乱窓を別集計する。ホスト全体のWattとrole別CPU/IO/wakeupsを併記し、role別WattをCPU比率だけで推計しない。battery比較は輝度・電源状態・無線・thermal・充電状態・試験時間を固定しJoule/jobとjobs/sを同時に報告する。実10Claudeの仕事量再現とprovider費用のある試験は別途計画し、今回のStore/HTTP合成値から代用しない。
 
+## 以下は移行前の調査記録（2026-10-29）
+
+以下のbuild57/60/62、Node/TSのファイル名・固定poll・ベンチマークは当時の証拠として保持する。「現状」「現行」「HEAD」は調査当時を指し、冒頭のnative統合構成を指さない。旧harnessの実行結果をnative runtimeの検証として流用しない。
+
 ## 調査範囲と証拠の強さ
 
 - リポジトリ内および確認した親ディレクトリに追加AGENTS.mdは見つからなかった。登録済み独立worktreeを使用。別エージェントのChromium拡張コードは変更しない。
@@ -152,7 +156,7 @@ energy proxy: 同一trace/同一仕事量で既存build62比CPU秒とdisk bytes�
 - `aafbb47` (#125) がoutput batch/state分離、`7b9bbbb` (#121) がClaude補完、`69c8c38` (#124) がChannels失敗の区別。現HEADはこれらを含む。build60のbundleは残存確認していないので、現在の改善コードが当時と同じだったとは推定しない。
 - [診断集計](architecture-evidence/diagnostics-summary.json)、[プロセス標本](architecture-evidence/process-sample.json)、[合成負荷](architecture-evidence/synthetic.json)、[出力burst再実行](architecture-evidence/output-burst.json) を添付。統計はこの標本だけの値。
 
-## 現状マップ
+## 移行前の構成マップ
 
 ```text
 SwiftUI/AppModel -- GET state 1s --------------------+

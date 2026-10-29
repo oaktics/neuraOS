@@ -23,7 +23,7 @@ These steps require the user's credentials/trust decision; they were not perform
 
 The dedicated window is outside browser MCP. Embedded tabs remain automatable: users should disconnect MCP for tabs that contain vault-filled data. Trusting a custom browser grants access to data while 1Password is unlocked, as described by 1Password's guidance.
 
-## Observed in the isolated test
+## Observed in the isolated test (2026-10-29)
 
 - Official Web Store permission sheet completed and Chromium reported the extension added; version 8.12.42.36 (MV3), original stable ID. The Store's generic “switch to Chrome” banner did not prevent installation.
 - After process shutdown/restart, the manager displayed 1Password enabled. Opening its toolbar action led to its own setup/sign-in page. No account was entered.
@@ -32,3 +32,5 @@ The dedicated window is outside browser MCP. Embedded tabs remain automatable: u
 - A separate sample MV3 extension executed content → service worker → persistent storage across restart and round-tripped to a disposable native host through CEF's standard profile manifest search path. This proves the native messaging transport, **not** 1Password trust acceptance.
 
 Remaining acceptance gates are actual 1Password desktop connection, unlock/lock, suggestions, filling, saving a new/changed test login, and authenticated restart. They require user authentication and explicit custom-browser trust; these were intentionally left for the user with the steps above. An unsupported extension API has not been identified as a blocker for these gates. APIs requiring full Chrome tab/window UI remain limited to the dedicated window; the embedded tab alone cannot supply the toolbar popup.
+
+These extension observations are independent of the Rust daemon migration. Native daemon protocol/Swift UI fixtures, signed and notarized release publication, installation/rollback on the real app, and authenticated 1Password acceptance must be recorded separately. Neither a release nor a browser MCP fixture authenticates a vault.

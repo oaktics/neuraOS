@@ -1,35 +1,65 @@
 # Concurrent agent performance
 
-Terminal output is persisted in ordered batches: 16 ms, 256 chunks, or 256 KiB,
-whichever is reached first. Reads, resize markers, metadata mutations, deletion,
-and orderly shutdown flush the tail. SQLite remains WAL + synchronous=FULL.
-An abrupt process/OS failure can lose the unflushed tail (the timer is a scheduling
-target, not a hard wall-clock guarantee). Failed flushes retain data for retry;
-normal disk failure handling remains applicable.
+The product daemon, PTY, SQLite writer, provider adapters and MCP run in Rust.
+The UI uses SwiftUI/AppKit and CEF native views. Development Node tooling and
+external `claude`, `codex`, `git` and `gh` remain separate dependencies. Performance
+and energy efficiency take priority over implementation cost; language choice
+alone is not a measured speedup.
 
-The macOS renderer feeds at most 8 KiB between cooperative yields, preserving
-UTF-8 parser state and resize order. Background emulators still consume output:
-stopping them entirely would delay terminal protocol replies and lose live screen
-state. Replay tests compare the resulting screen with uninterrupted playback.
+There is no arbitrary fixed agent concurrency limit. Queue byte credits, report
+inbox capacity and test points such as 10/20/32 are not agent-count limits.
+Actual sustained concurrency depends on machine and provider resources.
 
-State polling does not await provider title lookups. Titles appear on a subsequent
-poll; a slow provider lookup must not masquerade as a disconnected daemon.
+## Current data path
 
-Every ten seconds, rotated local diagnostics include event-loop p99/max delay,
-utilization, RSS and used JS heap. No terminal content, paths or credentials are
-included. Compare these metrics with macOS memory pressure and app ui.hang events
-when diagnosing concurrent sessions; swap usage alone is not proof of active
-thrashing, and idle measurements cannot explain a past incident conclusively.
+- HTTP commands and authenticated WebSocket invalidations replace fixed UI state,
+  terminal-output and browser polling. Consumers fetch output after their cursor;
+  reconnect/replay recovers missed notifications. Input has a separate path from
+  output fetch. A changed signal is not itself terminal data or task completion.
+- A shared mio reactor reads PTYs. The current native output batch target is
+  8 ms or 256 KiB; scheduling pressure can extend elapsed time. SQLite uses WAL
+  and `synchronous=FULL`, one writer and a separate output reader. Control and
+  bulk queues have separate byte credits/FIFO ordering; barriers await accepted
+  writes in both lanes. Uncommitted output can be lost on abrupt process/OS
+  failure. Durability settings do not make queued data durable before commit.
+- SwiftTerm consumes output with cooperative yields, preserving UTF-8 and resize
+  order. Hidden emulators also consume output so terminal protocol replies and
+  live screen state can advance without selecting the tab.
+- CEF keeps native embedded views. Its callback-driven adaptive external pump
+  has a 33 ms idle fallback. It is not a separate browser host. See
+  [extension/pump verification](browser-extensions.md).
+- Shared native process monitoring replaces per-child `ps` loops. See
+  [ownership guarantees and OS limits](native-process-ownership.md).
 
-## Reproducible storage benchmark
+Daemon diagnostics are bounded, rotated, private operation records, with dropped
+record counts. They no longer sample Node event-loop delay or JS heap. See
+[reliability](reliability.md). CPU, memory pressure, IO, wakeups and energy need
+separate workload measurements; swap allocation alone is not evidence of active
+thrashing, and idle samples cannot explain a past busy incident.
 
-Run `node scripts/native/benchmark-output.mjs` with Node 24. This uses temporary
-SQLite databases, ten terminal IDs and 2,000 chunks, five runs per mode, and checks
-persisted row counts. It compares the former per-chunk FULL transaction with the
-batched path. It does not launch paid agents or access the application database.
+## Evidence and limits
 
-On the development Mac, observed medians were 274 ms unbatched and 16 ms batched.
-Individual batched runs ranged from 6 to 221 ms under concurrent machine load.
-These are storage-burst timings, not whole-app latency or proof that ten live
-Claude sessions fit within 16 GB. Re-run on the target machine and use the new
-telemetry for sustained workload evidence.
+The [legacy real-PTY sample](architecture-evidence/legacy-daemon-pty-2026-10-29.json)
+and [native debug sample](architecture-evidence/native-debug-pty-2026-10-29.json)
+exercise 10/20/32 real PTYs with synthetic output. They recorded zero HTTP errors,
+missing lines or duplicates and matching cursor replay. The native sample used
+a debug build while other builds/agents ran. It does **not** establish optimized
+release performance, real Claude throughput, battery life or a fair speedup.
+
+[The architecture investigation](architecture-concurrency-energy-2026-10-29.md)
+separates the current integration from proposed UDS/shared-memory transport,
+segmented journals and a separate browser host. Those proposals are not shipped
+features. Its dated legacy measurements remain historical evidence.
+
+The retained `node scripts/native/benchmark-output.mjs` benchmark uses the legacy
+Node SQLite path with temporary databases, ten terminal IDs and 2,000 chunks,
+five runs per mode. Earlier observed medians of 274 ms unbatched and 16 ms batched
+were storage-burst timings for that implementation. They are not native-runtime
+results or proof that ten live Claude sessions fit within 16 GB. Do not overwrite
+historical evidence when rerunning a harness.
+
+Before claiming a performance improvement, compare optimized builds with the
+same workload, durability and functionality, repeat under controlled load, and
+report throughput, p99, backlog, CPU/IO/memory and energy separately. Protocol
+fixtures, signed/notarized distribution, rollback and installed-app acceptance
+are distinct verification steps.

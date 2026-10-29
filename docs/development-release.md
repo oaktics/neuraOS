@@ -5,7 +5,7 @@
 3. CI `native-development / macos` とレビューを確認して`staging`へマージする。この段階ではリリースしない。
 4. 複数の変更をまとめて動作確認したら、`staging` → `main` のリリースPRを作成する。`native-release / build` がApple Silicon向けのアプリ・配布パッケージをビルドし、パッケージ試験まで実行する。PRでは公開しない。
 5. 確認後、リリースPRを**merge commit**で`main`へマージする。`native-release`がマージ後のソースを再検証し、成功したときだけGitHub Release `native-N` を公開する。Intel向けのビルド・配布は廃止。
-6. neuraOSメニュー → **アップデートを確認…** → **更新して再起動**。
+6. native版同士はneuraOSメニュー → **アップデートを確認…** → **更新して再起動**。build62以前からの初回native移行は下記の専用手順を使う。
 
 ## ブランチ設定
 
@@ -30,19 +30,52 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 ## 配布と初回導入
 
-GitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時、Daemonが未登録なら同梱版をLaunchAgentに登録する。既存Daemonが稼働中の場合は勝手に再起動しない。ソース版からの初回移行は、更新機能入りのソース版を一度ビルドして「更新して再起動」を使うか、作業を保存して旧Daemonを`pnpm service stop`で止めてから配布版を開く。
+新規導入ではGitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時は同梱native helperがLaunchAgentを確認する。同じnative daemonパスでサービスが稼働中なら維持し、未登録・停止中・旧Nodeなど異なる起動設定なら再登録する。通常起動だけでも旧DaemonとPTYを停止し得るため、移行前に作業を保存する。既存Node版からの移行は、アプリだけを手動上書きして完了とせず、以下のnative updaterでアプリとLaunchAgentを一緒に移行する。
 
-Rust製のDaemon実行ファイルとネイティブPTY処理をアプリに同梱する。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Gitなどの開発CLIは引き続き各自の環境を使う。
+Runtimeは`bin/neura-native-core`（Rust daemon／PTY／SQLite／provider／MCP）と`bin/neura-updater`（Swift更新helper）の2実行ファイルだけで構成する。これはRuntimeディレクトリの構成であり、Swift UI・CEF framework/helper・Sleep serviceを含むアプリ全体が2プロセスだけという意味ではない。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Git／GitHub CLIなどの開発CLIは引き続き各自の環境を使う。
 
 公開リポジトリはGitHub APIとHTTPSから直接更新する。非公開リポジトリは`gh auth login --hostname github.com`済みのGitHub CLIが必要。認証情報をアプリへコピー・保存しない。公開／非公開の設定自体はこの変更では変更しない。
 
 公開用ビルドはDeveloper ID Application署名・Appleの公証・チケット添付・Gatekeeper検証を必須とする。資格情報が未設定、署名失敗、公証がAccepted以外の場合は公開しない。設定手順とローカル開発時のKeychain許可については[macOS署名と公証](macos-signing.md)を参照。通常のPR検証は明示的なad-hoc署名で実行し、署名用の秘密鍵を渡さない。
 
+## build62以前からの初回native移行
+
+build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、適用時にNode・tsx・`service.ts`を使う。このため**旧「更新して再起動」だけではNodeを含まないnative版へ直接移行できない**。新しい署名・公証済み公開成果物のhelperを直接使う。以下は利用者が移行を決め、全作業を保存した後の手順であり、開発検証中の通常installed app／daemonには実行しない。
+
+1. GitHub Releasesから公開済みの`neuraOS-darwin-arm64.zip`を取得し、Downloads等に展開する。現在の`~/Applications/neuraOS.app`はまだ上書きしない。
+2. 展開した新アプリ内のhelperを絶対パスで指定し、更新対象tagを確認する。
+
+   ```sh
+   HELPER="$HOME/Downloads/neuraOS.app/Contents/Resources/Runtime/bin/neura-updater"
+   "$HELPER" check
+   ```
+
+3. `check`が返した`native-N`と、現在の**旧neuraOS UIアプリ**のPID（daemonやTerminalのPIDではない、1より大きい値）を指定する。以下の`native-N`と`OLD_APP_PID`は実値へ置き換える。
+
+   ```sh
+   "$HELPER" prepare native-N OLD_APP_PID
+   ```
+
+   helperは公式Releaseを改めて取得し、最新tag一致・SHA-256・署名・Gatekeeper・bundle ID・build番号・native Runtimeを検証する。`{"ready":true}`後、60秒以内に旧UIアプリを通常終了する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
+
+   旧UIが既に終了している場合は、短命のshellの終了を待つ次の形を使う（`native-N`は実値へ置き換える）。
+
+   ```sh
+   /bin/sh -c '"$1" prepare "$2" "$$"' sh "$HELPER" native-N
+   ```
+
+4. helperが旧appを`~/Applications/neuraOS.app.previous`へ退避し、新appを配置する。旧LaunchAgent plistも`~/Library/Application Support/neuraOS/Updates/previous-launch-agent.plist`へ保存する。Daemonを停止・再登録し、認証付きHTTP health確認後に新appを開く。既存PTY／エージェントは終了する。
+5. 新appのbuild番号、native daemonへの接続、履歴復元を確認する。これをRelease公開・署名公証・fixture成功とは別のinstalled-app受入として記録する。
+
+登録やhealth確認の失敗時は、helperが旧appと旧plistを戻して旧daemonの再登録を試みる。復元の成否はサービス状態と`Updates/last-error.txt`を確認する。旧プロセスの実行継続やDBの巻き戻しは保証しない。復元自体に失敗した場合は`.previous`と保存plistを保持し、進行中のhelperがないことを確認してから調査・復旧する。再実行は既存backupを置き換えるため、原因を確認せず連打しない。
+
+2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`はmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。署名済みhelperの起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
+
 ## 更新の保証範囲
 
 - 更新番号はreleaseワークフローの`github.run_number`。アプリへ同じ番号を埋め込み、現在より新しい番号だけを案内する。
 - Apple Silicon向けの成果物をDraft ReleaseへアップロードしてからLatestとして公開する。ビルド・試験失敗時は公開しない。
-- アーキテクチャ、GitHub assetのSHA-256、署名整合性、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、更新プログラム自体は署名者のTeam IDを固定していない。公開時のDeveloper ID署名・公証・Gatekeeper検証とは別の保証範囲である。
+- アーキテクチャ、GitHub assetのSHA-256、署名整合性・Gatekeeperの受理、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、更新プログラム自体は署名者のTeam IDを固定していない。公開時のDeveloper ID署名・公証・Gatekeeper検証とは別の保証範囲である。
 - 明示的な更新操作後にアプリを終了し、ユーザー所有の`~/Applications/neuraOS.app`を入れ替え、Daemonを再登録する。実行中のPTY／エージェントは終了する。保存済みプロジェクト・履歴は既存のDeveloperディレクトリを引き継ぐ。
 - 旧アプリは`~/Applications/neuraOS.app.previous`へ保存する。起動確認失敗時はアプリとLaunchAgent設定を戻す。更新前の実行プロセスそのものやDBの巻き戻しはしない。将来のDB変更は旧版互換の追加方式とし、破壊的な変更には別途バックアップ・復元設計が必要。
 - 更新失敗は`~/Library/Application Support/neuraOS/Updates/last-error.txt`へ記録する。インストーラーが強制終了した場合は、更新処理が動いていないことを確認して同フォルダの`install.lock`を削除して再試行する。
@@ -70,6 +103,10 @@ GitHub以外への移行はまだ行っていない。まず標準runnerでキ�
 
 ```sh
 pnpm install --frozen-lockfile
+cargo test --manifest-path crates/native-core/Cargo.toml
+cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
+NEURA_NATIVE_DAEMON="$PWD/crates/native-core/target/release/neura-native-core" \
+  node --test tests/native-rust/protocol.test.mjs tests/native/provider-native-mcp.test.mjs
 pnpm typecheck
 pnpm test
 node --test tests/release/*.test.mjs
@@ -78,6 +115,8 @@ pnpm build
 node scripts/native/release/package.mjs
 node scripts/native/release/smoke.mjs
 ```
+
+`pnpm daemon`はRust daemonを起動する。比較用の旧TypeScript daemonは`pnpm daemon:legacy`に限定する。`pnpm service`は開発用Node wrapperからnative helperへ転送する。`pnpm dev`はbuild後にサービスを再登録するため、既存DaemonとPTYを停止する。稼働中の作業を保持したい場合は実行しない。
 
 パッケージ試験はRuntime全体をリポジトリ外の一時ディレクトリに移し、一時データと空きポートで同梱のネイティブDaemon／SQLite／PTYを実行する。ソースチェックアウトや開発環境の`node_modules`に依存しないことを確認する。Node.jsはこの試験を起動する開発ツールとして使用する。Daemon部分だけの再検証は`node scripts/native/release/runtime-smoke.mjs`で実行できる。ユーザーのLaunchAgentと実行中のターミナルには触れない。実際の配布更新は、初回Release公開後に別のMacユーザー等の検証環境で行う。
 

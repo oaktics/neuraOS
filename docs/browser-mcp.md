@@ -55,7 +55,11 @@ to the target project. These are local API boundaries, not isolation from an
 agent with unrestricted access to the host's filesystem or process memory.
 Daemon restart revokes browser credentials; restart the CLI to reconnect.
 
-The native app polls authenticated loopback routes with an app instance ID.
+The native app subscribes to authenticated WebSocket invalidations, then fetches
+pending work over loopback HTTP with the same app instance ID (`nativeId`).
+The stream lease binds broker availability to that app connection; disconnect
+cleanup and reconnection must be checked with the matching native UI fixture.
+This is not a fixed-interval browser poll.
 Commands have request IDs, deadlines, no automatic replay, and main-thread CEF
 execution. Closed tabs, disabled access, disconnects, restarts, cancelled calls,
 stale refs and protocol errors return explicit errors. Timed-out sent requests
@@ -77,6 +81,8 @@ activity covers only in-flight native work and still allows system sleep.
 
 ## Verification
 
+Native broker tests are included in
+`cargo test --manifest-path crates/native-core/Cargo.toml`. The retained legacy
 `pnpm exec tsx --test tests/native/browser-automation.test.ts` exercises caller
 spoofing, project scope, native registration, IDs, images, concurrent calls,
 stale/error transport, cancellation and timeout quarantine.
@@ -91,7 +97,11 @@ Claude CLIs against those same fixture tabs. The script records checks, PNGs and
 CLI evidence in that disposable data directory. This is distinct from unit-test
 success and never operates the user's real browsing data.
 
-## Recorded local validation (2026-10-28)
+## Recorded legacy Node runtime validation (2026-10-28)
+
+This historical result is not evidence of live CLI behavior on the Rust runtime.
+Native daemon protocol fixtures, matching Swift UI fixtures, and authenticated
+live CLI acceptance are separate gates; a pass in one does not prove the others.
 
 The isolated package and real CEF completed the stdio fixture flow. Actual Codex
 0.165.0 (managed terminal launch) and Claude Code 2.1.312 (shared launch config in
