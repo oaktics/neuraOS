@@ -147,6 +147,7 @@ struct Identity {
     uid: u32,
     group: i32,
     zombie: bool,
+    exiting: bool,
 }
 #[repr(C)]
 #[derive(Default)]
@@ -185,6 +186,9 @@ fn identity(pid: i32) -> Option<Identity> {
         uid: info.bsd.pbi_uid,
         group: info.bsd.pbi_pgid as i32,
         zombie: info.bsd.pbi_status == 5,
+        // XNU exports P_LEXIT as PROC_FLAG_INEXIT. This is an exit
+        // transition, NOT proof that the task or descendants have stopped.
+        exiting: info.bsd.pbi_flags & 4 != 0,
     })
 }
 fn signal(identity: Identity, signal: i32) -> Result<()> {
@@ -419,11 +423,77 @@ fn subscription_generations(trees: &HashMap<String, Tree>) -> HashSet<u64> {
         })
         .collect()
 }
+struct ExitRecheck {
+    next: Instant,
+    interval: Duration,
+}
+// Only identities positively observed in P_LEXIT enter this set. Kqueue proc
+// attach replays no prior edge: NOTE_EXIT can precede EV_ADD while SZOMB still
+// is not visible. Reconcile that finite transition, not ordinary live/idle PIDs.
+fn update_exit_rechecks(
+    rechecks: &mut HashMap<u64, ExitRecheck>,
+    in_exit: &HashSet<u64>,
+    now: Instant,
+) {
+    rechecks.retain(|id, _| in_exit.contains(id));
+    for id in in_exit {
+        rechecks
+            .entry(*id)
+            .and_modify(|r| {
+                if now >= r.next {
+                    r.interval = (r.interval * 2).min(Duration::from_millis(100));
+                    r.next = now + r.interval;
+                }
+            })
+            .or_insert(ExitRecheck {
+                next: now + Duration::from_millis(1),
+                interval: Duration::from_millis(1),
+            });
+    }
+}
+fn reconcile_root_exit(
+    tree: &mut Tree,
+    current: Option<Identity>,
+    watched: &HashMap<i32, u64>,
+    rechecks: &HashMap<u64, ExitRecheck>,
+    in_exit: &mut HashSet<u64>,
+) {
+    if tree.exit.borrow().is_some() {
+        return;
+    }
+    let Some(root) = tree.root else { return };
+    match current {
+        Some(current) if current.unique == root.unique => {
+            if current.zombie {
+                // Discovery has already used the original parent/PGID above.
+                // Do not retain a stale owned row for the 1.5s stop timer.
+                tree.owned.remove(&root.unique);
+                in_exit.remove(&root.unique);
+                tree.exit.send_replace(Some(Ok(())));
+            } else if current.exiting {
+                in_exit.insert(root.unique);
+            }
+        }
+        None if watched.get(&root.pid) == Some(&root.unique) => {
+            // Keep only an already established transition retry during a
+            // temporary visibility gap, never turn all idle watches into polls.
+            if rechecks.contains_key(&root.unique) {
+                in_exit.insert(root.unique);
+            }
+        }
+        _ => {
+            in_exit.remove(&root.unique);
+            tree.exit
+                .send_replace(Some(Err("leader reaped before cleanup".into())));
+        }
+    }
+}
 fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
     let mut trees: HashMap<String, Tree> = HashMap::new();
     let mut watched: HashMap<i32, u64> = HashMap::new();
     let mut tokens: HashMap<(u64, u32), Option<String>> = HashMap::new();
     let mut exited = HashSet::new();
+    let mut exit_rechecks = HashMap::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut events: [libc::kevent; 128] = unsafe { std::mem::zeroed() };
     loop {
@@ -492,6 +562,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
         if !trees.is_empty() {
             match snapshot() {
                 Ok(rows) => {
+                    let mut in_exit = HashSet::new();
                     let live: HashSet<u64> = rows
                         .iter()
                         .filter(|r| !r.zombie)
@@ -532,6 +603,22 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                 {
                                     tree.owned.insert(root.unique, current);
                                 }
+                            }
+                        }
+                        if let Some(root) = tree.root {
+                            if exit_rechecks.contains_key(&root.unique)
+                                && tree.exit.borrow().is_none()
+                                && !exited.contains(&root.unique)
+                                && identity(root.pid).is_none()
+                            {
+                                // Hold known ownership until actual exit proof,
+                                // including a temporary PID-list omission.
+                                tree.owned.entry(root.unique).or_insert(root);
+                            }
+                        }
+                        for row in tree.owned.values() {
+                            if row.exiting && !row.zombie && !exited.contains(&row.unique) {
+                                in_exit.insert(row.unique);
                             }
                         }
                         let pending_root = tree.root.filter(|_| tree.exit.borrow().is_none());
@@ -584,29 +671,13 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                 }
                             }
                         }
-                        // Check after installing NOTE_EXIT: exit between the
-                        // snapshot and EV_ADD must not wait for reconciliation.
-                        if tree.exit.borrow().is_none() {
-                            if let Some(root) = tree.root {
-                                match identity(root.pid) {
-                                    Some(current) if current.unique == root.unique => {
-                                        if current.zombie {
-                                            tree.exit.send_replace(Some(Ok(())));
-                                        }
-                                    }
-                                    None if watched.get(&root.pid) == Some(&root.unique) => {
-                                        // proc visibility can lag an already queued
-                                        // NOTE_EXIT; keep its subscription and latch it.
-                                    }
-                                    _ => {
-                                        tree.exit.send_replace(Some(Err(
-                                            "leader reaped before cleanup".into(),
-                                        )));
-                                    }
-                                }
-                            }
-                        }
+                        // A successful EV_ADD cannot replay an edge emitted
+                        // before registration; INEXIT gets targeted reconciliation.
+                        let current = tree.root.and_then(|root| identity(root.pid));
+                        reconcile_root_exit(tree, current, &watched, &exit_rechecks, &mut in_exit);
                     }
+                    in_exit.retain(|id| !exited.contains(id));
+                    update_exit_rechecks(&mut exit_rechecks, &in_exit, Instant::now());
                     // Bound retained exit generations to current snapshot/lease
                     // identities; never accumulate all historically exited PIDs.
                     let retained: HashSet<u64> = rows
@@ -631,6 +702,10 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                     for tree in trees.values_mut() {
                         tree.error = Some(error.clone());
                     }
+                    // A failed snapshot must not leave an expired transition
+                    // deadline spinning the native loop at zero timeout.
+                    let known = exit_rechecks.keys().copied().collect();
+                    update_exit_rechecks(&mut exit_rechecks, &known, Instant::now());
                 }
             }
             trees.retain(|_, tree| {
@@ -661,6 +736,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
             watched.clear();
             tokens.clear();
             exited.clear();
+            exit_rechecks.clear();
         }
         let timeout = trees
             .values()
@@ -676,6 +752,11 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
             })
             .min()
             .unwrap_or(Duration::from_secs(60));
+        let timeout = exit_rechecks
+            .values()
+            .map(|r| r.next.saturating_duration_since(Instant::now()))
+            .min()
+            .map_or(timeout, |transition| timeout.min(transition));
         let ts = libc::timespec {
             tv_sec: timeout.as_secs() as _,
             tv_nsec: timeout.subsec_nanos() as _,
@@ -924,6 +1005,7 @@ mod exit_event_tests {
             version: 1,
             uid: 501,
             zombie: false,
+            exiting: false,
         }
     }
     fn tree(root: Identity) -> (Tree, watch::Receiver<Option<Result<()>>>) {
@@ -1015,6 +1097,83 @@ mod exit_event_tests {
             t.owned.is_empty(),
             "stale live rows must not resurrect exited descendants"
         );
+    }
+    #[test]
+    fn missed_pre_registration_edge_rechecks_inexit_without_releasing_ownership() {
+        let mut root = row(101, 1001, 1, 101);
+        root.exiting = true;
+        let (mut t, rx) = tree(root);
+        let watched = HashMap::from([(101, 1001)]);
+        let mut rechecks = HashMap::new();
+        let mut in_exit = HashSet::new();
+        let now = Instant::now();
+        // NOTE_EXIT happened before EV_ADD. No event is delivered, and the
+        // post-install read sees P_LEXIT but not SZOMB.
+        reconcile_root_exit(&mut t, Some(root), &watched, &rechecks, &mut in_exit);
+        assert!(rx.borrow().is_none(), "INEXIT is not exit completion");
+        assert!(t.owned.contains_key(&1001));
+        assert_eq!(t.group.unwrap().unique, 1001);
+        update_exit_rechecks(&mut rechecks, &in_exit, now);
+        assert_eq!(rechecks[&1001].next, now + Duration::from_millis(1));
+        // A later descendant must still be found before ownership is retired.
+        let child = row(102, 1002, 1, 101);
+        let rows = [root, child];
+        let live = rows.iter().map(|r| r.unique).collect();
+        discover_owned(
+            &mut t,
+            &rows,
+            Some(101),
+            &HashMap::new(),
+            &HashSet::new(),
+            &live,
+        );
+        assert!(t.owned.contains_key(&1002));
+        root.zombie = true;
+        reconcile_root_exit(&mut t, Some(root), &watched, &rechecks, &mut in_exit);
+        assert_eq!(*rx.borrow(), Some(Ok(())));
+        assert!(
+            !t.owned.contains_key(&1001),
+            "no unnecessary stop escalation delay"
+        );
+        assert!(t.owned.contains_key(&1002), "child still requires cleanup");
+        update_exit_rechecks(&mut rechecks, &in_exit, now + Duration::from_millis(1));
+        assert!(
+            rechecks.is_empty(),
+            "reconciliation ends at actual exit proof"
+        );
+    }
+    #[test]
+    fn inexit_recheck_is_generation_scoped_and_never_polls_normal_idle() {
+        let root = row(101, 1001, 1, 101);
+        let (mut t, rx) = tree(root);
+        let watched = HashMap::from([(101, 1001)]);
+        let mut rechecks = HashMap::new();
+        let mut in_exit = HashSet::new();
+        let now = Instant::now();
+        reconcile_root_exit(&mut t, Some(root), &watched, &rechecks, &mut in_exit);
+        update_exit_rechecks(&mut rechecks, &in_exit, now);
+        assert!(rechecks.is_empty());
+        let mut replacement = root;
+        replacement.unique = 2001;
+        replacement.exiting = true;
+        reconcile_root_exit(&mut t, Some(replacement), &watched, &rechecks, &mut in_exit);
+        assert!(matches!(&*rx.borrow(), Some(Err(_))));
+        assert!(in_exit.is_empty());
+        // Backoff is bounded and event-driven wakeups cannot postpone a due
+        // transition check by continually resetting its first deadline.
+        in_exit.insert(3001);
+        update_exit_rechecks(&mut rechecks, &in_exit, now);
+        update_exit_rechecks(&mut rechecks, &in_exit, now);
+        assert_eq!(rechecks[&3001].next, now + Duration::from_millis(1));
+        let mut time = rechecks[&3001].next;
+        for _ in 0..16 {
+            update_exit_rechecks(&mut rechecks, &in_exit, time);
+            time = rechecks[&3001].next;
+        }
+        assert_eq!(rechecks[&3001].interval, Duration::from_millis(100));
+        in_exit.clear();
+        update_exit_rechecks(&mut rechecks, &in_exit, time);
+        assert!(rechecks.is_empty());
     }
     #[test]
     fn missing_snapshot_root_keeps_pending_subscription_until_latched() {
