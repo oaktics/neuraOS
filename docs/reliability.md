@@ -52,3 +52,16 @@ CIはPRごとに実行し、毎週の定期実行でも回帰を確認する。�
 - 接続断から復帰した際、入力を勝手に再送せず操作できる。
 - スリープ復帰、長時間の端末出力、ブラウザとエディタを併用してUIが応答する。
 - 診断保存と再起動後の回収ができる。強制終了は作業を保存したテスト環境のみで行う。
+
+
+## 今回の実装作業から見つかった改善項目
+
+各worktree担当と統合担当の実体験を集約し、既存のopen/closed Issueと重複を確認した。実装済みの修正は除外し、以下を追跡する。
+
+- [#135 MCPのUUID要件とフィールド別エラー](https://github.com/oaktics/neuraOS/issues/135)
+- [#136 task_listの対象絞り込み・軽量表示・差分取得](https://github.com/oaktics/neuraOS/issues/136)
+- [#137 browser-smokeの候補アプリ設定の事前検証](https://github.com/oaktics/neuraOS/issues/137)
+- [#138 modal/UI smokeの段階別進行記録](https://github.com/oaktics/neuraOS/issues/138)
+- [#139 queued instructionの個別消費・撤回・置換](https://github.com/oaktics/neuraOS/issues/139)
+
+1Passwordの実用化保留は別の[#134](https://github.com/oaktics/neuraOS/issues/134)。各Issueでは観測事実と原因未確定の部分を分け、確認方法と完了条件を記載している。

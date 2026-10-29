@@ -1,6 +1,6 @@
 # 開発・配布フロー
 
-今回のリリース範囲はnative runtimeの性能改善と一般拡張・署名基盤。1Password実用化はユーザー判断で[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、専用設定導線を範囲から外す。保存・自動入力の受入未完了を今回のrelease blockerにはしない。一般拡張・署名・更新の回帰検証は維持し、最終性能結果とrelease完了は別途確認する。
+今回のリリース範囲はnative runtimeの性能改善と一般拡張・署名基盤。1Password実用化はユーザー判断で[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、専用設定導線を範囲から外す。保存・自動入力の受入未完了を今回のrelease blockerにはしない。一般拡張・署名・更新の回帰検証を維持する。最終比較は[性能資料](performance.md)、正式CI・公開結果は統合PRとGitHub Releasesを参照する。
 
 1. `staging`を起点にneuraOSでworktreeを作成し、機能ブランチで変更・commitする。
 2. GitHubサイドバーからPush → `staging`向けにPR作成。PR本文に変更内容と確認結果を書く。
@@ -127,12 +127,12 @@ node scripts/native/release/smoke.mjs
 
 ## native統合の検証checkpoint（2026-10-29）
 
-[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`0a57023`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。release番号は未確定。
+[統合PR #133](https://github.com/oaktics/neuraOS/pull/133)の`300baa1`までの実装を照合した時点。以下はローカル検証で、正式CI・署名公証済みrelease・実installed appでの移行成功を示すものではない。正式なCI結果はPRのchecks、公開版の署名・公証とtagは[GitHub Releases](https://github.com/oaktics/neuraOS/releases/latest)で確認する。
 
 | 検証 | 確認した結果 | 証跡／範囲 |
 | --- | --- | --- |
-| Rust core | library 68成功、integration 5成功 | `/tmp/neura-root-release-final-tests.log`。子プロセス内の部分再実行を重複加算しない |
-| 最適化版の公開protocol／移行／provider／ownership | 28成功、失敗0、skip 0 | `/tmp/neura-root-final-optimized-public-tests.log`。HTTP／MCP、Node→Rust→Node移行、fake CLI各10/20/32、共有予約、attach前crash、lifetime lockを含む。実モデル負荷や速度比較ではない |
+| Rust core | library 73成功、integration 5成功 | `/tmp/neura-root-group-final-tests.log`。子プロセス内の部分再実行を重複加算しない |
+| 最適化版の公開protocol／移行／provider／ownership | 28成功、失敗0、skip 0 | `/tmp/neura-root-group-final-public-tests.log`。HTTP／MCP、Node→Rust→Node移行、fake CLI各10/20/32、共有予約、attach前crash、lifetime lockを含む。実モデル負荷や速度比較ではない |
 | 実daemon間データ移行 | Node→Rust→Node、1成功 | [保存証拠](architecture-evidence/legacy-native-data-migration-2026-10-29.json)、`/tmp/neura-root-migration-final.log`。同一の隔離DBでUnicode PTY/cursor、設定、通知、pending/reports/exact ACK、復旧状態、operation結果を確認。実LaunchAgent／installed appの更新ではない |
 | native ProviderService並列起動 | Claude／Codexのfake CLI各10/20/32、全7成功 | [保存証拠](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)、`/tmp/neura-root-provider-daemon-parallel.log`。全段階で指定数の同時active、登録、入力、turn event、exit、UI stream再接続/cursor replayを確認。終了後残存プロセス0 |
 | plist署名正規化のrelease回帰 | 13成功 | `/tmp/neura-root-plist-release-tests.log`。正式CI／公証とは別 |
@@ -144,7 +144,7 @@ node scripts/native/release/smoke.mjs
 
 Git／workspace runner／providerの終了処理は、reapしないexit通知→`tree.stop()`→`wait`の順でleaderの識別をcleanupまで保持する。短命leaderとrestricted子を含む正常終了・失敗・timeout・cancelのcleanupを上記Rust試験で確認した。これは任意の子孫の完全回収保証ではなく、[macOSの所有追跡境界](native-process-ownership.md)は維持する。
 
-実Claudeの確認範囲は上記の読取専用MCP実行。実CodexはApp Server接続のみでmodel turnを実行していない。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load公平比較は未完了で、改善率を確定しない。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。最終CI、release番号、署名・公証、rollback、installed app確認は結果が揃った時点で追記する。
+実Claudeの確認範囲は上記の読取専用MCP実行。実CodexはApp Server接続のみでmodel turnを実行していない。fake CLI並列試験は実モデル負荷や性能比較ではなく、provider App Server自体の切断・再接続も未検証。最適化版の旧新idle/load比較は同一PC・FULL/WAL・1/5/10/20/32 PTYで各2回実施し、[測定結果と限界](performance.md#optimized-comparison-2026-10-29)に記録した。1PasswordはConnected表示後もaccount-readyへ至らず、popup／通常拡張tabのロゴ停止と公式overview HTTP 500が観測された。fixture CSPは修正済みだが、保存・自動入力は未成功。原因未確定のまま[Issue #134](https://github.com/oaktics/neuraOS/issues/134)へ保留し、今回のrelease完了条件から分離する。正式CIと署名・公証はGitHubの実行結果、公開tagはReleasesで確認する。実installed appの更新・rollback成功はローカルfixtureやCIの成功とは区別する。
 
 ## Chromium browser
 
