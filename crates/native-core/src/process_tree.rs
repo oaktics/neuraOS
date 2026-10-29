@@ -274,13 +274,23 @@ fn owner(pid: i32, buffer: &mut [u8]) -> Option<String> {
     None
 }
 fn event(kq: i32, ident: usize, filter: i16, flags: u16, fflags: u32) -> Result<()> {
+    event_cookie(kq, ident, filter, flags, fflags, 0)
+}
+fn event_cookie(
+    kq: i32,
+    ident: usize,
+    filter: i16,
+    flags: u16,
+    fflags: u32,
+    cookie: u64,
+) -> Result<()> {
     let change = libc::kevent {
         ident,
         filter,
         flags,
         fflags,
         data: 0,
-        udata: std::ptr::null_mut(),
+        udata: cookie as usize as *mut libc::c_void,
     };
     if unsafe { libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) } < 0 {
         return Err(std::io::Error::last_os_error().to_string());
@@ -315,10 +325,105 @@ impl Monitor {
         let _ = event(self.kq, 1, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER);
     }
 }
+// NOTE_EXIT is emitted before XNU publishes SZOMB (kern_exit.c proc_exit).
+// Treat the registered-generation notification as authoritative, not as merely
+// a reason to poll a snapshot that can still show the exiting process as live.
+fn latch_process_event(
+    ev: &libc::kevent,
+    watched: &HashMap<i32, u64>,
+    tokens: &mut HashMap<(u64, u32), Option<String>>,
+    exited: &mut HashSet<u64>,
+    trees: &HashMap<String, Tree>,
+) {
+    if ev.filter != libc::EVFILT_PROC || ev.flags & libc::EV_ERROR != 0 {
+        return;
+    }
+    let pid = ev.ident as i32;
+    let generation = ev.udata as usize as u64;
+    if generation == 0 || watched.get(&pid) != Some(&generation) {
+        return;
+    }
+    if ev.fflags & libc::NOTE_EXEC != 0 {
+        tokens.retain(|(unique, _), _| *unique != generation);
+    }
+    if ev.fflags & libc::NOTE_EXIT != 0 {
+        exited.insert(generation);
+        for tree in trees.values() {
+            if tree
+                .root
+                .is_some_and(|root| root.pid == pid && root.unique == generation)
+                && tree.exit.borrow().is_none()
+            {
+                tree.exit.send_replace(Some(Ok(())));
+            }
+        }
+    }
+}
+fn discover_owned(
+    tree: &mut Tree,
+    rows: &[Identity],
+    anchored_group: Option<i32>,
+    tokens: &HashMap<(u64, u32), Option<String>>,
+    exited: &HashSet<u64>,
+    live: &HashSet<u64>,
+) {
+    for row in rows {
+        if let Some(previous) = tree.owned.get_mut(&row.unique) {
+            if previous.version != row.version {
+                tree.termed.remove(&row.unique);
+                tree.killed.remove(&row.unique);
+            }
+            *previous = *row;
+        }
+    }
+    loop {
+        let mut added = false;
+        for row in rows {
+            if row.pid == std::process::id() as i32
+                || row.zombie
+                || exited.contains(&row.unique)
+                || tree.owned.contains_key(&row.unique)
+            {
+                continue;
+            }
+            if tree.owned.contains_key(&row.parent)
+                || anchored_group == Some(row.group)
+                || (tree.token.is_some()
+                    && tokens
+                        .get(&(row.unique, row.version))
+                        .and_then(|x| x.as_ref())
+                        == tree.token.as_ref())
+            {
+                tree.owned.insert(row.unique, *row);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    // Preserve exited parents during ancestry expansion above, then exclude
+    // them from signalling/stop waits even if this snapshot still says live.
+    tree.owned
+        .retain(|id, _| live.contains(id) && !exited.contains(id));
+}
+fn subscription_generations(trees: &HashMap<String, Tree>) -> HashSet<u64> {
+    trees
+        .values()
+        .flat_map(|tree| {
+            let pending_root = tree.root.filter(|_| tree.exit.borrow().is_none());
+            tree.owned
+                .keys()
+                .copied()
+                .chain(pending_root.map(|r| r.unique))
+        })
+        .collect()
+}
 fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
     let mut trees: HashMap<String, Tree> = HashMap::new();
     let mut watched: HashMap<i32, u64> = HashMap::new();
     let mut tokens: HashMap<(u64, u32), Option<String>> = HashMap::new();
+    let mut exited = HashSet::new();
     let mut buffer = vec![0u8; 1024 * 1024];
     let mut events: [libc::kevent; 128] = unsafe { std::mem::zeroed() };
     loop {
@@ -415,55 +520,53 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                 identity(leader.pid).is_some_and(|r| r.unique == leader.unique)
                             })
                             .map(|r| r.pid);
-                        for row in &rows {
-                            if let Some(previous) = tree.owned.get_mut(&row.unique) {
-                                if previous.version != row.version {
-                                    tree.termed.remove(&row.unique);
-                                    tree.killed.remove(&row.unique);
+                        discover_owned(tree, &rows, anchored_group, &tokens, &exited, &live);
+                        // The PID list is a snapshot, not an exit event. Keep
+                        // a directly verified root even when absent from it.
+                        if let Some(root) = tree.root {
+                            if !exited.contains(&root.unique)
+                                && !tree.owned.contains_key(&root.unique)
+                            {
+                                if let Some(current) = identity(root.pid)
+                                    .filter(|r| r.unique == root.unique && !r.zombie)
+                                {
+                                    tree.owned.insert(root.unique, current);
                                 }
-                                *previous = *row;
                             }
                         }
-                        loop {
-                            let mut added = false;
-                            for row in &rows {
-                                if row.pid == std::process::id() as i32
-                                    || row.zombie
-                                    || tree.owned.contains_key(&row.unique)
-                                {
-                                    continue;
-                                }
-                                if tree.owned.contains_key(&row.parent)
-                                    || anchored_group == Some(row.group)
-                                    || (tree.token.is_some()
-                                        && tokens
-                                            .get(&(row.unique, row.version))
-                                            .and_then(|x| x.as_ref())
-                                            == tree.token.as_ref())
-                                {
-                                    tree.owned.insert(row.unique, *row);
-                                    added = true;
-                                }
-                            }
-                            if !added {
-                                break;
-                            }
-                        }
-                        tree.owned.retain(|id, _| live.contains(id));
-                        for row in tree.owned.values() {
+                        let pending_root = tree.root.filter(|_| tree.exit.borrow().is_none());
+                        for row in tree.owned.values().copied().chain(pending_root) {
                             if watched.get(&row.pid) != Some(&row.unique) {
-                                if event(
+                                if event_cookie(
                                     kq,
                                     row.pid as usize,
                                     libc::EVFILT_PROC,
                                     libc::EV_ADD | libc::EV_CLEAR,
                                     libc::NOTE_FORK | libc::NOTE_EXEC | libc::NOTE_EXIT,
+                                    row.unique,
                                 )
                                 .is_ok()
                                 {
-                                    watched.insert(row.pid, row.unique);
+                                    // EV_ADD accepts a numeric PID. Verify that the
+                                    // registration did not race PID replacement.
+                                    if identity(row.pid)
+                                        .is_some_and(|current| current.unique == row.unique)
+                                    {
+                                        watched.insert(row.pid, row.unique);
+                                    } else {
+                                        let _ = event(
+                                            kq,
+                                            row.pid as usize,
+                                            libc::EVFILT_PROC,
+                                            libc::EV_DELETE,
+                                            0,
+                                        );
+                                        watched.remove(&row.pid);
+                                    }
                                 }
                             }
+                        }
+                        for row in tree.owned.values() {
                             if let Some(start) = tree.stopping {
                                 let kill = start.elapsed() >= Duration::from_millis(1500);
                                 let sent = if kill {
@@ -491,6 +594,10 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                                             tree.exit.send_replace(Some(Ok(())));
                                         }
                                     }
+                                    _ if watched.get(&root.pid) == Some(&root.unique) => {
+                                        // proc visibility can lag an already queued
+                                        // NOTE_EXIT; keep its subscription and latch it.
+                                    }
                                     _ => {
                                         tree.exit.send_replace(Some(Err(
                                             "leader reaped before cleanup".into(),
@@ -500,11 +607,17 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
                             }
                         }
                     }
-                    // Remove obsolete subscriptions, including detached trees after cleanup.
-                    let owned: HashSet<u64> = trees
-                        .values()
-                        .flat_map(|t| t.owned.keys().copied())
+                    // Bound retained exit generations to current snapshot/lease
+                    // identities; never accumulate all historically exited PIDs.
+                    let retained: HashSet<u64> = rows
+                        .iter()
+                        .map(|r| r.unique)
+                        .chain(trees.values().filter_map(|t| t.root.map(|r| r.unique)))
+                        .chain(trees.values().flat_map(|t| t.owned.keys().copied()))
                         .collect();
+                    exited.retain(|id| retained.contains(id));
+                    // Remove obsolete subscriptions, including detached trees after cleanup.
+                    let owned = subscription_generations(&trees);
                     watched.retain(|pid, id| {
                         if owned.contains(id) {
                             true
@@ -547,6 +660,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
             }
             watched.clear();
             tokens.clear();
+            exited.clear();
         }
         let timeout = trees
             .values()
@@ -582,11 +696,7 @@ fn monitor(kq: i32, rx: mpsc::Receiver<Control>) {
         };
         if n > 0 {
             for ev in &events[..n as usize] {
-                if ev.filter == libc::EVFILT_PROC && ev.fflags & libc::NOTE_EXEC != 0 {
-                    if let Some(id) = watched.get(&(ev.ident as i32)) {
-                        tokens.retain(|(unique, _), _| unique != id);
-                    }
-                }
+                latch_process_event(ev, &watched, &mut tokens, &mut exited, &trees);
             }
         }
     }
@@ -799,5 +909,190 @@ mod tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_event_tests {
+    use super::*;
+    fn row(pid: i32, unique: u64, parent: u64, group: i32) -> Identity {
+        Identity {
+            pid,
+            unique,
+            parent,
+            group,
+            version: 1,
+            uid: 501,
+            zombie: false,
+        }
+    }
+    fn tree(root: Identity) -> (Tree, watch::Receiver<Option<Result<()>>>) {
+        let (exit, rx) = watch::channel(None);
+        (
+            Tree {
+                root: Some(root),
+                exit,
+                group: Some(root),
+                token: None,
+                owned: HashMap::from([(root.unique, root)]),
+                stopping: Some(Instant::now()),
+                termed: HashSet::new(),
+                killed: HashSet::new(),
+                waiters: vec![],
+                error: None,
+            },
+            rx,
+        )
+    }
+    fn exited_event(pid: i32, unique: u64) -> libc::kevent {
+        libc::kevent {
+            ident: pid as usize,
+            filter: libc::EVFILT_PROC,
+            flags: 0,
+            fflags: libc::NOTE_EXIT,
+            data: 0,
+            udata: unique as usize as *mut libc::c_void,
+        }
+    }
+    #[test]
+    fn exit_latches_before_zombie_snapshot_without_losing_descendants() {
+        let root = row(101, 1001, 1, 101);
+        // One child still has root ancestry; another has already reparented
+        // but remains in the unreaped root's validated private process group.
+        let child = row(102, 1002, 1001, 999);
+        let orphan = row(103, 1003, 1, 101);
+        let rows = [root, child, orphan]; // deliberately ALL zombie=false
+        let live = rows.iter().map(|r| r.unique).collect();
+        let (t, rx) = tree(root);
+        let mut trees = HashMap::from([("lease".into(), t)]);
+        let watched = HashMap::from([(101, 1001), (102, 1002), (103, 1003)]);
+        let mut tokens = HashMap::new();
+        let mut exited = HashSet::new();
+        latch_process_event(
+            &exited_event(101, 1001),
+            &watched,
+            &mut tokens,
+            &mut exited,
+            &trees,
+        );
+        assert_eq!(
+            *rx.borrow(),
+            Some(Ok(())),
+            "must not wait for SZOMB or a later event"
+        );
+        let t = trees.get_mut("lease").unwrap();
+        discover_owned(t, &rows, Some(101), &tokens, &exited, &live);
+        assert!(
+            !t.owned.contains_key(&1001),
+            "exited root must not incur stop timer"
+        );
+        assert!(
+            t.owned.contains_key(&1002),
+            "retain exited parent during ancestry expansion"
+        );
+        assert!(
+            t.owned.contains_key(&1003),
+            "retain PGID anchor during orphan discovery"
+        );
+        assert_eq!(t.group.unwrap().unique, 1001);
+        latch_process_event(
+            &exited_event(102, 1002),
+            &watched,
+            &mut tokens,
+            &mut exited,
+            &trees,
+        );
+        latch_process_event(
+            &exited_event(103, 1003),
+            &watched,
+            &mut tokens,
+            &mut exited,
+            &trees,
+        );
+        let t = trees.get_mut("lease").unwrap();
+        discover_owned(t, &rows, Some(101), &tokens, &exited, &live);
+        assert!(
+            t.owned.is_empty(),
+            "stale live rows must not resurrect exited descendants"
+        );
+    }
+    #[test]
+    fn missing_snapshot_root_keeps_pending_subscription_until_latched() {
+        let root = row(101, 1001, 1, 101);
+        let (mut t, rx) = tree(root);
+        t.owned.clear(); // PID-list snapshot omission before event consumption
+        let trees = HashMap::from([("lease".into(), t)]);
+        assert_eq!(subscription_generations(&trees), HashSet::from([1001]));
+        let watched = HashMap::from([(101, 1001)]);
+        let mut tokens = HashMap::new();
+        let mut exited = HashSet::new();
+        latch_process_event(
+            &exited_event(101, 1001),
+            &watched,
+            &mut tokens,
+            &mut exited,
+            &trees,
+        );
+        assert_eq!(*rx.borrow(), Some(Ok(())));
+        assert!(subscription_generations(&trees).is_empty());
+    }
+    #[test]
+    fn kernel_exit_returns_registered_cookie() {
+        use std::{io::Write, os::unix::process::CommandExt, process::Stdio};
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "read gate; exit 7"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let root = identity(child.id() as i32).unwrap();
+        let kq = unsafe { libc::kqueue() };
+        assert!(kq >= 0);
+        event_cookie(
+            kq,
+            root.pid as usize,
+            libc::EVFILT_PROC,
+            libc::EV_ADD | libc::EV_CLEAR,
+            libc::NOTE_EXIT,
+            root.unique,
+        )
+        .unwrap();
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+        let timeout = libc::timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        let n = unsafe { libc::kevent(kq, std::ptr::null(), 0, &mut ev, 1, &timeout) };
+        let status = child.wait().unwrap();
+        unsafe { libc::close(kq) };
+        assert_eq!(status.code(), Some(7));
+        assert_eq!(n, 1);
+        assert_eq!({ ev.ident }, root.pid as usize);
+        assert_eq!(ev.udata as usize as u64, root.unique);
+        assert_ne!(ev.fflags & libc::NOTE_EXIT, 0);
+    }
+    #[test]
+    fn stale_registration_cookie_cannot_complete_reused_pid() {
+        let root = row(101, 2001, 1, 101);
+        let (t, rx) = tree(root);
+        let trees = HashMap::from([("lease".into(), t)]);
+        let watched = HashMap::from([(101, 2001)]);
+        let mut tokens = HashMap::from([((2001, 1), Some("current".into()))]);
+        let mut exited = HashSet::new();
+        let mut event = exited_event(101, 1001);
+        event.fflags |= libc::NOTE_EXEC;
+        latch_process_event(&event, &watched, &mut tokens, &mut exited, &trees);
+        assert!(rx.borrow().is_none());
+        assert!(exited.is_empty());
+        assert_eq!(tokens.len(), 1);
+        event = exited_event(101, 2001);
+        event.flags = libc::EV_ERROR;
+        latch_process_event(&event, &watched, &mut tokens, &mut exited, &trees);
+        assert!(rx.borrow().is_none());
+        event.flags = 0;
+        latch_process_event(&event, &watched, &mut tokens, &mut exited, &trees);
+        assert_eq!(*rx.borrow(), Some(Ok(())));
+        assert_eq!(exited, HashSet::from([2001]));
     }
 }
