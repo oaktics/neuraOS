@@ -24,7 +24,24 @@ export function isMachO(file) {
   } finally {closeSync(fd);}
 }
 
+// Chromium sends Foundation-serialized Info.plist bytes to macOS dynamic code
+// validation. Signing minified/noncanonical XML makes that check fail -67030
+// even when on-disk codesign verification succeeds. Normalize before any seal.
+export function normalizeBundlePlists(app, run = execFileSync) {
+  function walk(directory) {
+    for (const entry of readdirSync(directory, {withFileTypes: true})) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name === 'Info.plist')
+        run('/usr/bin/plutil', ['-convert', 'xml1', path], {stdio: 'inherit'});
+      // Framework symlink aliases must not be followed or mutate outside paths.
+    }
+  }
+  walk(app);
+}
+
 export function signCertifiedTree(app, identity, run = execFileSync) {
+  normalizeBundlePlists(app, run);
   function sign(path, entitlement = 'empty') {
     run('codesign', ['--force', '--options', 'runtime', '--timestamp', '--sign', identity,
       ...(process.env.NEURA_SIGN_KEYCHAIN ? ['--keychain', process.env.NEURA_SIGN_KEYCHAIN] : []),
@@ -53,6 +70,7 @@ export function signCertifiedTree(app, identity, run = execFileSync) {
 
 export function signApplication(app, identity = selectIdentity()) {
   if (identity !== '-') return signCertifiedTree(app, identity);
+  normalizeBundlePlists(app);
   // Sign nested CEF/runtime components first. Then explicitly harden the only
   // privileged IPC peers; a later --deep signing pass must not undo these flags.
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
