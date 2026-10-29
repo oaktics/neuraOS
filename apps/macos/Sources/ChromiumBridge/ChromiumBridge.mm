@@ -9,12 +9,14 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #define API(name) static decltype(&name) p_##name
 API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
 API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_userfree_utf16_free);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
+static NSString *chromiumProfile;
 static bool pumping = false;
 static std::map<int, cef_browser_t *> browsers;
 static void (^shutdownCompletion)(void);
@@ -109,6 +111,26 @@ BOOL NCChromiumUsesTestKeychain(void) {
     return [path isKindOfClass:NSString.class] && [path length] > 0;
 }
 
+static cef_client_t *MakeChromeClient();
+
+static bool IsChromeWindow(NSWindow *window) {
+    if (!window) return false;
+    while (window.sheetParent) window = window.sheetParent;
+    for (auto entry : browsers) {
+        auto host = entry.second->get_host(entry.second);
+        bool matches = false;
+        if (host->get_runtime_style(host) == CEF_RUNTIME_STYLE_CHROME) {
+            NSView *view = (__bridge NSView *)host->get_window_handle(host);
+            matches = view.window == window;
+        }
+        Release(host);
+        if (matches) return true;
+    }
+    return false;
+}
+
+#include "BrowserPump.inc"
+
 static NSString *StartChromiumImpl() {
     if (initialized) return nil;
     if (shuttingDown) return @"Chromiumは終了処理中です。";
@@ -130,6 +152,7 @@ static NSString *StartChromiumImpl() {
     char *canonical = realpath(profile.fileSystemRepresentation, nullptr);
     if (!canonical) return @"ブラウザ保存先を解決できませんでした。";
     profile = [NSString stringWithUTF8String:canonical]; free(canonical);
+    chromiumProfile = profile;
     cef_settings_t settings = {}; settings.size = sizeof(settings);
     NCString locale(@"ja"), languages(@"ja-JP,ja,en-US,en");
     settings.locale = locale.value;
@@ -150,36 +173,22 @@ static NSString *StartChromiumImpl() {
     // Chromium's test keychain avoids permission dialogs for disposable fixture data.
     BOOL smoke = NCChromiumUsesTestKeychain();
     char name[] = "NeuraOS", mockKeychain[] = "--use-mock-keychain";
-    char *argv[] = {name, smoke ? mockKeychain : nullptr, nullptr}; cef_main_args_t args = {smoke ? 2 : 1, argv};
-    if (!p_cef_initialize(&args, &settings, nullptr, nullptr)) return @"Chromiumを開始できませんでした。別のneuraOSで同じプロファイルを使用していないか確認してください。";
+    BOOL extensionsSmoke = smoke && [NSUserDefaults.standardUserDefaults volatileDomainForName:@"NeuraChromiumSmoke"][@"ExtensionsPort"] != nil;
+    if (extensionsSmoke) settings.remote_debugging_port = [[NSUserDefaults.standardUserDefaults volatileDomainForName:@"NeuraChromiumSmoke"][@"ExtensionsPort"] intValue];
+    char extensionDebug[] = "--enable-unsafe-extension-debugging";
+    char *argv[] = {name, smoke ? mockKeychain : nullptr, extensionsSmoke ? extensionDebug : nullptr, nullptr};
+    cef_main_args_t args = {extensionsSmoke ? 3 : (smoke ? 2 : 1), argv};
+    auto app = new Handler<cef_app_t>(nil);
+    app->api.get_browser_process_handler = [](cef_app_t *) -> cef_browser_process_handler_t * {
+        auto handler = new Handler<cef_browser_process_handler_t>(nil);
+        handler->api.on_schedule_message_pump_work = [](cef_browser_process_handler_t *, int64_t delay) {RequestPump(delay);};
+        // Chrome-created tabs and windows must participate in our shutdown barrier.
+        handler->api.get_default_client = [](cef_browser_process_handler_t *) {return MakeChromeClient();};
+        return &handler->api;
+    };
+    if (!p_cef_initialize(&args, &settings, &app->api, nullptr)) return @"Chromiumを開始できませんでした。別のneuraOSで同じプロファイルを使用していないか確認してください。";
     initialized = true;
-    // SwiftUI context menus can service default-mode turns while they track.
-    // Run-loop mode alone does not protect their mouse-up/action dispatch.
-    NSHashTable<NSMenu *> *trackingMenus = [NSHashTable weakObjectsHashTable];
-    [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidBeginTrackingNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
-        [trackingMenus addObject:note.object];
-    }];
-    [NSNotificationCenter.defaultCenter addObserverForName:NSMenuDidEndTrackingNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
-        [trackingMenus removeObject:note.object];
-    }];
-    pump = [NSTimer timerWithTimeInterval:0.01 repeats:YES block:^(NSTimer *) {
-        // CEF's external pump drains AppKit events in the default run-loop mode.
-        // Native modal windows/sheets must route their own mouse events; otherwise
-        // the confirmation appears but its buttons never receive the clicks.
-        if (!initialized || pumping) return;
-        // Retry a deferred shutdown on a turn that does not enter CEF again.
-        if (shuttingDown && browsers.empty()) {CompleteShutdown(); return;}
-        if (NSApp.modalWindow || trackingMenus.count > 0) return;
-        for (NSWindow *window in NSApp.windows) {
-            if (window.attachedSheet || window.sheetParent) return;
-        }
-        pumping = true;
-        @try {p_cef_do_message_loop_work();} @finally {pumping = false;}
-    }];
-    // Never enter Chromium's nested event pump while AppKit tracks a button,
-    // context menu or drag. Common modes include NSEventTrackingRunLoopMode.
-    // The timer resumes automatically when native tracking returns to default mode.
-    [NSRunLoop.mainRunLoop addTimer:pump forMode:NSDefaultRunLoopMode];
+    StartPump();
     return nil;
 }
 
@@ -195,6 +204,9 @@ static NSString *StartChromium() {
     return failure;
 }
 NSString *NCInitializeChromium(void) {return StartChromium();}
+NSString *NCChromiumProfileDirectory(void) {return chromiumProfile;}
+
+#include "BrowserExtensions.inc"
 
 static cef_client_t *MakeClient(NCChromiumView *view);
 static cef_window_info_t WindowInfo(NCChromiumView *view) {
@@ -396,7 +408,11 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 void NCShutdownChromium(void (^completion)(void)) {
     if (!initialized) {completion(); return;}
     shuttingDown = true; shutdownCompletion = [completion copy];
-    for (auto entry : browsers) {auto browser = entry.second; auto host = browser->get_host(browser); host->close_browser(host, 1); Release(host);}
+    // Chrome-style close may synchronously remove entries via on_before_close.
+    // Retain a snapshot so callbacks cannot invalidate this traversal.
+    std::vector<cef_browser_t *> closing;
+    for (auto entry : browsers) {entry.second->base.add_ref(&entry.second->base); closing.push_back(entry.second);}
+    for (auto browser : closing) {auto host = browser->get_host(browser); host->close_browser(host, 1); Release(host); Release(browser);}
     CompleteShutdown();
 }
 
@@ -480,3 +496,5 @@ int NCRunChromiumSmoke(NSString *url, NSString *dataDirectory) {
 
 #include "BrowserDownloadSmoke.inc"
 #include "BrowserDownloadRegression.inc"
+
+#include "BrowserExtensionsSmoke.inc"

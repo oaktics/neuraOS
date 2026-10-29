@@ -1,3 +1,6 @@
+import {bundleRustLicenses} from './release/rust-licenses.mjs';
+import {buildNativeCore} from './build-core.mjs';
+import {packageNativeRuntime} from './release/native-runtime.mjs';
 import {signApplication, selectIdentity} from './signing/sign.mjs';
 import {execFileSync} from 'node:child_process';
 import {mkdir,cp,writeFile,copyFile,rm,readdir,readFile} from 'node:fs/promises';
@@ -6,6 +9,7 @@ import {prepareChromium} from './chromium/prepare.mjs';
 import {bundleChromium} from './chromium/bundle.mjs';
 const signingIdentity = selectIdentity();
 await prepareChromium();
+await buildNativeCore();
 const root=resolve(import.meta.dirname,'../..'),native=join(root,'apps/macos');
 const output=process.env.NEURA_APP_OUTPUT??join(native,'dist/neuraOS.app');
 const version=JSON.parse(await readFile(join(root,'package.json'),'utf8')).version;
@@ -40,7 +44,8 @@ for(const [name,source] of [
   await rm(destination,{force:true});
   await copyFile(join(native,'.build/checkouts',source),destination);
 }
-await cp(join(root,'scripts/native/release/update.mjs'),join(output,'Contents/Resources/update.mjs'));
+await bundleRustLicenses(root,output);
+await packageNativeRuntime(output,join(root,'crates/native-core/target/release/neura-native-core'),join(native,'.build/release/NeuraUpdater'));
 const bundleId=process.env.NEURA_APP_ID??'app.neuraos.native';
 const extra=(process.env.NEURA_DEV_DATA_DIR?`<key>NeuraDataDirectory</key><string>${escape(process.env.NEURA_DEV_DATA_DIR)}</string>`:'')+(process.env.NEURA_DEV_PORT?`<key>NeuraEndpoint</key><string>http://127.0.0.1:${Number(process.env.NEURA_DEV_PORT)}</string>`:'');
 await writeFile(join(output,'Contents/Info.plist'),`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>NeuraOS</string><key>CFBundleIdentifier</key><string>${escape(bundleId)}</string><key>CFBundleName</key><string>neuraOS</string><key>CFBundleDisplayName</key><string>neuraOS</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${escape(version)}</string><key>CFBundleVersion</key><string>${build}</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>NSHighResolutionCapable</key><true/><key>NSBluetoothAlwaysUsageDescription</key><string>neuraOS uses Bluetooth when websites use nearby devices for sign-in, such as passkeys on your phone.</string><key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>${extra}</dict></plist>`);

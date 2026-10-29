@@ -16,7 +16,7 @@ neuraOSから起動したCodexは、他のCodexや「エージェントの作業
 
 ## 対応範囲
 
-- Codex CLI 0.165.0で実機検証。`--remote`、UnixソケットのApp Server、`thread/inject_items`、会話ページング、`turn/steer`、`turn/start`のtool outputに対応するCLIが必要です。
+- 旧Node runtimeではCodex CLI 0.165.0で実機検証（2026-10-28）。native runtimeでの実CLI再検証とは区別する。`--remote`、UnixソケットのApp Server、`thread/inject_items`、会話ページング、`turn/steer`、`turn/start`のtool outputに対応するCLIが必要です。
 - 対応CLIでneuraOSから新しく起動したCodex、および「履歴から再開」で開いた会話が対象です。履歴から再開した会話は、作業フォルダが一致するものを登録します。`/new`で作った会話も履歴が保存された後に検出します。
 - 古いCLIは従来のターミナル起動を維持し、監督対象にはなりません。起動済みの旧方式CLIや、別アプリが所有する実行中のCodexへ、後付けで接続を奪うことはしません。停止後、更新済みのneuraOSから履歴を再開すると対象になります。
 - アプリのウィンドウを閉じてもDaemonとCodexは継続します。ターミナル停止、worktree削除、Daemon再起動では対象のCodexも停止します。再起動後の登録は「中断」で復元し、自動で実行中に戻しません。
@@ -24,7 +24,7 @@ neuraOSから起動したCodexは、他のCodexや「エージェントの作業
 
 ## 実装
 
-Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。App Serverの所有プロセスはDaemonとのパイプ切断を検知し、Daemonの異常終了時にも子プロセス群を停止します。
+Daemonがターミナルごとに専用の `codex app-server --listen unix://…` を起動します。Unixソケットは権限0700の一時ディレクトリ内に置き、TUIとDaemonの制御クライアントが同じApp Serverに接続します。既存のユーザー認証・設定を利用し、既存CLIと同じfull accessで実行します。App ServerはDaemonから直接spawnし、Daemonごとに1つの共有native supervisorへ所有を登録します。spawn前にreserveのACKを待ち、所有tokenを環境へ渡してspawn後すぐattachします。per-Codexのprovider-hostは起動しません。起動取消・close・DropでもChild handleを保持してreapし、Daemonとのパイプ切断時は共有supervisorが予約済みの所有プロセス群を停止します。OS上の保証範囲と制約は[native process ownership](native-process-ownership.md)を参照してください。
 
 Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・terminal・状態・ターンID・未送信の指示・監視対象を保存します。起動順や親子関係に依存しません。CLIの画面テキストから会話IDや完了を推測しません。
 
@@ -47,30 +47,33 @@ Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・termin
 | `task_watch` | 次のターン終了時に監督側へ一回だけ報告 |
 | `task_wait` | revision以降の状態変化を待つ |
 
-変更操作にはoperation IDが必要です。同じIDの再試行は保存された結果を返します。worktree作成と起動は別段階で、起動失敗時もworktreeとそのIDを返します。自動起動設定との二重起動は避けます。方向修正と中断にはexpected turn IDを要求します。
+変更操作にはUUID形式のoperation IDが必要です。同じIDの再試行は保存された結果を返します。worktree作成と起動は別段階で、起動失敗時もworktreeとそのIDを返します。自動起動設定との二重起動は避けます。方向修正と中断にはexpected turn IDを要求します。
 
 監視報告はユーザー指示に偽装せず `toolOutput` として送信します。監視解除と専用受信箱への報告追加を同じ保存操作で行い、再起動後の二重配信を防ぎます。自己監視と循環する監視は拒否します。
 
-HTTP APIは既存の認証・Origin拒否・操作重複排除を共有します。MCPはloopbackのDaemonだけに接続し、トークンファイルを読みます。トークン値をプロンプトや起動引数に埋め込みません。会話、指示、回答は既存のローカルデータ保存範囲で扱います。
+HTTP APIは既存の認証・Origin拒否・操作重複排除を共有します。MCPはRust実行ファイルの`mcp` subcommandで、loopbackのDaemonだけに接続し、トークンファイルを読みます。トークン値をプロンプトや起動引数に埋め込みません。会話、指示、回答は既存のローカルデータ保存範囲で扱います。
 
 ## 検証
 
-通常の回帰テスト：
+native coreの回帰と開発用互換テストは別に実行します：
 
 ```sh
+cargo test --manifest-path crates/native-core/Cargo.toml
 pnpm typecheck
 pnpm test
 pnpm test:macos
 pnpm build
 ```
 
-実モデルでの検証は明示的に実行します。ログイン済みアカウントを使用し、一時リポジトリ・worktree・別ポートのDaemonを作成して終了後に片付けます。通常のneuraOS Daemonを再起動しません。
+次のスクリプトは旧Node daemon経路の実モデル検証です。native runtimeの成功証拠には流用しません。実モデルでの検証は明示的に実行します。ログイン済みアカウントを使用し、一時リポジトリ・worktree・別ポートのDaemonを作成して終了後に片付けます。通常のneuraOS Daemonを再起動しません。
 
 ```sh
 NEURA_LIVE_CODEX_TEST=1 node --import tsx scripts/native/supervision-smoke.ts
 ```
 
 この検証は、先に起動したworktreeのCodexを後から起動したメインがMCPで発見すること、指示の重複排除、子の応答終了後に待機中のメインがtool outputで自動再開すること、Daemon再起動後の履歴読み取りと同一会話の再開を実際のCodexで確認します。モデルの会話履歴はCodex側に保存されます。
+
+2026-10-29の[native ProviderService fixture](architecture-evidence/native-provider-daemon-parallel-2026-10-29.json)は実Rust daemonからfake Claude／Codexを各10/20/32起動し、指定数の同時active、登録・入力・turn event・exitとUI event stream再接続後のcursor replayを確認しました。実モデル負荷・provider App Serverの切断再接続・実CLIの相互委任を証明する試験ではありません。[検証checkpoint](development-release.md)で他の結果と区別します。
 
 仕様参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
@@ -86,21 +89,23 @@ Claudeにはセッション限定のMCP、共有指示、フック、`--dangerou
 
 Claude Code 2.1.312では、セッション限定の `--mcp-config` で渡したサーバーに対して、接続・受信できていても `server:neuraos · no MCP server configured with that name` と表示されることを確認しています。[上流の同症状報告](https://github.com/anthropics/claude-code/issues/100865)もあります。`Channels (experimental) ... restart without ...` は開発Channelsの案内です。この2行だけで接続失敗と判断せず、監督画面の受信確認状態と実際のMCPエラーを確認してください。`unavailable` をこの表示不具合だけで正常扱いすることもできません。表示を消すためのグローバルMCP登録やChannelsフラグの削除は行いません。前者は端末限定設定を他セッションにも適用し、後者は監督通知を無効にするためです。
 
-Claudeへの指示はChannelsで現在の応答完了後に配送します。実行中へのsteerは非対応でUIも無効化します。質問・承認はClaudeのターミナルから回答します。待機中のキー操作だけでは取消完了と見なさず指示を保持します（Claudeの質問画面はCtrl-Cだけでは終了しない場合があり、画面の取消操作が必要です）。実際のライフサイクル通知後に次の指示を配送します。Claudeが取消後の通知を送らず「回答待ち」が残る場合は、作業一覧の「中断」または現在のturn IDを指定した`task_interrupt`で回復し、その後`task_send(mode: queue)`で必要な指示を送り直してください。明示中断は未送信指示と監視を解除するので、必要な`task_watch`も登録し直します。キー入力だけでは取消完了を推測しません。報告は`kind=reports`の通知であり、実行指示へ変換しません。送信前に通知済みを記録し、不明な送信結果を自動再送しません。報告は`task_ack`まで保持します。Channelsのpollは通常のdaemon認証に加え、daemon内でのみ発行する端末別のランダム資格を要求し、他端末の資格やmaster bearerだけでは通知を消費できません。
+Claudeへの指示はChannelsで現在の応答完了後に配送します。実行中へのsteerは非対応でUIも無効化します。質問・承認はClaudeのターミナルから回答します。待機中のキー操作だけでは取消完了と見なさず指示を保持します（Claudeの質問画面はCtrl-Cだけでは終了しない場合があり、画面の取消操作が必要です）。実際のライフサイクル通知後に次の指示を配送します。Claudeが取消後の通知を送らず「回答待ち」が残る場合は、作業一覧の「中断」または現在のturn IDを指定した`task_interrupt`で回復し、その後`task_send(mode: queue)`で必要な指示を送り直してください。明示中断は未送信指示と監視を解除するので、必要な`task_watch`も登録し直します。キー入力だけでは取消完了を推測しません。報告は`kind=reports`の通知であり、実行指示へ変換しません。送信前に通知済みを記録し、不明な送信結果を自動再送しません。報告は`task_ack`まで保持します。ChannelsはWebSocketのstate変更通知を契機に取得し、固定750ms pollは行いません。取得APIは通常のdaemon認証に加え、daemon内でのみ発行する端末別のランダム資格を要求し、他端末の資格やmaster bearerだけでは通知を消費できません。
 
 compactは実行中ターンを保持します。clear/resumeは現在の会話を切り替え、旧会話の指示を新会話へ配送しません。同じ会話の重複起動、異なるworkspace/providerでの再開を拒否します。停止した会話は中断として保存され、停止後の自動配送は行いません。Claude履歴はbyteカーソルで最大2MBずつ非同期取得し、tool call/resultを含む実行証跡を表示します。巨大な単一記録は省略を明記し、原本のtranscriptは保持します。
 
-共通ルールは`session-instructions.ts`で管理します。独立実装はneuraOS MCPで登録された別worktree/agentへ自律委任し、親はwatch/read/ack、差分・テストの確認、統合、許可されたrelease、safe cleanupまで継続します。小調査に不要なworktreeや委任は作りません。ユーザー指示・上位制約を優先し、権限を拡張しません。自分だけの隔離作業には`workspace_create`を使えます。
+共通ルールは`crates/native-core/src/providers/session-instructions.txt`で管理します。独立実装はneuraOS MCPで登録された別worktree/agentへ自律委任し、親はwatch/read/ack、差分・テストの確認、統合、許可されたrelease、safe cleanupまで継続します。小調査に不要なworktreeや委任は作りません。ユーザー指示・上位制約を優先し、権限を拡張しません。自分だけの隔離作業には`workspace_create`を使えます。
 
-2026-10-28にClaude Code 2.1.312と実Codexを、別ポート・別dataのneuraOS daemonから起動して検証しました。Claude監督→Codex子完了→ChannelsでClaude再開→ack、およびCodex監督→Claude子完了→tool outputでCodex再開→ackを確認しています。通常のdaemonとインストール済みアプリは変更・停止していません。
+以下は**旧Node runtimeの過去検証**です。native runtimeでのlive CLI検証は別に行います。2026-10-28にClaude Code 2.1.312と実Codexを、別ポート・別dataのneuraOS daemonから起動して検証しました。Claude監督→Codex子完了→ChannelsでClaude再開→ack、およびCodex監督→Claude子完了→tool outputでCodex再開→ackを確認しています。通常のdaemonとインストール済みアプリは変更・停止していません。
 
 仕様参照: [Channels reference](https://code.claude.com/docs/en/channels-reference)、[Hooks](https://code.claude.com/docs/en/hooks)。
+
+agent並列数とwatch対象数に任意の固定上限は設けません。以下の32件は1セッションの指示キュー／報告受信箱の容量で、同時agent数の制限ではありません。実行可能数はCPU・メモリ・IO・外部provider等の資源に依存します。
 
 ## 報告と実行指示の分離
 
 長時間作業中の監督へ進捗を `task_send` で送り続けると、次ターン用の実行指示キュー（32件）を埋めてしまいます。進捗・完了には `task_report` を使用します。報告は `agent.reports` の専用受信箱に保存し、実行指示の枠を消費しません。監督は作業中でも `task_read`、`task_list`、`task_wait` の返す `reports` を読み、受領したIDだけを `task_ack` で確認済みにします。受領確認は作業内容の承認・検証完了を意味しません。読み取りだけでは報告を消さず、通信失敗時も再取得できます。
 
-受信箱は32件、手動報告本文は16,384文字までです。手動報告が満杯なら `agent_reports_full` を返し、未読報告を捨てません。監督のack後、新しいoperation IDで再送してください（同じoperation IDは元の失敗結果を返します）。実行指示への迂回送信はしません。watch報告はworkerごとに最新完了状態へ集約し、更新回数を記録します。更新時に新しい報告IDを発行するため、古いIDへのackは新しい報告を消しません。途中の会話・検証証跡は `task_read` で確認します。受信箱満杯で新しいworkerの報告を追加できない場合はwatchを維持し、ackで空きができた時に配信します。配信待ちwatch（最大32件）にもworkerごとの最新完了スナップショットを1件保持し、workerが次ターンを始めても完了証跡を失いません。
+受信箱は32件、手動報告本文は16,384文字までです。手動報告が満杯なら `agent_reports_full` を返し、未読報告を捨てません。監督のack後、新しいoperation IDで再送してください（同じoperation IDは元の失敗結果を返します）。実行指示への迂回送信はしません。watch報告はworkerごとに最新完了状態へ集約し、更新回数を記録します。更新時に新しい報告IDを発行するため、古いIDへのackは新しい報告を消しません。途中の会話・検証証跡は `task_read` で確認します。受信箱満杯で新しいworkerの報告を追加できない場合はwatchを維持し、ackで空きができた時に配信します。配信待ちwatchにもworkerごとの最新完了スナップショットを1件保持し、workerが次ターンを始めても完了証跡を失いません。
 
 待機中の監督へは未通知報告をまとめて `toolOutput` で通知します。通知開始前に通知済みと記録し、報告はackまで受信箱に残します。監督がackせずターンを終えても、同じ報告IDで無限に再開しません。通知の送信結果が不明な場合も自動再送せず、受信箱から確認します。実行中の監督にはターンを追加せず、read/wait/ackで消費させます。未実行指示がある場合は従来どおり指示を先に送ります。
 

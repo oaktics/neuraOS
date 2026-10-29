@@ -10,8 +10,8 @@ async function fixture(){
  const root=await mkdtemp('/tmp/neura-browser-test-'),d=await createDaemon(root);
  const projectId=randomUUID(),otherProjectId=randomUUID();
  const workspaces=[projectId,projectId,otherProjectId].map(projectId=>({id:randomUUID(),projectId,name:'fixture',path:root,branch:'main',kind:'worktree' as const,createdAt:''}));
- for(const w of workspaces)d.store.put('workspaces',w);
- const terminals=workspaces.map(w=>({id:randomUUID(),workspaceId:w.id,provider:'codex' as const,status:'running' as const,createdAt:'',cols:80,rows:24}));for(const t of terminals)d.store.put('terminals',t);
+ for(const w of workspaces)await d.store.put('workspaces',w);
+ const terminals=workspaces.map(w=>({id:randomUUID(),workspaceId:w.id,provider:'codex' as const,status:'running' as const,createdAt:'',cols:80,rows:24}));for(const t of terminals)await d.store.put('terminals',t);
  const tabs=workspaces.map(w=>({workspaceId:w.id,projectId:w.projectId,tabId:randomUUID(),url:'http://127.0.0.1/same',title:'Fixture',selected:true,loading:false,enabled:true}));
  const headers={authorization:`Bearer ${d.token}`};let nativeId=randomUUID();
  const poll=(results:any[]=[],listed=tabs)=>d.app.inject({method:'POST',url:'/v1/browser/native/poll',headers,payload:{nativeId,tabs:listed,results}});
@@ -34,7 +34,7 @@ test('browser caller credential binds terminal; native and server enforce projec
   // Native cannot relabel another project's workspace to expose it.
   await f.poll([],f.tabs.map(t=>({...t,projectId:f.tabs[0].projectId})));
   assert.equal((await f.call({action:'list'},2)).json().tabs.length,0);
-  f.d.store.put('terminals',{...f.terminals[0],status:'exited'});
+  await f.d.store.put('terminals',{...f.terminals[0],status:'exited'});
   assert.equal((await f.call({action:'list'})).statusCode,403);
  }finally{await f.close();}
 });
@@ -102,7 +102,7 @@ test('oversized screenshot error acknowledges and releases the tab for subsequen
  }finally{await f.close();}
 });
 test('ordinary 30-second budget expires without releasing dispatched native work (fake clock)',async t=>{
- t.mock.timers.enable({apis:['Date','setInterval'],now:Date.now()});
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:Date.now()});
  const f=await fixture();try{
   const result=f.call({action:'snapshot',...f.target()}).then(r=>r);const [request]=await f.next();
   assert.equal(request.deadline-Date.now(),30000);

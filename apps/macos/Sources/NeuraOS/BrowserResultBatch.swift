@@ -5,8 +5,8 @@ import Foundation
 enum BrowserResultBatch {
     static let byteLimit = 10 * 1024 * 1024
     struct Batch {let data: Data; let ids: Set<String>}
-    static func make(nativeId: String, tabs: [[String: Any]], results: [[String: Any]], limit: Int = byteLimit) throws -> Batch {
-        let base: [String: Any] = ["nativeId":nativeId,"tabs":tabs,"results":[]]
+    static func make(nativeId: String, tabs: [[String: Any]], results: [[String: Any]], limit: Int = byteLimit, stream: Bool = false) throws -> Batch {
+        let base: [String: Any] = ["nativeId":nativeId,"tabs":tabs,"results":[],"stream":stream]
         let overhead = try JSONSerialization.data(withJSONObject:base).count
         guard overhead + 256 <= limit else {throw BrowserAutomationError(code:"browser_registry_too_large")}
         var selected: [[String: Any]] = [], ids = Set<String>(), bytes = overhead
@@ -23,7 +23,7 @@ enum BrowserResultBatch {
             guard bytes + separator + size <= limit else {break}
             selected.append(result); ids.insert(id); bytes += separator + size
         }
-        let data = try JSONSerialization.data(withJSONObject:["nativeId":nativeId,"tabs":tabs,"results":selected])
+        let data = try JSONSerialization.data(withJSONObject:["nativeId":nativeId,"tabs":tabs,"results":selected,"stream":stream])
         assert(data.count <= limit)
         return Batch(data:data,ids:ids)
     }

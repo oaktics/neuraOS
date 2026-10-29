@@ -1,0 +1,81 @@
+{
+  "sourceCommit": "300baa16a84d499b448df57502fbcec5221d8eff",
+  "method": "32 concurrent operation_start then operation_finish calls, 5 rounds on isolated SQLite FULL/WAL; store-only microbenchmark, not full HTTP input latency.",
+  "before": [
+    {
+      "elapsedMs": 21.678959000000003,
+      "maxMs": 21.449583,
+      "p50Ms": 14.616957999999999,
+      "round": 0
+    },
+    {
+      "elapsedMs": 21.184874999999998,
+      "maxMs": 21.024334,
+      "p50Ms": 15.27325,
+      "round": 1
+    },
+    {
+      "elapsedMs": 13.012166,
+      "maxMs": 12.848,
+      "p50Ms": 9.475582999999999,
+      "round": 2
+    },
+    {
+      "elapsedMs": 12.88375,
+      "maxMs": 12.734499999999999,
+      "p50Ms": 9.845625,
+      "round": 3
+    },
+    {
+      "elapsedMs": 12.767040999999999,
+      "maxMs": 12.613958,
+      "p50Ms": 5.487958,
+      "round": 4
+    }
+  ],
+  "after": [
+    {
+      "elapsedMs": 1.890042,
+      "maxMs": 1.6315419999999998,
+      "p50Ms": 1.400916,
+      "round": 0
+    },
+    {
+      "elapsedMs": 3.5302919999999998,
+      "maxMs": 3.386375,
+      "p50Ms": 3.135958,
+      "round": 1
+    },
+    {
+      "elapsedMs": 1.7705,
+      "maxMs": 1.4929590000000001,
+      "p50Ms": 1.339708,
+      "round": 2
+    },
+    {
+      "elapsedMs": 3.406917,
+      "maxMs": 3.2615830000000003,
+      "p50Ms": 2.939334,
+      "round": 3
+    },
+    {
+      "elapsedMs": 2.7382090000000003,
+      "maxMs": 2.565334,
+      "p50Ms": 2.34775,
+      "round": 4
+    }
+  ],
+  "walFramesFor32Starts": {
+    "standalone": 64,
+    "grouped": 8
+  },
+  "regressions": [
+    "duplicate statement rollback and FIFO isolated retry",
+    "COMMIT failure never publishes success or replays",
+    "CAS/read/barrier boundaries stop grouping",
+    "FULL/WAL data survives reopen",
+    "bulk service within 8 control jobs and cancellation preserves pending record"
+  ],
+  "validation": "cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib store::",
+  "harnessSource": "use serde_json::json;\nuse std::time::Instant;\n#[tokio::main]\nasync fn main(){\n let dir=std::env::temp_dir().join(format!(\"neura-store-burst-{}\",uuid::Uuid::new_v4()));\n std::fs::create_dir(&dir).unwrap();\n let(e,_)=tokio::sync::broadcast::channel(8);\n let s=store_check::store::StoreHandle::open(&dir.join(\"store.sqlite\"),e).await.unwrap();\n for round in 0..5 {\n let start=Instant::now();let mut set=tokio::task::JoinSet::new();\n let gate=std::sync::Arc::new(tokio::sync::Barrier::new(33));\n for i in 0..32 {let s=s.clone();let gate=gate.clone();set.spawn(async move{\n gate.wait().await;let t=Instant::now();let id=format!(\"{round}-{i}\");\n s.call(\"operation_start\",json!({\"id\":id,\"hash\":\"h\"})).await.unwrap();\n s.call(\"operation_finish\",json!({\"id\":id,\"status\":\"done\",\"result\":\"{}\"})).await.unwrap();\n t.elapsed().as_secs_f64()*1000.\n });}\n gate.wait().await;let mut ms=Vec::new();while let Some(r)=set.join_next().await{ms.push(r.unwrap());}\n ms.sort_by(f64::total_cmp);\n println!(\"{}\",json!({\"round\":round,\"p50Ms\":ms[16],\"maxMs\":ms[31],\"elapsedMs\":start.elapsed().as_secs_f64()*1000.}));\n }\n}\n"
+}

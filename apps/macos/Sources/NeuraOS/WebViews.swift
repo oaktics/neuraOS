@@ -13,7 +13,7 @@ import ChromiumBridge
     let workspaceId: String
     let projectId: String
     var tabId: String {String(storageId.split(separator: ".").last ?? "")}
-    var browserVisible = true
+    var browserVisible = true { didSet { if browserVisible != oldValue { BrowserAutomation.shared.changed() } } }
     @Published var automationEnabled = true {
         didSet {UserDefaults.standard.set(!automationEnabled, forKey: "browser.mcpDisabled." + storageId)}
     }
@@ -91,6 +91,17 @@ struct BrowserPane: View {
                     Image(systemName: browser.isLoading ? "xmark" : "arrow.clockwise")
                 }.help(browser.isLoading ? "読み込みを停止" : "再読み込み")
                 TextField("URL", text: $browser.address).textFieldStyle(.roundedBorder).onSubmit {browser.navigate()}
+                Menu {
+                    Button("拡張機能を追加・管理…") {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
+                    Button("Chrome ウェブストアを開く…") {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
+                    Button("このページを拡張対応ウィンドウで開く") {
+                        if let url = BrowserModel.navigationURL(browser.address) {browser.message = NCOpenExtensionWindow(url.absoluteString)}
+                    }
+                    Divider()
+                    Text("ポップアップ・ツールバーは専用ウィンドウで利用できます")
+                    Text("拡張機能と閲覧データは内蔵タブと共有されます")
+                } label: {Image(systemName: "puzzlepiece.extension")}
+                .help("拡張機能（専用ウィンドウで追加・管理・利用）")
                 BrowserDownloadsButton()
                 Button {browser.navigate()} label: {Image(systemName: "arrow.right")}.help("開く")
                 Button {if let url = BrowserModel.navigationURL(browser.address), url.scheme != "about" {NSWorkspace.shared.open(url)}} label: {
@@ -107,7 +118,8 @@ struct BrowserPane: View {
             if let message = browser.message {Text(message).font(.system(size: 11)).foregroundStyle(.secondary).padding(8)}
             BrowserWebView(browser: browser, visible: visible, onPopup: onPopup, onClosed: onClosed)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.onChange(of: browser.title) {_, value in title = value.isEmpty ? nil : value}
+        }
+        .onChange(of: browser.title) {_, value in title = value.isEmpty ? nil : value}
     }
 }
 struct BrowserWebView: NSViewRepresentable {

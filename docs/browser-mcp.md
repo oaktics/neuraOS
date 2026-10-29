@@ -5,6 +5,10 @@ Browser tools operate the actual mounted CEF tabs and their existing profile,
 cookies and page state. They do not launch another Chromium or expose a remote
 DevTools port. Restart the CLI after upgrading to obtain its browser credential.
 
+1Password usability is [deferred](1password-browser.md). Browser MCP fixture
+success does not establish account sync, saving or filling, and dedicated
+Chrome-style extension windows remain outside browser MCP.
+
 ## Scope and controls
 
 `browser_list` returns mounted tabs in every workspace of the caller's project;
@@ -55,7 +59,11 @@ to the target project. These are local API boundaries, not isolation from an
 agent with unrestricted access to the host's filesystem or process memory.
 Daemon restart revokes browser credentials; restart the CLI to reconnect.
 
-The native app polls authenticated loopback routes with an app instance ID.
+The native app subscribes to authenticated WebSocket invalidations, then fetches
+pending work over loopback HTTP with the same app instance ID (`nativeId`).
+The stream lease binds broker availability to that app connection; disconnect
+cleanup and reconnection must be checked with the matching native UI fixture.
+This is not a fixed-interval browser poll.
 Commands have request IDs, deadlines, no automatic replay, and main-thread CEF
 execution. Closed tabs, disabled access, disconnects, restarts, cancelled calls,
 stale refs and protocol errors return explicit errors. Timed-out sent requests
@@ -63,7 +71,10 @@ remain quarantined until native completion/cancellation acknowledgment. Native
 also refuses new DevTools calls while a cancelled/timed-out call has an unknown
 renderer outcome. A timeout cannot undo an already executed click: inspect the
 page before deciding whether to issue a new action. Closing the tab resets its
-transport. Responses and page contents are not written to daemon diagnostics. Native result
+transport. Repeated stop requests on the same tab are rejected with
+`browser_busy` while its prior stop awaits native acknowledgment, preventing
+unbounded pending cancellation records; this bound is not an agent-count cap.
+Responses and page contents are not written to daemon diagnostics. Native result
 batches cap the entire JSON envelope at 10 MiB (below the 12 MiB HTTP limit).
 Multiple images are split across acknowledgments; a single oversized image
 returns `browser_image_too_large`, allowing later results to proceed.
@@ -77,6 +88,8 @@ activity covers only in-flight native work and still allows system sleep.
 
 ## Verification
 
+Native broker tests are included in
+`cargo test --manifest-path crates/native-core/Cargo.toml`. The retained legacy
 `pnpm exec tsx --test tests/native/browser-automation.test.ts` exercises caller
 spoofing, project scope, native registration, IDs, images, concurrent calls,
 stale/error transport, cancellation and timeout quarantine.
@@ -91,7 +104,11 @@ Claude CLIs against those same fixture tabs. The script records checks, PNGs and
 CLI evidence in that disposable data directory. This is distinct from unit-test
 success and never operates the user's real browsing data.
 
-## Recorded local validation (2026-10-28)
+## Recorded legacy Node runtime validation (2026-10-28)
+
+This historical result is not evidence of live CLI behavior on the Rust runtime.
+Native daemon protocol fixtures, matching Swift UI fixtures, and authenticated
+live CLI acceptance are separate gates; a pass in one does not prove the others.
 
 The isolated package and real CEF completed the stdio fixture flow. Actual Codex
 0.165.0 (managed terminal launch) and Claude Code 2.1.312 (shared launch config in

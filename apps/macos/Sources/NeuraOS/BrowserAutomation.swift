@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ChromiumBridge
 
 struct BrowserAutomationError: Error {let code: String}
@@ -6,21 +7,28 @@ struct BrowserAutomationError: Error {let code: String}
 // Runs only on the AppKit/CEF thread. The daemon cannot send arbitrary JS/CDP.
 @MainActor final class BrowserAutomation {
     static let shared = BrowserAutomation()
-    private struct Entry {weak var model: BrowserModel?}
+    private struct Entry {weak var model: BrowserModel?; var subscription: AnyCancellable?}
     private var entries: [String: Entry] = [:]
     private var jobs: [String: Task<Void, Never>] = [:]
     private var owners: [String: String] = [:]
     private var failures: [String: String] = [:]
     private var results: [[String: Any]] = []
-    private let nativeId = UUID().uuidString.lowercased()
+    private var nativeId: String {api.events.nativeId}
     private var loop: Task<Void, Never>?
+    private var heartbeat: Task<Void, Never>?
+    private var eventObserver: UUID?
+    private let pulse = EventPulse()
+    func changed() {pulse.signal()}
     private var lastPollStart = ProcessInfo.processInfo.systemUptime
     private var daemonInstance: String?
     private var monitor: Any?
     private let api = DaemonClient()
     private let session = URLSession(configuration: .ephemeral)
     func register(_ model: BrowserModel) {
-        entries[model.storageId] = Entry(model: model)
+        entries[model.storageId] = Entry(model: model, subscription: model.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor in self?.pulse.signal() }
+        })
+        pulse.signal()
         if monitor == nil {
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]) { [weak self] event in
                 // Real human input cancels automation before the event is delivered.
@@ -34,19 +42,48 @@ struct BrowserAutomationError: Error {let code: String}
                 return event
             }
         }
-        if loop == nil {loop = Task { [weak self] in
-            while !Task.isCancelled {await self?.poll(); try? await Task.sleep(for: .milliseconds(200))}
-        }}
+        if loop == nil {
+            eventObserver = api.events.observe { [weak self] change in
+                if change.type == "ready" || change.browser == true {self?.pulse.signal()}
+                if change.type == "disconnected" {self?.cancelJobs(); self?.pulse.signal()}
+            }
+            heartbeat = Task { [weak self] in
+                while !Task.isCancelled {
+                    do {try await Task.sleep(for: .seconds(15))} catch {return}
+                    self?.pulse.signal()
+                }
+            }
+            loop = Task { [weak self] in
+                guard let self else {return}
+                var updates = pulse.stream.makeAsyncIterator()
+                while !Task.isCancelled {
+                    if !api.events.supported, let snapshot: Snapshot = try? await api.get("v1/state") {
+                        api.events.configure(features: snapshot.features)
+                    }
+                    let success = await poll()
+                    if !success {try? await Task.sleep(for: .seconds(2)); continue}
+                    if api.events.supported {
+                        guard await updates.next() != nil else {return}
+                    } else {try? await Task.sleep(for: .milliseconds(200))}
+                }
+            }
+        }
     }
     func unregister(_ view: NCChromiumView) {
         for (key, entry) in entries where entry.model?.view === view {if let model = entry.model {stop(model, reason:"browser_tab_closed")}; entries.removeValue(forKey: key)}
+        pulse.signal()
     }
     func stop(_ model: BrowserModel, reason: String = "browser_cancelled") {
         model.automationEnabled = false
         for (id, key) in owners where key == model.storageId {failures[id] = reason; jobs[id]?.cancel()}
         model.view.cancelDevTools()
+        pulse.signal()
     }
-    private func poll() async {
+    private func cancelJobs() {
+        for job in jobs.values {job.cancel()}
+        for entry in entries.values {entry.model?.view.cancelDevTools()}
+    }
+    private func poll() async -> Bool {
         let pollStarted = ProcessInfo.processInfo.systemUptime
         if CommandLine.arguments.contains("--browser-fixture"), pollStarted-lastPollStart > 1 {
             print("browser-poll-gap \(Int((pollStarted-lastPollStart)*1000))ms");fflush(stdout)
@@ -62,7 +99,7 @@ struct BrowserAutomationError: Error {let code: String}
             let token = try String(contentsOf: api.dataDirectory.appendingPathComponent("daemon-token"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            let batch = try BrowserResultBatch.make(nativeId:nativeId,tabs:tabs,results:results)
+            let batch = try BrowserResultBatch.make(nativeId:nativeId,tabs:tabs,results:results,stream:api.events.connected)
             request.httpBody = batch.data
             let (data, response) = try await session.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {throw BrowserAutomationError(code: "browser_disconnected")}
@@ -79,11 +116,13 @@ struct BrowserAutomationError: Error {let code: String}
                 else {results.append(["id":id,"error":"browser_cancelled"])}
             }
             for item in body["requests"] as? [[String: Any]] ?? [] {start(item)}
+            if !results.isEmpty {pulse.signal()}
+            return true
         } catch {
-            for job in jobs.values {job.cancel()}
-            for entry in entries.values {entry.model?.view.cancelDevTools()}
+            cancelJobs()
+            // Keep cancellation/results until acknowledged; never repeat side effects.
+            return false
         }
-        // Keep cancellation/results until acknowledged; never repeat side effects.
     }
     private func start(_ item: [String: Any]) {
         guard let id = item["id"] as? String, jobs[id] == nil,
@@ -106,7 +145,7 @@ struct BrowserAutomationError: Error {let code: String}
             // Keep this request responsive without preventing system sleep.
             let activity = ProcessInfo.processInfo.beginActivity(options:.userInitiatedAllowingIdleSystemSleep, reason:"Run browser automation")
             defer {ProcessInfo.processInfo.endActivity(activity)}
-            defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = ""}
+            defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = "";pulse.signal()}
             do {
                 let result = try await Self.execute(c, view: model.view, deadline: deadline, allowed: {model.automationEnabled})
                 results.append(["id":id,"result":result])

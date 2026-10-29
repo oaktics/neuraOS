@@ -6,6 +6,9 @@ import ChromiumBridge
 @main enum NeuraOSMain {
     static func main() {
         NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--extensions-smoke"), CommandLine.arguments.count > index + 3 {
+            exit(NCRunExtensionsSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2], Int32(CommandLine.arguments[index + 3]) ?? 0, NSHostingView(rootView: OnePasswordSetupView())))
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--browser-fixture"), CommandLine.arguments.count > index + 1 {
             BrowserFixture.run(CommandLine.arguments[index + 1]);return
         }

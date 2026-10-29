@@ -2,12 +2,12 @@ import {createServer} from 'node:http';
 import {createInterface} from 'node:readline';
 import {inflateSync} from 'node:zlib';
 import {spawn,execFileSync,type ChildProcess} from 'node:child_process';
-import {mkdir,writeFile} from 'node:fs/promises';
+import {mkdir,writeFile,rm} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {resolve} from 'node:path';
 import assert from 'node:assert/strict';
-import {createDaemon} from '../../../apps/daemon/src/server.ts';
-import {issueBrowserCredential} from '../../../apps/daemon/src/browser-credentials.ts';
+import type {createDaemon} from '../../../apps/daemon/src/server.ts';
+import {startExternalSmokeDaemon,credentialFile,type SmokeWorkspace,type SmokeTerminal} from './browser-smoke-native.ts';
 function assertPNG(data:string){
  const png=Buffer.from(data,'base64');assert.equal(png.subarray(1,4).toString(),'PNG');
  const width=png.readUInt32BE(16),height=png.readUInt32BE(20),channels=png[25]===6?4:3;
@@ -37,6 +37,8 @@ function assertScreenshotTrace(value:any){
  assert.ok(nodes.some(o=>o.type==='image'||o.type==='image_url'||o.type==='input_image'),'CLI trace must contain an image result');
 }
 const data=process.env.NEURA_DEV_DATA_DIR??'/tmp/neura-browser109-data';
+const externalDaemon=Boolean(process.env.NEURA_BROWSER_SMOKE_DAEMON);
+if(externalDaemon&&process.env.NEURA_BROWSER_REAL_CLI==='1')throw Error('Real CLI mode uses the legacy daemon harness; external mode uses only the isolated fixture Claude.');
 const port=Number(process.env.NEURA_DEV_PORT??44319);
 if(!/^\/(?:private\/)?tmp\/neura-browser[^/]+$/.test(resolve(data)))throw Error('An isolated browser smoke data directory is required');
 await mkdir(data,{recursive:true});
@@ -49,12 +51,23 @@ const fixture=createServer((req,res)=>{
  if(req.url==='/popup'){res.end('<h1>Popup verified</h1><button onclick="window.close()">Close popup</button>');return;}
  res.end(`<!doctype html><html><head><title>Browser fixture</title></head><body style="font:20px system-ui;padding:30px"><h1>neuraOS MCP fixture</h1><label>Name <input id="name" aria-label="Name"></label><button id="submit" onclick="document.querySelector('#result').textContent='Hello '+document.querySelector('#name').value;fetch('/result?value='+encodeURIComponent(document.querySelector('#name').value))">Submit</button><p id="result">Ready</p><button onclick="window.open('/popup')">Popup</button><a href="/second">Navigate</a><input type="password" value="fixture-secret" aria-label="Secret"><div style="height:1500px">Scroll fixture</div><script>document.cookie='fixtureSession=same-tab; Path=/';</script></body></html>`);
 });
-let cleanupDaemon:Awaited<ReturnType<typeof createDaemon>>|undefined,cleanupApp:ChildProcess|undefined,cleanupMCP:ChildProcess|undefined,cleanupClaude:ChildProcess|undefined;
+let cleanupDaemon:Awaited<ReturnType<typeof createDaemon>>|undefined,cleanupApp:ChildProcess|undefined,cleanupMCP:ChildProcess|undefined,cleanupClaude:ChildProcess|undefined,cleanupNative:ChildProcess|undefined;
 let appLog='';const evidence:any={startedAt:new Date().toISOString(),checks:[]};
 try{
 await writeFile(data+'/evidence.json',JSON.stringify(evidence,null,2));
 await new Promise<void>(r=>fixture.listen(0,'127.0.0.1',r));const address=fixture.address() as any,url=`http://127.0.0.1:${address.port}/`;
-const d=await createDaemon(data);cleanupDaemon=d;
+let d:Awaited<ReturnType<typeof createDaemon>>|undefined;
+let mcpLaunch={command:process.execPath,args:[resolve('apps/daemon/src/supervision-mcp.mjs')]};
+let daemonToken:string,browserToken:string,terminal:SmokeTerminal,workspaces:SmokeWorkspace[];
+if(externalDaemon){
+ const native=await startExternalSmokeDaemon(data,port,child=>{cleanupNative=child;child.on('error',error=>{appLog+=String(error)});child.stdout?.on('data',b=>appLog+=b);child.stderr?.on('data',b=>appLog+=b);});
+ ({token:daemonToken,browserToken,terminal,workspaces,mcpLaunch}=native);
+ evidence.daemon='external executable';evidence.checks.push('public project/workspace commands; managed Claude launch scoped browser credential (0600 fixture)');
+ evidence.transport={instrumentation:'Node onSend hook unavailable for external daemon; browser behavior tested through public MCP'};
+}else{
+ const {createDaemon}=await import('../../../apps/daemon/src/server.ts');
+ const {issueBrowserCredential}=await import('../../../apps/daemon/src/browser-credentials.ts');
+ d=await createDaemon(data);cleanupDaemon=d;
 let lastNativePoll=0,lastNativeId='';const transport:{maxPollGapMs:number;restartGapsMs:number[];sent:any[];completed:any[]}={maxPollGapMs:0,restartGapsMs:[],sent:[],completed:[]};evidence.transport=transport;
 d.app.addHook('onSend',async(req,reply,payload)=>{
  if(req.url==='/v1/browser/native/poll'&&reply.statusCode===200){
@@ -66,16 +79,18 @@ d.app.addHook('onSend',async(req,reply,payload)=>{
 });
 await d.app.listen({host:'127.0.0.1',port});
 const project=randomUUID(),otherProject=randomUUID();
-const workspaces=[project,project,otherProject].map(projectId=>({id:randomUUID(),projectId,name:'Browser smoke',path:data,branch:'',kind:'folder' as const,createdAt:''}));for(const w of workspaces)d.store.put('workspaces',w);
+workspaces=[project,project,otherProject].map(projectId=>({id:randomUUID(),projectId,name:'Browser smoke',path:data,branch:'',kind:'folder' as const,createdAt:''}));for(const w of workspaces)d.store.put('workspaces',w);
+terminal={id:randomUUID(),workspaceId:workspaces[0].id,provider:'codex' as const,status:'running' as const,createdAt:'',cols:100,rows:30};d.store.put('terminals',terminal);
+daemonToken=d.token;browserToken=issueBrowserCredential(terminal.id);
+}
 const tabs=workspaces.map((w,i)=>({workspaceId:w.id,projectId:w.projectId,tabId:randomUUID(),url,...(i===1?{hidden:'true'}:{})}));
-const terminal={id:randomUUID(),workspaceId:workspaces[0].id,provider:'codex' as const,status:'running' as const,createdAt:'',cols:100,rows:30};d.store.put('terminals',terminal);
 const config=data+'/fixture.json';await writeFile(config,JSON.stringify({dataDirectory:data,tabs}));
 const executable=resolve(process.env.NEURA_APP_OUTPUT??'apps/macos/dist/neuraOS.app','Contents/MacOS/NeuraOS');
 const app=spawn(executable,['--browser-fixture',config],{stdio:['ignore','pipe','pipe']});cleanupApp=app;app.on('error',error=>{appLog+=String(error)});
 app.stdout.on('data',b=>{appLog+=b;process.stdout.write(b)});app.stderr.on('data',b=>appLog+=b);
 evidence.tabs=tabs;
-const headers={authorization:`Bearer ${d.token}`,'x-neura-browser-token':issueBrowserCredential(terminal.id)};
-const mcp=spawn(process.execPath,[resolve('apps/daemon/src/supervision-mcp.mjs')],{env:{...process.env,NEURA_SUPERVISION_URL:`http://127.0.0.1:${port}`,NEURA_SUPERVISION_TOKEN_FILE:data+'/daemon-token',NEURA_SUPERVISION_WORKSPACE:terminal.workspaceId,NEURA_SUPERVISION_TERMINAL:terminal.id,NEURA_BROWSER_TOKEN:headers['x-neura-browser-token']},stdio:'pipe'});
+const headers={authorization:`Bearer ${daemonToken}`,'x-neura-browser-token':browserToken};
+const mcp=spawn(mcpLaunch.command,mcpLaunch.args,{env:{...process.env,NEURA_SUPERVISION_URL:`http://127.0.0.1:${port}`,NEURA_SUPERVISION_TOKEN_FILE:data+'/daemon-token',NEURA_SUPERVISION_WORKSPACE:terminal.workspaceId,NEURA_SUPERVISION_TERMINAL:terminal.id,NEURA_BROWSER_TOKEN:headers['x-neura-browser-token']},stdio:'pipe'});
 cleanupMCP=mcp;mcp.on('error',error=>{appLog+=String(error)});mcp.stderr.on('data',b=>process.stderr.write(b));mcp.stdin.on('error',()=>{});
 let sequence=0;const pending=new Map<number,(value:any)=>void>();
 mcp.once('exit',()=>{for(const resolve of pending.values())resolve({result:{isError:true,content:[{type:'text',text:'MCP exited'}]}});pending.clear()});
@@ -116,6 +131,7 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  await call('navigate',{url:url+'second'});await call('wait',{text:'Navigation verified'});await assert.rejects(call('click',{ref:stale}),/browser_stale_ref/);evidence.checks.push('navigation retains CEF session cookie; stale document refs rejected');
  await call('navigate',{url});await call('wait',{text:'neuraOS MCP fixture'});
  if(process.env.NEURA_BROWSER_REAL_CLI==='1'){
+   assert(d,'Real CLI mode requires the legacy in-process daemon');
    // Actual managed Codex startup path injects the scoped credential and runs in
    // the terminal registered by neuraOS, against the already-mounted CEF tab.
    const prompt=`Use only neuraos browser MCP tools for this fixture test. Do not use shell or other browser tools. First list tabs, then snapshot and screenshot workspace ${tabs[0].workspaceId} tab ${tabs[0].tabId}. Fill Name with CodexCLI, get fresh snapshot, click Submit, wait for Hello CodexCLI, and reread snapshot. Report success only when observed.`;
@@ -158,11 +174,12 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  const watchdog=setTimeout(()=>{console.error('Fixture cleanup exceeded 20 seconds');process.exit(1)},20000);
  try{
   // Clean up even if initialize, package launch or evidence writing failed.
-  const stopped=await Promise.allSettled([stopChild(cleanupApp),stopChild(cleanupMCP),stopChild(cleanupClaude)]);
+  const stopped=await Promise.allSettled([stopChild(cleanupApp),stopChild(cleanupMCP),stopChild(cleanupClaude),stopChild(cleanupNative)]);
   const errors=stopped.flatMap(r=>r.status==='rejected'?[String(r.reason)]:[]);
   if(errors.length){evidence.cleanupErrors=errors;evidence.passed=false;process.exitCode=1;}
   if(cleanupDaemon)try{await cleanupDaemon.app.close();}catch(error){errors.push(String(error));}
   if(errors.length){evidence.cleanupErrors=errors;evidence.passed=false;process.exitCode=1;}
+  await rm(credentialFile(data),{force:true});
   fixture.closeAllConnections();if(fixture.listening)await new Promise<void>(r=>fixture.close(()=>r()));
   evidence.finishedAt=new Date().toISOString();await writeFile(data+'/evidence.json',JSON.stringify(evidence,null,2));await writeFile(data+'/app.log',appLog);
   console.log(JSON.stringify(evidence,null,2));
