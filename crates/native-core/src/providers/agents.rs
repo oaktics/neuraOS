@@ -108,11 +108,9 @@ impl Agents {
         let rows = store.call("list", json!({"table":"agents"})).await?;
         let mut state = Registry::default();
         for row in rows.as_array().ok_or("invalid agents")? {
-            let mut a: Agent = serde_json::from_value(row.clone()).map_err(|e| e.to_string())?;
-            a.status = "interrupted".into();
-            a.turn_id = None;
-            a.requests.clear();
-            migrate(&mut a);
+            // Keep the persisted pre-recovery value as save's comparison baseline.
+            // Inserting the recovered value here would make save skip the DB write.
+            let a: Agent = serde_json::from_value(row.clone()).map_err(|e| e.to_string())?;
             state.agents.insert(a.id.clone(), a);
         }
         let this = Self {
@@ -123,7 +121,11 @@ impl Agents {
         {
             let mut state = this.state.lock().await;
             let records: Vec<_> = state.agents.values().cloned().collect();
-            for a in records {
+            for mut a in records {
+                a.status = "interrupted".into();
+                a.turn_id = None;
+                a.requests.clear();
+                migrate(&mut a);
                 this.save(&mut state, a).await?;
             }
             this.deliver(&mut state).await?;
