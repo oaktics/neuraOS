@@ -105,13 +105,76 @@ async fn read(store: &StoreHandle, id: &str) -> String {
 }
 
 #[tokio::test]
-async fn failed_output_commit_wakes_clients_and_never_acknowledges_input_as_healthy(){
- let directory=std::env::temp_dir().join(format!("neura-pty-fault-{}",uuid::Uuid::new_v4()));std::fs::create_dir(&directory).unwrap();
- let(events,mut changes)=broadcast::channel::<Change>(32);let store=StoreHandle::open(&directory.join("state.sqlite"),events).await.unwrap();
- store.call("transaction",json!([{"sql":"CREATE TRIGGER reject_output BEFORE INSERT ON output BEGIN SELECT RAISE(ABORT,'fixture storage fault'); END","args":[]}])).await.unwrap();
- let id=uuid::Uuid::new_v4().to_string();store.put("terminals",json!({"id":id,"status":"running"}),None).await.unwrap();while changes.try_recv().is_ok(){}
- let pty=PtyRuntime::new(store.clone()).unwrap();let pid=pty.spawn(&id,"/usr/bin/python3",vec!["-c".into(),"import sys,time;print('uncommitted');sys.stdout.flush();time.sleep(30)".into()],"/tmp",HashMap::new()).await.unwrap();
- let event=tokio::time::timeout(Duration::from_secs(5),changes.recv()).await.unwrap().unwrap();assert!(event.state);assert!(pty.check_healthy().is_err());assert_eq!(pty.input(&id,"must not acknowledge").await.unwrap_err().error,"terminal_runtime_failed");
- assert_eq!(store.call("output",json!({"terminalId":id,"after":0})).await.unwrap()["data"],"");assert!(pty.shutdown().await.is_err());
- tokio::time::timeout(Duration::from_secs(5),async{while unsafe{libc::kill(pid as i32,0)}==0{tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();drop(pty);drop(store);let _=std::fs::remove_dir_all(directory);
+async fn failed_output_commit_wakes_clients_and_never_acknowledges_input_as_healthy() {
+    let directory = std::env::temp_dir().join(format!("neura-pty-fault-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let (events, mut changes) = broadcast::channel::<Change>(32);
+    let store = StoreHandle::open(&directory.join("state.sqlite"), events)
+        .await
+        .unwrap();
+    store.call("transaction", json!([{"sql":"CREATE TRIGGER reject_output BEFORE INSERT ON output BEGIN SELECT RAISE(ABORT,'fixture storage fault'); END","args":[]}])).await.unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    store
+        .put("terminals", json!({"id":id,"status":"running"}), None)
+        .await
+        .unwrap();
+    while changes.try_recv().is_ok() {}
+    let pty = PtyRuntime::new(store.clone()).unwrap();
+    // Shell builtins avoid measuring Python startup under concurrent CI PTY load.
+    // The side-channel marker separates producer progress from durable-write/fault notification.
+    // read keeps the leader alive without spawning sleep or other descendants.
+    let emitted = directory.join("emitted");
+    let mut env = HashMap::new();
+    env.insert(
+        "FAULT_EMITTED".into(),
+        emitted.to_string_lossy().into_owned(),
+    );
+    let pid = pty
+        .spawn(
+            &id,
+            "/bin/sh",
+            vec![
+                "-c".into(),
+                "printf 'uncommitted\\n'; : > \"$FAULT_EMITTED\"; read -r hold".into(),
+            ],
+            "/tmp",
+            env,
+        )
+        .await
+        .unwrap();
+    let producer = tokio::time::timeout(Duration::from_secs(5), async {
+        while !emitted.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let notification = tokio::time::timeout(Duration::from_secs(5), changes.recv()).await;
+    let healthy = pty.check_healthy().is_ok();
+    let input = pty.input(&id, "must not acknowledge").await;
+    let output = store
+        .call("output", json!({"terminalId":id,"after":0}))
+        .await
+        .unwrap();
+    // Always stop/reap before assertions, including a failed producer/notification deadline.
+    let shutdown = pty.shutdown().await;
+    let reaped = tokio::time::timeout(Duration::from_secs(5), async {
+        while unsafe { libc::kill(pid as i32, 0) } == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    drop(pty);
+    drop(store);
+    let _ = std::fs::remove_dir_all(directory);
+    assert!(producer.is_ok(), "shell producer did not confirm PTY write");
+    assert!(
+        notification.is_ok(),
+        "producer wrote, but storage-fault notification missing; healthy={healthy}"
+    );
+    assert!(notification.unwrap().unwrap().state);
+    assert!(!healthy);
+    assert_eq!(input.unwrap_err().error, "terminal_runtime_failed");
+    assert_eq!(output["data"], "");
+    assert!(shutdown.is_err());
+    assert!(reaped.is_ok(), "faulted PTY leader was not reaped");
 }
