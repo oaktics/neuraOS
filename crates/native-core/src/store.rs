@@ -56,6 +56,16 @@ fn handle(db:&mut Connection,r:&Request)->Result<Value,String>{
         "get"=>Ok(records(db,table(a)?,a["id"].as_str())?.as_array().unwrap().first().cloned().unwrap_or(Value::Null)),
         "state"=>Ok(json!({"protocolVersion":1,"hostName":a["hostName"],"revision":query(db,"SELECT COALESCE(MAX(sequence),0) AS n FROM events",&[])?[0]["n"],"projects":records(db,"projects",None)?,"workspaces":records(db,"workspaces",None)?,"terminals":records(db,"terminals",None)?})),
         "put"=>{let tx=db.transaction().map_err(|e|e.to_string())?;put(&tx,table(a)?,&a["value"],a.get("notification"))?;tx.commit().map_err(|e|e.to_string())?;Ok(Value::Null)},
+        "compare_put"=>{
+            let t=table(a)?;let id=a["id"].as_str().ok_or("missing id")?;
+            if a["value"]["id"].as_str()!=Some(id){return Err("id mismatch".into());}
+            let expected=a.get("expected").ok_or("missing expected")?;
+            let tx=db.transaction().map_err(|e|e.to_string())?;
+            let current=records(&tx,t,Some(id))?.as_array().unwrap().first().cloned().unwrap_or(Value::Null);
+            if &current!=expected {return Ok(json!(false));}
+            put(&tx,t,&a["value"],a.get("notification"))?;
+            tx.commit().map_err(|e|e.to_string())?;Ok(json!(true))
+        },
         "put_pair"=>{let tx=db.transaction().map_err(|e|e.to_string())?;put(&tx,"projects",&a["project"],None)?;put(&tx,"workspaces",&a["workspace"],None)?;tx.commit().map_err(|e|e.to_string())?;Ok(Value::Null)},
         "delete_workspace"=>{let tx=db.transaction().map_err(|e|e.to_string())?;delete_workspace(&tx,a["id"].as_str().ok_or("id")?)?;tx.commit().map_err(|e|e.to_string())?;Ok(Value::Null)},
         "remove_project"=>{
@@ -141,7 +151,7 @@ impl StoreHandle {
    let Ok((mut writer,mut reader))=init else {let _=ready.send(false);return;};
    std::thread::Builder::new().name("native-output-read".into()).spawn(move||{while let Some(job)=read_rx.blocking_recv(){let result=handle(&mut reader,&job.request).map_err(|_|ApiError::storage());let _=job.reply.send(result);}}).ok();
    let _=ready.send(true);
-   while let Some(job)=rx.blocking_recv(){let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());if result.is_ok(){if let Some(change)=change(&job.request){let _=events.send(change);}}let _=job.reply.send(result);}
+   while let Some(job)=rx.blocking_recv(){let result=handle(&mut writer,&job.request).map_err(|_|ApiError::storage());if result.is_ok() && (job.request.op!="compare_put" || result.as_ref().ok()==Some(&Value::Bool(true))){if let Some(change)=change(&job.request){let _=events.send(change);}}let _=job.reply.send(result);}
   }).map_err(|_|ApiError::storage())?;
   if !ready_rx.await.unwrap_or(false){return Err(ApiError::storage());}
   let store=Self{writes,reads,credit:Arc::new(Semaphore::new(16*1024*1024))};store.call("recover",json!({})).await?;Ok(store)
@@ -157,7 +167,25 @@ impl StoreHandle {
  pub async fn put(&self,table:&str,value:Value,notification:Option<Value>)->Result<(),ApiError>{self.call("put",json!({"table":table,"value":value,"notification":notification})).await?;Ok(())}
 }
 fn change(r:&Request)->Option<Change>{let a=&r.args;match r.op.as_str(){
- "put"=>Some(Change{state:true,terminals:if a["table"]=="terminals" {vec![a["value"]["id"].as_str()?.to_owned()]}else{vec![]},browser:false}),
+ "put"|"compare_put"=>Some(Change{state:true,terminals:if a["table"]=="terminals" {vec![a["value"]["id"].as_str()?.to_owned()]}else{vec![]},browser:false}),
  "append"=>Some(Change{state:false,terminals:a.as_array()?.iter().filter_map(|r|r["terminalId"].as_str().map(String::from)).collect(),browser:false}),
  "pty_exit"=>Some(Change{state:true,terminals:vec![a["terminalId"].as_str()?.to_owned()],browser:false}),
  "put_pair"|"delete_workspace"|"remove_project"=>Some(Change{state:true,..Default::default()}),_=>None}}
+
+#[cfg(test)]
+mod cas_tests {
+ use super::*;
+ #[test]
+ fn compare_put_preserves_newer_edits_and_identity() {
+  let mut db=Connection::open_in_memory().unwrap();db.execute_batch(SCHEMA).unwrap();
+  let old=json!({"id":"w","title":"old"});
+  handle(&mut db,&Request{op:"put".into(),args:json!({"table":"workspaces","value":old})}).unwrap();
+  let args=json!({"table":"workspaces","id":"w","expected":old,"value":{"id":"w","title":"manual"}});
+  assert_eq!(handle(&mut db,&Request{op:"compare_put".into(),args:args.clone()}).unwrap(),true);
+  let revision=query(&db,"SELECT MAX(sequence) AS n FROM events",&[]).unwrap();
+  assert_eq!(handle(&mut db,&Request{op:"compare_put".into(),args}).unwrap(),false);
+  assert_eq!(query(&db,"SELECT MAX(sequence) AS n FROM events",&[]).unwrap(),revision);
+  assert_eq!(records(&db,"workspaces",Some("w")).unwrap()[0]["title"],"manual");
+  assert!(handle(&mut db,&Request{op:"compare_put".into(),args:json!({"table":"workspaces","id":"w","expected":null,"value":{"id":"other"}})}).is_err());
+ }
+}
