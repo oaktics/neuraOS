@@ -488,6 +488,37 @@ impl StoreHandle {
             .cloned()
             .unwrap_or_default())
     }
+    /// Reapply a field update to the latest row after a conflicting native owner write.
+    pub async fn update<F>(
+        &self,
+        table: &str,
+        id: &str,
+        mutate: F,
+    ) -> Result<Option<Value>, ApiError>
+    where
+        F: Fn(&mut Value) + Send + Sync,
+    {
+        loop {
+            let Some(expected) = self.get(table, id).await? else {
+                return Ok(None);
+            };
+            let mut value = expected.clone();
+            mutate(&mut value);
+            if value == expected {
+                return Ok(Some(value));
+            }
+            if self
+                .call(
+                    "compare_put",
+                    json!({"table":table,"id":id,"expected":expected,"value":value}),
+                )
+                .await?
+                == true
+            {
+                return Ok(Some(value));
+            }
+        }
+    }
     pub async fn put(
         &self,
         table: &str,
@@ -663,6 +694,110 @@ mod lane_tests {
         assert_eq!(chunks["data"], "");
         assert_eq!(chunks["chunks"], output["chunks"]);
         assert_eq!(chunks["cursor"], output["cursor"]);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod update_race_tests {
+    use super::*;
+    #[tokio::test]
+    async fn stale_resize_and_launch_failure_preserve_exit_and_provider_fields() {
+        let dir = std::env::temp_dir().join(format!("neura-store-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events)
+            .await
+            .unwrap();
+        store
+            .put(
+                "terminals",
+                json!({"id":"t","status":"running","cols":80,"rows":24}),
+                None,
+            )
+            .await
+            .unwrap();
+        let stale = store.get("terminals", "t").await.unwrap().unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let b = barrier.clone();
+        let writer = store.clone();
+        let provider = tokio::spawn(async move {
+            writer
+                .update("terminals", "t", |v| {
+                    v["status"] = json!("exited");
+                    v["activity"] = json!("idle");
+                    v["sessionName"] = json!("latest");
+                })
+                .await
+                .unwrap();
+            b.wait().await;
+        });
+        barrier.wait().await;
+        provider.await.unwrap();
+        let mut stale_resize = stale.clone();
+        stale_resize["cols"] = json!(100);
+        assert_eq!(
+            store
+                .call(
+                    "compare_put",
+                    json!({"table":"terminals","id":"t","expected":stale,"value":stale_resize})
+                )
+                .await
+                .unwrap(),
+            false
+        );
+        store
+            .update("terminals", "t", |v| {
+                v["cols"] = json!(100);
+                v["rows"] = json!(30);
+            })
+            .await
+            .unwrap();
+        store
+            .update("terminals", "t", |v| {
+                if v["status"] == "running" {
+                    v["status"] = json!("interrupted");
+                }
+            })
+            .await
+            .unwrap();
+        let current = store.get("terminals", "t").await.unwrap().unwrap();
+        assert_eq!(current["status"], "exited");
+        assert_eq!(current["sessionName"], "latest");
+        assert_eq!(current["activity"], "idle");
+        assert_eq!(current["cols"], 100);
+        store
+            .put(
+                "projects",
+                json!({"id":"p","isGit":false,"name":"original"}),
+                None,
+            )
+            .await
+            .unwrap();
+        let writer = store.clone();
+        let rename = tokio::spawn(async move {
+            writer
+                .update("projects", "p", |v| {
+                    v["name"] = json!("manual");
+                    v["worktreeStartup"] = json!(["claude"]);
+                })
+                .await
+                .unwrap();
+        });
+        let writer = store.clone();
+        let promote = tokio::spawn(async move {
+            writer
+                .update("projects", "p", |v| v["isGit"] = json!(true))
+                .await
+                .unwrap();
+        });
+        rename.await.unwrap();
+        promote.await.unwrap();
+        let current = store.get("projects", "p").await.unwrap().unwrap();
+        assert_eq!(current["name"], "manual");
+        assert_eq!(current["isGit"], true);
+        assert_eq!(current["worktreeStartup"], json!(["claude"]));
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

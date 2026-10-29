@@ -59,7 +59,7 @@ pub struct AppState {
     pub usage: ProviderUsageService,
     pub data_dir: PathBuf,
     operations: Mutex<HashMap<String, Weak<Mutex<()>>>>,
-    workspaces: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    mutation: crate::mutation::MutationLocks,
     owners: Mutex<HashMap<String, (String, tokio::time::Instant)>>,
     browser_poll_gate: Mutex<()>,
     pub setups: Mutex<HashMap<String, tokio::task::AbortHandle>>,
@@ -115,7 +115,7 @@ impl AppState {
             usage: ProviderUsageService::new(),
             data_dir,
             operations: Mutex::new(HashMap::new()),
-            workspaces: Mutex::new(HashMap::new()),
+            mutation: crate::mutation::MutationLocks::default(),
             owners: Mutex::new(HashMap::new()),
             browser_poll_gate: Mutex::new(()),
             setups: Mutex::new(HashMap::new()),
@@ -158,31 +158,50 @@ impl AppState {
         })
     }
     pub async fn reconcile(&self) -> Result<(), ApiError> {
-        for mut p in self.store.list("projects").await? {
-            if p["isGit"] != false || p["folderless"] == true {
+        for candidate in self.store.list("projects").await? {
+            if candidate["isGit"] != false || candidate["folderless"] == true {
                 continue;
             }
-            let path = text(&p, "path")?;
+            let path = text(&candidate, "path")?;
             if !tokio::fs::try_exists(std::path::Path::new(path).join(".git"))
                 .await
                 .unwrap_or(false)
             {
                 continue;
             }
-            if let Ok((root, true)) = work::project_folder(path).await {
-                if root != path {
-                    continue;
-                }
-                let branch = work::git(&root, &["branch", "--show-current"]).await?;
-                let pid = p["id"].clone();
-                p["isGit"] = json!(true);
-                self.store.put("projects", p, None).await?;
-                for mut w in self.store.list("workspaces").await? {
-                    if w["projectId"] == pid && w["kind"] == "folder" && w["path"] == root {
-                        w["kind"] = json!("root");
-                        w["branch"] = json!(branch.trim());
-                        self.store.put("workspaces", w, None).await?;
+            let Ok((root, true)) = work::project_folder(path).await else {
+                continue;
+            };
+            if root != path {
+                continue;
+            }
+            let branch = work::git(&root, &["branch", "--show-current"]).await?;
+            let pid = text(&candidate, "id")?;
+            let current = self
+                .store
+                .update("projects", pid, |p| {
+                    if p["path"] == path && p["folderless"] != true {
+                        p["isGit"] = json!(true);
                     }
+                })
+                .await?;
+            if !current.is_some_and(|p| p["path"] == path && p["isGit"] == true) {
+                continue;
+            }
+            for w in self.store.list("workspaces").await? {
+                if w["projectId"] == pid && w["path"] == root && w["kind"] == "folder" {
+                    self.store
+                        .update("workspaces", text(&w, "id")?, |w| {
+                            if w["projectId"] == pid && w["path"] == root && w["kind"] == "folder" {
+                                w["kind"] = json!("root");
+                                w["branch"] = json!(if branch.trim().is_empty() {
+                                    "(detached)"
+                                } else {
+                                    branch.trim()
+                                });
+                            }
+                        })
+                        .await?;
                 }
             }
         }
@@ -259,8 +278,14 @@ impl AppState {
         let result=async{let spec=launch.map_err(provider_error)?;record=self.store.get("terminals",&terminal).await?.ok_or_else(ApiError::storage)?;if let Some(agent)=spec.agent_id{loop{let expected=self.store.get("terminals",&terminal).await?.ok_or_else(ApiError::storage)?;let mut updated=expected.clone();if updated["agentId"].is_null(){updated["agentId"]=json!(agent);}if updated["sessionId"].is_null(){updated["sessionId"]=json!(agent);}if updated==expected||self.store.call("compare_put",json!({"table":"terminals","id":terminal,"expected":expected,"value":updated})).await?==true{break;}}}self.store.call("append",json!([{"terminalId":terminal,"data":"","cols":100,"rows":30}])).await?;self.pty.spawn(&terminal,&spec.program,spec.args,text(&workspace,"path")?,spec.env).await?;Ok(self.store.get("terminals",&terminal).await?.ok_or_else(ApiError::storage)?)}.await;
         if result.is_err() {
             let _ = self.providers.close(&terminal).await;
-            record["status"] = json!("interrupted");
-            let _ = self.store.put("terminals", record, None).await;
+            let _ = self
+                .store
+                .update("terminals", &terminal, |record| {
+                    if record["status"] == "running" {
+                        record["status"] = json!("interrupted");
+                    }
+                })
+                .await;
         }
         result
     }
@@ -683,34 +708,34 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
     if kind.starts_with("agent.") {
         return s.providers.agents.command(c).await.map_err(provider_error);
     }
-    let scope = if let Some(key) = c["projectId"].as_str() {
+    let project = if let Some(key) = c["projectId"].as_str() {
         Some(key.to_owned())
-    } else if kind.starts_with("project.") {
-        Some("project-catalogue".to_owned())
     } else if let Some(key) = c["workspaceId"].as_str() {
-        let w = s.entity("workspaces", key).await?;
-        Some(text(&w, "projectId")?.to_owned())
-    } else if let Some(key) = c["projectId"].as_str() {
-        Some(key.to_owned())
+        Some(text(&s.entity("workspaces", key).await?, "projectId")?.to_owned())
     } else {
         None
     };
-    let _scope_guard = if let Some(key) = scope {
-        let lock = {
-            let mut locks = s.workspaces.lock().await;
-            locks.retain(|_, v| v.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(Mutex::new(()));
-                locks.insert(key, Arc::downgrade(&lock));
-                lock
-            }
-        };
-        Some(lock.lock_owned().await)
-    } else {
-        None
-    };
+    let workspace = c["workspaceId"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| c["terminalId"].as_str().map(|v| format!("terminal:{v}")));
+    let catalogue = [
+        "project.add",
+        "project.create",
+        "project.attach",
+        "project.remove",
+    ]
+    .contains(&kind);
+    let exclusive = ["project.remove", "project.attach"].contains(&kind);
+    let _scope = s
+        .mutation
+        .enter(
+            project.as_deref(),
+            workspace.as_deref(),
+            exclusive,
+            catalogue,
+        )
+        .await;
 
     match kind {
         "project.create" => {
@@ -797,9 +822,30 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                 None
             };
             let w = json!({"id":root.map(|w|w["id"].clone()).unwrap_or_else(||json!(if kind=="project.attach"{op.to_owned()}else{Uuid::new_v4().to_string()})),"projectId":p["id"],"name":root.map(|w|w["name"].clone()).unwrap_or_else(||json!(if kind=="project.attach"{basename(&path)}else{"メイン".into()})),"path":path,"branch":branch,"kind":if is_git{"root"}else{"folder"},"createdAt":root.map(|w|w["createdAt"].clone()).unwrap_or(p["createdAt"].clone())});
-            s.store
-                .call("put_pair", json!({"project":p,"workspace":w}))
-                .await?;
+            if existing.is_some() && kind == "project.add" {
+                p = s
+                    .store
+                    .update("projects", text(&p, "id")?, |v| {
+                        v["isGit"] = json!(is_git);
+                    })
+                    .await?
+                    .ok_or_else(ApiError::storage)?;
+                if root.is_some() {
+                    s.store
+                        .update("workspaces", text(&w, "id")?, |v| {
+                            for k in ["path", "branch", "kind"] {
+                                v[k] = w[k].clone();
+                            }
+                        })
+                        .await?;
+                } else {
+                    s.store.put("workspaces", w, None).await?;
+                }
+            } else {
+                s.store
+                    .call("put_pair", json!({"project":p,"workspace":w}))
+                    .await?;
+            }
             Ok(p)
         }
         "project.set-worktree-startup"
@@ -831,8 +877,26 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                     }
                 }
             };
-            s.store.put("projects", p.clone(), None).await?;
-            Ok(p)
+            let keys: Vec<&str> = match kind {
+                "project.set-worktree-startup" => vec!["worktreeStartup"],
+                "project.set-worktree-setup" => vec!["worktreeSetup"],
+                _ => ["defaultConversationProvider", "defaultDelegationProvider"]
+                    .into_iter()
+                    .filter(|k| c.get(*k).is_some())
+                    .collect(),
+            };
+            s.store
+                .update("projects", text(&p, "id")?, |value| {
+                    for key in &keys {
+                        if let Some(v) = p.get(*key) {
+                            value[*key] = v.clone();
+                        } else {
+                            value.as_object_mut().unwrap().remove(*key);
+                        }
+                    }
+                })
+                .await?
+                .ok_or_else(ApiError::storage)
         }
         "project.remove" => {
             let key = text(c, "projectId")?;
@@ -1057,7 +1121,7 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
             Ok(json!({"ok":true}))
         }
         "workspace.sync-default" => {
-            let mut w = s.entity("workspaces", text(c, "workspaceId")?).await?;
+            let w = s.entity("workspaces", text(c, "workspaceId")?).await?;
             if w["kind"] != "root" {
                 return Err(ApiError::new(
                     "root_required",
@@ -1080,9 +1144,12 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
             let root = text(&w, "path")?;
             let target = work::fetch_default(root).await?;
             work::sync_default(root, &target).await?;
-            w["branch"] = target["branch"].clone();
-            s.store.put("workspaces", w.clone(), None).await?;
-            Ok(w)
+            s.store
+                .update("workspaces", text(&w, "id")?, |value| {
+                    value["branch"] = target["branch"].clone()
+                })
+                .await?
+                .ok_or_else(ApiError::storage)
         }
         "terminal.open" => {
             let key = text(c, "workspaceId")?;
@@ -1145,11 +1212,12 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                     c["rows"].as_u64().ok_or_else(invalid)? as u16,
                 )
                 .await?;
-            if let Some(mut t) = s.store.get("terminals", key).await? {
-                t["cols"] = c["cols"].clone();
-                t["rows"] = c["rows"].clone();
-                s.store.put("terminals", t, None).await?;
-            }
+            s.store
+                .update("terminals", key, |t| {
+                    t["cols"] = c["cols"].clone();
+                    t["rows"] = c["rows"].clone();
+                })
+                .await?;
             Ok(json!({"ok":true}))
         }
         "terminal.stop" => {
