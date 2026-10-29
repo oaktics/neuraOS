@@ -20,6 +20,7 @@ test('native client decodes legacy v1 and gates GitHub on advertised features',{
     // Keep the executable timeout separate so contract failures still fail quickly.
     await exec('xcrun',['swiftc','-swift-version','5','-parse-as-library','-I',dir,'-L',dir,'-lSleepControl','-Xlinker','-rpath','-Xlinker',dir,
       resolve('apps/macos/Sources/NeuraOS/Models.swift'),
+      resolve('apps/macos/Sources/NeuraOS/DaemonEvents.swift'),
       resolve('apps/macos/Sources/NeuraOS/Diagnostics.swift'),
       resolve('apps/macos/Sources/NeuraOS/AgentNotifications.swift'),
       resolve('apps/macos/Sources/NeuraOS/AgentSleep.swift'),

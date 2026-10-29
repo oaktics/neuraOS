@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "recordedDate": "2026-10-29",
+  "scope": "Actual Rust daemon HTTP to ProviderService launch path with synthetic external Claude and Codex CLIs at 10/20/32.",
+  "provenance": {
+    "sourceEvidencePath": "/private/tmp/neura-provider-daemon-JZsrze/evidence.json",
+    "sourceEvidenceSha256": "86d742f14da972061d94e5a470fc8eb6ef582593dd3ef07d3e2270bf08f0c9c6",
+    "sourceLogPath": "/tmp/neura-root-provider-daemon-parallel.log",
+    "sourceLogSha256": "9a7222a258db09f3c39d775192881341850046b1536702982519091bdf16b121",
+    "reviewedSourceCommit": "4ab24c9920982c3bb4dcc91b94aa54d8b94337bb",
+    "harness": "tests/native/provider-daemon-parallel.test.mjs",
+    "binaryCommitVerification": "Not independently recorded in the source JSON; root reported these runs against the integration checkpoint.",
+    "transformation": "Copied result fields; omitted temporary root/fixture path and token digest. Original evidence unchanged."
+  },
+  "limitations": [
+    "Synthetic CLIs, not real models or paid workload.",
+    "reconnectCursorReplay means UI WebSocket disconnect/reconnect and terminal output cursor replay; provider App Server reconnect was not tested.",
+    "milliseconds are fixture elapsed times, not a controlled legacy/native benchmark or energy result."
+  ],
+  "result": {
+    "checks": [
+      {
+        "provider": "claude",
+        "count": 10,
+        "simultaneousActive": 10,
+        "milliseconds": 1823,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      },
+      {
+        "provider": "claude",
+        "count": 20,
+        "simultaneousActive": 20,
+        "milliseconds": 1716,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      },
+      {
+        "provider": "claude",
+        "count": 32,
+        "simultaneousActive": 32,
+        "milliseconds": 2747,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      },
+      {
+        "provider": "codex",
+        "count": 10,
+        "simultaneousActive": 10,
+        "milliseconds": 2712,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      },
+      {
+        "provider": "codex",
+        "count": 20,
+        "simultaneousActive": 20,
+        "milliseconds": 10315,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      },
+      {
+        "provider": "codex",
+        "count": 32,
+        "simultaneousActive": 32,
+        "milliseconds": 12969,
+        "registration": true,
+        "input": true,
+        "turnEvents": true,
+        "exit": true,
+        "reconnectCursorReplay": true
+      }
+    ],
+    "ok": true,
+    "processesStarted": 186,
+    "processesRemaining": 0,
+    "shutdown": {
+      "code": 0,
+      "signal": null
+    }
+  }
+}

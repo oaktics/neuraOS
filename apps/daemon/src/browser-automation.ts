@@ -3,7 +3,7 @@ import type {FastifyInstance} from 'fastify';
 import {z} from 'zod';
 import {randomUUID} from 'node:crypto';
 import {Fault,requireValue,type Workspace,type TerminalRecord} from './contracts.ts';
-import type {Store} from './store.ts';
+import type {StoreAPI as Store} from './store-api.ts';
 
 const uuid=z.uuid(), tabSchema=z.object({workspaceId:uuid,tabId:uuid,projectId:uuid,url:z.string().max(8192),title:z.string().max(2048),selected:z.boolean(),loading:z.boolean(),enabled:z.boolean()}).strict();
 const target={workspaceId:uuid,tabId:uuid};
@@ -18,26 +18,36 @@ export const browserCommand=z.discriminatedUnion('action',[
   z.object({action:z.literal('wait'),...target,text:z.string().min(1).max(1000),timeoutMs:z.number().int().min(100).max(15000).default(5000)}).strict(),
 ]);
 type Tab=z.infer<typeof tabSchema>;
-type Pending={id:string;deadline:number;projectId:string;terminalId:string;command:z.infer<typeof browserCommand>;sent:boolean;cancelled?:boolean;settled?:boolean;finish:(result:unknown,error?:string)=>void};
+type Pending={id:string;deadline:number;projectId:string;terminalId:string;command:z.infer<typeof browserCommand>;sent:boolean;timer?:NodeJS.Timeout;cancelled?:boolean;settled?:boolean;finish:(result:unknown,error?:string)=>void};
 // No persisted page contents, images, form text or automatic mutation retries.
-export function registerBrowserAutomation(app:FastifyInstance,store:Store,master:string){
+export function registerBrowserAutomation(app:FastifyInstance,store:Store,master:string,notify:()=>void=()=>{}){
   const instanceId=randomUUID();
   let nativeId='',lastPoll=0,tabs:Tab[]=[];
+  let pollGeneration=0;
   const pending=new Map<string,Pending>();
-  const workspace=(id:string)=>requireValue(store.get<Workspace>('workspaces',id),'workspace_missing','Workspace is unavailable.');
+  const workspace=async(id:string)=>requireValue(await store.get<Workspace>('workspaces',id),'workspace_missing','Workspace is unavailable.');
   const failAll=(error:string)=>{for(const p of pending.values())p.finish(undefined,error);};
-  const timer=setInterval(()=>{if(Date.now()-lastPoll>3000){tabs=[];failAll('browser_disconnected');}for(const p of pending.values())if(p.deadline<Date.now())p.finish(undefined,'browser_timeout');},250);timer.unref();
-  app.addHook('onClose',async()=>{clearInterval(timer);failAll('browser_disconnected');});
+  let lease:NodeJS.Timeout|undefined;
+  let leaseMs=3000;
+  app.addHook('onClose',async()=>{clearTimeout(lease);failAll('browser_disconnected');});
   app.post('/v1/browser/native/poll',{bodyLimit:12*1024*1024},async req=>{
-    const body=z.object({nativeId:uuid,tabs:z.array(tabSchema).max(500),results:z.array(z.object({id:uuid,result:z.unknown().optional(),error:z.string().max(100).optional()}).strict()).max(32)}).strict().parse(req.body);
-    if(nativeId&&nativeId!==body.nativeId&&Date.now()-lastPoll<3000)throw new Fault('browser_native_busy','Another app owns the browser bridge.',409);
+    const body=z.object({nativeId:uuid,stream:z.boolean().optional(),tabs:z.array(tabSchema).max(500),results:z.array(z.object({id:uuid,result:z.unknown().optional(),error:z.string().max(100).optional()}).strict()).max(32)}).strict().parse(req.body);
+    if(nativeId&&nativeId!==body.nativeId&&Date.now()-lastPoll<leaseMs)throw new Fault('browser_native_busy','Another app owns the browser bridge.',409);
     if(nativeId!==body.nativeId){failAll('browser_restarted');pending.clear();}
     nativeId=body.nativeId;lastPoll=Date.now();
-    tabs=body.tabs.filter(t=>store.get<Workspace>('workspaces',t.workspaceId)?.projectId===t.projectId);
+    leaseMs=body.stream?45000:3000;
+    clearTimeout(lease);
+    lease=setTimeout(()=>{tabs=[];failAll('browser_disconnected');},leaseMs);lease.unref();
+    const generation=++pollGeneration;
+    const snapshot=await store.state();
+    if(generation!==pollGeneration||nativeId!==body.nativeId)throw new Fault('browser_native_stale','A newer browser update replaced this request.',409);
+    const workspaces=new Map(snapshot.workspaces.map(w=>[w.id,w]));
+    const terminals=new Map(snapshot.terminals.map(t=>[t.id,t]));
+    tabs=body.tabs.filter(t=>workspaces.get(t.workspaceId)?.projectId===t.projectId);
     for(const r of body.results){const p=pending.get(r.id);if(p){p.finish(r.result,r.error);pending.delete(r.id);}}
     for(const p of pending.values()){
-      const caller=store.get<TerminalRecord>('terminals',p.terminalId);
-      if(!caller||caller.status!=='running'||store.get<Workspace>('workspaces',caller.workspaceId)?.projectId!==p.projectId){p.finish(undefined,'browser_caller_inactive');continue;}
+      const caller=terminals.get(p.terminalId);
+      if(!caller||caller.status!=='running'||workspaces.get(caller.workspaceId)?.projectId!==p.projectId){p.finish(undefined,'browser_caller_inactive');continue;}
       if(p.command.action==='list')continue;
       const tab=tabs.find(t=>t.workspaceId===p.command.workspaceId&&t.tabId===('tabId' in p.command?p.command.tabId:''));
       if(!tab)p.finish(undefined,'browser_tab_closed');else if(!tab.enabled&&p.command.action!=='stop')p.finish(undefined,'browser_disabled');
@@ -48,11 +58,11 @@ export function registerBrowserAutomation(app:FastifyInstance,store:Store,master
   app.post('/v1/browser/call',async req=>{
     const {terminalId,command}=z.object({terminalId:uuid,command:browserCommand}).strict().parse(req.body);
     if(!verifyBrowserCredential(master,terminalId,req.headers['x-neura-browser-token']))throw new Fault('browser_caller_unauthorized','Browser credential does not match the caller.',403);
-    const caller=requireValue(store.get<TerminalRecord>('terminals',terminalId),'browser_caller_missing','A neuraOS terminal is required.');
+    const caller=requireValue(await store.get<TerminalRecord>('terminals',terminalId),'browser_caller_missing','A neuraOS terminal is required.');
     if(caller.status!=='running'||!['codex','claude'].includes(caller.provider))throw new Fault('browser_caller_inactive','The calling CLI is not running.',403);
-    const projectId=workspace(caller.workspaceId).projectId;
-    if(command.workspaceId&&workspace(command.workspaceId).projectId!==projectId)throw new Fault('browser_forbidden','Other projects are not accessible.',403);
-    if(Date.now()-lastPoll>3000)throw new Fault('browser_disconnected','Browser app is not connected.',503);
+    const projectId=(await workspace(caller.workspaceId)).projectId;
+    if(command.workspaceId&&(await workspace(command.workspaceId)).projectId!==projectId)throw new Fault('browser_forbidden','Other projects are not accessible.',403);
+    if(Date.now()-lastPoll>leaseMs)throw new Fault('browser_disconnected','Browser app is not connected.',503);
     if(command.action==='list')return {currentWorkspaceId:caller.workspaceId,tabs:tabs.filter(t=>t.projectId===projectId&&(!command.workspaceId||t.workspaceId===command.workspaceId))};
     const tab=requireValue(tabs.find(t=>t.workspaceId===command.workspaceId&&t.tabId===command.tabId),'browser_tab_closed','Tab is closed or not mounted.');
     if(tab.projectId!==projectId)throw new Fault('browser_forbidden','Other projects are not accessible.',403);
@@ -64,13 +74,16 @@ export function registerBrowserAutomation(app:FastifyInstance,store:Store,master
     const id=randomUUID(),deadline=Date.now()+(command.action==='wait'?command.timeoutMs+2000:30000);
     return new Promise((resolve,reject)=>{
       pending.set(id,{id,deadline,projectId,terminalId,command,sent:false,finish:(result,error)=>{
-        const p=pending.get(id);if(!p||p.settled)return;p.settled=true;
+        const p=pending.get(id);if(!p||p.settled)return;p.settled=true;clearTimeout(p.timer);
         // Keep a sent request quarantined until native confirms it has finished.
         // Timeout/disconnect cancels the caller promise, not the remote operation.
-        if(error){p.cancelled=true;if(!p.sent)pending.delete(id);}
+        if(error){p.cancelled=true;if(!p.sent)pending.delete(id);notify();}
         if(error)reject(new Fault(error,'Browser operation stopped. Read the current state before retrying.',409));
         else resolve({workspaceId:command.workspaceId,tabId:command.tabId,result});
       }});
+      const p=pending.get(id)!;
+      p.timer=setTimeout(()=>p.finish(undefined,'browser_timeout'),Math.max(1,deadline-Date.now()));p.timer.unref();
+      notify();
     });
   });
 }

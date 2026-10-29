@@ -31,9 +31,11 @@ ad-hoc署名のdesignated requirementはビルドに依存する。証明書に�
 
 ## 署名する範囲
 
-証明書を使う場合は、実ファイルのMach-Oヘッダーを調べて同梱コードを列挙する。CEF内のライブラリ、Helper、Node、native addon、Sleep serviceを内側から署名し、最後にアプリを署名する。symlinkをたどって同じコードを再署名しない。署名にはHardened Runtimeとsecure timestampを使用する。`--deep`は検証時だけ使う。
+証明書を使う場合は、実ファイルのMach-Oヘッダーを調べて同梱コードを列挙する。CEF内のライブラリ、Helper、Rust daemon、Swift updater、Sleep serviceを内側から署名し、最後にアプリを署名する。symlinkをたどって同じコードを再署名しない。署名にはHardened Runtimeとsecure timestampを使用する。`--deep`は検証時だけ使う。
 
-Renderer/GPUとNode等のJIT実行プロセスに`allow-jit`を付ける。CEFの`browser_subprocess_path`が指す汎用のNeuraOS HelperもRendererを兼ねるため対象にする。署名済みアプリと同梱ライブラリは同じTeam IDを使い、library validationを維持する。Sleep serviceにはJITやlibrary validation無効化の例外を付けない。
+署名前に、アプリ内の実ファイルの`Info.plist`を`plutil -convert xml1`で正規化する。ChromiumはFoundationで再シリアライズしたplistのbytesをmacOSのdynamic code validationへ渡すため、minifyされた非正規XMLをそのまま署名すると、ディスク上の`codesign --verify`が成功してもdynamic検証が`-67030`で失敗し得る。main appとhelperを含め、署名sealを作る前に正規化し、frameworkのsymlink aliasはたどらない。ad-hocと証明書署名の両経路へ適用する。署名後にplistを書き換えて検証を回避する対応ではない。dynamic署名確認の成功は1Passwordのaccount同期・保存・自動入力成功とは別に記録する。
+
+Renderer/GPU等のChromium JIT実行プロセスに`allow-jit`を付ける。CEFの`browser_subprocess_path`が指す汎用のNeuraOS HelperもRendererを兼ねるため対象にする。署名済みアプリと同梱ライブラリは同じTeam IDを使い、library validationを維持する。Rust daemon・Swift updater・Sleep serviceにはJITやlibrary validation無効化の例外を付けない。
 
 ## GitHub Actions
 

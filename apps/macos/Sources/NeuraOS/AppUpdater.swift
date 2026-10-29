@@ -15,10 +15,17 @@ struct NativeRelease: Decodable {
     @Published var release: NativeRelease?
     var currentBuild: Int {Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0}
 
+    private var installedRelease: Bool {
+        Bundle.main.bundleIdentifier == "app.neuraos.native" &&
+        Bundle.main.object(forInfoDictionaryKey: "NeuraDataDirectory") == nil &&
+        Bundle.main.object(forInfoDictionaryKey: "NeuraEndpoint") == nil
+    }
     func bootstrap() async {
+        // Fixture/development bundles must never replace the user's LaunchAgent.
+        guard installedRelease else {return}
         guard let resources = Bundle.main.resourceURL,
-              FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("Runtime/bin/node").path) else {return}
-        do {_ = try await run(["bootstrap"], bundledScript: true)}
+              FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("Runtime/bin/neura-updater").path) else {return}
+        do {_ = try await run(["bootstrap"])}
         catch {message = error.localizedDescription; presented = true}
         let errorFile = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/neuraOS/Updates/last-error.txt")
         if let error = try? String(contentsOf: errorFile, encoding: .utf8) {
@@ -67,14 +74,13 @@ struct NativeRelease: Decodable {
         }
     }
 
-    private func run(_ arguments: [String], bundledScript: Bool = false) async throws -> Data {
+    private func run(_ arguments: [String]) async throws -> Data {
+        guard installedRelease else {throw updateError("開発・検証用アプリから配布版の更新は実行できません。") }
         guard let resources = Bundle.main.resourceURL else {throw updateError("更新プログラムがありません。")}
-        let bundled = resources.appendingPathComponent("Runtime/bin/node").path
-        let node = [bundled, "/opt/homebrew/bin/node", "/usr/local/bin/node"].first {FileManager.default.isExecutableFile(atPath: $0)}
-        guard let node else {throw updateError("更新にはNode.js 24が必要です。初回は配布版をインストールしてください。")}
-        let script = resources.appendingPathComponent(bundledScript ? "Runtime/scripts/native/release/update.mjs" : "update.mjs").path
+        let helper = resources.appendingPathComponent("Runtime/bin/neura-updater").path
+        guard FileManager.default.isExecutableFile(atPath: helper) else {throw updateError("native更新プログラムがありません。配布版を再インストールしてください。")}
         return try await Task.detached(priority: .utility) {
-            try UpdateProcess.run(executable: node, arguments: [script] + arguments,
+            try UpdateProcess.run(executable: helper, arguments: arguments,
                                   timeout: ["prepare", "bootstrap"].contains(arguments.first ?? "") ? nil : 90)
         }.value
     }

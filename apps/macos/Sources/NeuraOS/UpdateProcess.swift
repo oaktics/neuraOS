@@ -2,7 +2,7 @@ import Foundation
 import Darwin
 
 enum UpdateProcess {
-    // Run off the main actor. Preparation and bootstrap own their deadlines in JavaScript so
+    // Run off the main actor. Preparation and bootstrap own their deadlines in the native helper so
     // locks and child processes are cleaned up before returning to the UI.
     static func run(executable: String, arguments: [String], timeout: TimeInterval?) throws -> Data {
         let process = Process()

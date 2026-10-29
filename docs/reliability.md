@@ -4,7 +4,7 @@
 
 おかしい操作の直後、macOSのメニューバーの「ヘルプ」から「今おかしかった：診断情報を保存…」を選ぶ。ローカルにJSONを保存し、問題の説明と一緒に共有する。外部への自動送信は行わない。UIが停止して保存できない場合は、再起動後に保存する。
 
-診断情報はアプリのデータディレクトリの `diagnostics` に保存する。通常は `~/Library/Application Support/neuraOS/Developer/diagnostics`。app / daemonそれぞれ約1 MiB×2世代でローテーションする。会話、ファイル内容、端末入出力、トークン、URL、パス、エラーメッセージは記録しない。操作ID、操作種別、時刻、ビルド、所要時間、数値エラーコードのみを記録する。端末入力・リサイズの成功は記録対象外。診断保存先は所有者のみ読み書き可能にする。
+診断情報はアプリのデータディレクトリの `diagnostics` に保存する。通常は `~/Library/Application Support/neuraOS/Developer/diagnostics`。app / daemonそれぞれ約1 MiB×2世代でローテーションする。会話、ファイル内容、端末入出力、トークン、URL、パス、エラーメッセージは記録しない。許可された操作・相関メタデータだけを記録する。native daemonは時刻、session、runtime、event、検証済みoperationId・operation、所要時間を出力し、UI側はビルドや数値エラーコードも扱う。端末入力・リサイズの成功は記録対象外。診断保存先は所有者のみ読み書き可能にする。native daemonのファイルは0600、ディレクトリは0700。専用writerのbounded queueでHTTP/PTYを待たせず、queue満杯・書込み失敗で失った件数は次の記録の`droppedEvents`に示す。ログ欠落を成功や無障害と解釈しない。旧Nodeのevent-loop/JS heap samplerはnative daemonでは動かさない。
 
 ## 切り分け
 
@@ -15,7 +15,11 @@
 - `session.unclean`: 正常終了記録がない終了。強制終了、OS終了、クラッシュ等を含み、クラッシュとは断定しない。
 - `crashes`: macOS DiagnosticReportsのneuraOS .ipsの直近最大10件から、日時・バージョン・incident ID・例外種別・シグナル・イメージUUIDとオフセットなど限定したメタデータだけを保存する。生のスタックやメモリは共有しない。詳細調査で生のレポートが必要な場合は別途確認する。
 
-ビルド時にアプリの外側へ `neuraOS.app.dSYM` を生成し、CIでは90日間保持する。クラッシュのイメージUUIDと一致するビルドのシンボルを使ってコード位置を特定する。古いビルドを長くサポートする場合は保存期間を延ばす。
+ビルド時にアプリの外側へ `neuraOS.app.dSYM` を生成し、CIでは1日間保持する。クラッシュのイメージUUIDと一致するビルドのシンボルを使ってコード位置を特定する。古いビルドを長くサポートする場合は保存期間を延ばす。
+
+PTY出力の保存や所有プロセス処理に失敗した場合は、状態変更通知で待機中のUIを起こし、`terminal_runtime_failed`で状態・出力取得等を拒否する。未保存出力があるのに正常な入力処理／healthとして応答しない。単なる接続再試行で永続化障害が解消したとは扱わない。
+
+Git／workspace runner／providerは、leaderをreapしない終了通知を受けてから`tree.stop()`で所有子孫を停止し、最後に`wait`する。leaderの識別を先に失わず、pipeを保持する子が残ってもcleanupへ進む。`0a57023`のRust試験は短命restricted子を含む正常・失敗・timeout・cancelを確認するが、未観測double-forkからrestricted processへ移る場合などのOS境界は残る。詳細は[native process ownership](native-process-ownership.md)、検証数は[release checkpoint](development-release.md#native統合の検証checkpoint2026-10-29)を参照する。
 
 ## 毎週のレビュー
 
@@ -39,7 +43,7 @@ CIはPRごとに実行し、毎週の定期実行でも回帰を確認する。�
 
 状態の取得周期とUIの更新範囲は分離する。`AppModel` と `DaemonViewState` はObservationで、各Viewが実際に読んだプロパティだけを監視する。Daemonの一括スナップショットは値を比較して反映し、ターミナル状態・利用枠の変化をプロジェクトメニューやナビゲーションへ波及させない。活動表示の読み取りは末端のViewに置く。操作待ちの解除・起動完了など、描画間で発生しても取りこぼせない遷移は明示的なイベントとして通知する。
 
-1秒ごとの状態取得は継続する。変更通知の配信へ移行する場合も、このUI側の分離は維持する。回帰確認では、状態不変の連続取得、ターミナル活動だけの変化、利用枠だけの変化を与え、無関係なViewの依存関係が無効化されないことを検証する。サブメニューを開いたまま複数回の更新をまたぎ、項目選択と通常のボタン操作ができることも確認する。
+通常時の1秒ごとの状態取得は廃止し、認証付きWebSocketの変更通知から必要な状態を取得する。切断時はbackoffで再接続して状態とcursor付き端末出力を回収する。通知取得／配送の失敗時はcursorを保持し、変更イベントが来なくてもbackoffで再試行する。接続先が`state.stream`を広告しなくなった場合は旧streamのgenerationを無効化し、互換取得へ戻す。この通知方式でもUI側の分離は維持する。回帰確認では、状態不変の連続取得、ターミナル活動だけの変化、利用枠だけの変化を与え、無関係なViewの依存関係が無効化されないことを検証する。サブメニューを開いたまま複数回の更新をまたぎ、項目選択と通常のボタン操作ができることも確認する。
 
 配布用ビルドを一時領域で起動する自動スモークでは、アプリ自身のサイドバーボタン操作、バックグラウンド処理中のタブ選択・閉じる操作、診断保存を確認する。CEFも起動し、worktree削除確認のキャンセルをマウスイベントで3回繰り返し、アプリ全体のモーダルの操作と、その後のブラウザ読み込み再開も確認する。確認画面の表示中はCEFの外部イベント処理を一時停止し、AppKitにクリックを処理させる。通常のDaemonや作業データに接続させない。実運用では以下も確認する。
 
@@ -48,3 +52,22 @@ CIはPRごとに実行し、毎週の定期実行でも回帰を確認する。�
 - 接続断から復帰した際、入力を勝手に再送せず操作できる。
 - スリープ復帰、長時間の端末出力、ブラウザとエディタを併用してUIが応答する。
 - 診断保存と再起動後の回収ができる。強制終了は作業を保存したテスト環境のみで行う。
+
+
+## 今回の実装作業から見つかった改善項目
+
+各worktree担当と統合担当の実体験を集約し、既存のopen/closed Issueと重複を確認した。実装済みの修正は除外し、以下を追跡する。
+
+- [#135 MCPのUUID要件とフィールド別エラー](https://github.com/oaktics/neuraOS/issues/135)
+- [#136 task_listの対象絞り込み・軽量表示・差分取得](https://github.com/oaktics/neuraOS/issues/136)
+- [#137 browser-smokeの候補アプリ設定の事前検証](https://github.com/oaktics/neuraOS/issues/137)
+- [#138 modal/UI smokeの段階別進行記録](https://github.com/oaktics/neuraOS/issues/138)
+- [#139 queued instructionの個別消費・撤回・置換](https://github.com/oaktics/neuraOS/issues/139)
+
+1Passwordの実用化保留は別の[#134](https://github.com/oaktics/neuraOS/issues/134)。各Issueでは観測事実と原因未確定の部分を分け、確認方法と完了条件を記載している。
+
+### Codex reconciliation
+
+Loaded-thread discovery registers ownership without changing the terminal's selected agent/session/name. Actual session selection remains tied to explicit registration and `thread/started`. Completion notifications are emitted only for accepted new completions; repeated reconciliation, stale turns and unknown completions do not create duplicate banners. Regression tests also preserve parent-report attribution. An isolated Codex 0.165.0 stdio probe resumed two loaded threads six times with no resume-induced `thread/started`; it did not run a model turn or verify interactive TUI selection.
+
+Final benchmark follow-up: [#141](https://github.com/oaktics/neuraOS/issues/141) adds threshold-triggered HTTP/queue/commit timing evidence for an observed but unreproduced latency outlier. See [the unfiltered measurements](performance.md#optimized-comparison-2026-10-29). Final review workers also reported the task-list volume problem already tracked by #136.

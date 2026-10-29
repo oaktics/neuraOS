@@ -1,0 +1,37 @@
+{
+  "hardware": "Apple M1",
+  "machTimebase": {
+    "numer": 125,
+    "denom": 3
+  },
+  "method": "Three approximately 200ms CPU burns compared proc_pid_rusage counters with getrusage and CLOCK_PROCESS_CPUTIME_ID. Counters were sampled sequentially, not atomically.",
+  "source": "https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/kern/bsd_kern.c",
+  "samples": [
+    {
+      "numer": 125,
+      "denom": 3,
+      "rawDelta": 4783164,
+      "convertedNs": 199298500,
+      "getrusageNs": 199303000,
+      "clockCpuNs": 199294000
+    },
+    {
+      "numer": 125,
+      "denom": 3,
+      "rawDelta": 4789268,
+      "convertedNs": 199552833,
+      "getrusageNs": 199558000,
+      "clockCpuNs": 199545000
+    },
+    {
+      "numer": 125,
+      "denom": 3,
+      "rawDelta": 4776623,
+      "convertedNs": 199025958,
+      "getrusageNs": 199032000,
+      "clockCpuNs": 199023000
+    }
+  ],
+  "samplerFixCommit": "6f04e0e",
+  "note": "The prior unconverted cpuMs values from the first local comparison are invalid and are not used for the final comparison. Latencies, wakeups and footprint did not use the CPU conversion."
+}

@@ -4,6 +4,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Called before SwiftUI creates NSApplication. No Chromium work happens in tests.
 FOUNDATION_EXPORT void NCPrepareApplication(void);
 FOUNDATION_EXPORT NSString * _Nullable NCInitializeChromium(void);
+FOUNDATION_EXPORT NSString * _Nullable NCChromiumProfileDirectory(void);
+// Opens a full Chrome-style window in the same profile as embedded tabs.
+FOUNDATION_EXPORT NSString * _Nullable NCOpenExtensionWindow(NSString *url);
 FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 @interface NCChromiumView : NSView
 @property(nonatomic, copy, nullable) void (^onState)(NSString *url, NSString *title, BOOL back, BOOL forward, BOOL loading);
@@ -31,3 +34,5 @@ FOUNDATION_EXPORT int NCRunDownloadSmoke(NSString * _Nonnull url, NSString * _No
 
 // True only for the process-local isolated smoke profile, never persisted preferences.
 FOUNDATION_EXPORT BOOL NCChromiumUsesTestKeychain(void);
+
+FOUNDATION_EXPORT int NCRunExtensionsSmoke(NSString * _Nonnull url, NSString * _Nonnull dataDirectory, int port, NSView * _Nullable accessory);

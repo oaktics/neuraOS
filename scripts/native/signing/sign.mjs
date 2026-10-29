@@ -1,6 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {join} from 'node:path';
-import {openSync, readSync, closeSync, readdirSync} from 'node:fs';
+import {openSync, readSync, closeSync, readdirSync, existsSync} from 'node:fs';
 
 export function selectIdentity(env = process.env, identities) {
   if (env.NEURA_SIGN_IDENTITY) {
@@ -24,7 +24,24 @@ export function isMachO(file) {
   } finally {closeSync(fd);}
 }
 
+// Chromium sends Foundation-serialized Info.plist bytes to macOS dynamic code
+// validation. Signing minified/noncanonical XML makes that check fail -67030
+// even when on-disk codesign verification succeeds. Normalize before any seal.
+export function normalizeBundlePlists(app, run = execFileSync) {
+  function walk(directory) {
+    for (const entry of readdirSync(directory, {withFileTypes: true})) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name === 'Info.plist')
+        run('/usr/bin/plutil', ['-convert', 'xml1', path], {stdio: 'inherit'});
+      // Framework symlink aliases must not be followed or mutate outside paths.
+    }
+  }
+  walk(app);
+}
+
 export function signCertifiedTree(app, identity, run = execFileSync) {
+  normalizeBundlePlists(app, run);
   function sign(path, entitlement = 'empty') {
     run('codesign', ['--force', '--options', 'runtime', '--timestamp', '--sign', identity,
       ...(process.env.NEURA_SIGN_KEYCHAIN ? ['--keychain', process.env.NEURA_SIGN_KEYCHAIN] : []),
@@ -41,7 +58,7 @@ export function signCertifiedTree(app, identity, run = execFileSync) {
         else if (entry.name.endsWith('.app')) sign(file,
           entry.name === 'NeuraOS Helper.app' || / \((Renderer|GPU)\)\.app$/.test(entry.name) ? 'jit' : 'empty');
       } else if (entry.isFile() && isMachO(file)) {
-        sign(file, ['node', 'claude'].includes(entry.name) ? 'jit' : 'empty');
+        sign(file, 'empty');
       }
       // Never traverse symlinks: framework aliases and pnpm links share targets.
     }
@@ -53,9 +70,13 @@ export function signCertifiedTree(app, identity, run = execFileSync) {
 
 export function signApplication(app, identity = selectIdentity()) {
   if (identity !== '-') return signCertifiedTree(app, identity);
+  normalizeBundlePlists(app);
   // Sign nested CEF/runtime components first. Then explicitly harden the only
   // privileged IPC peers; a later --deep signing pass must not undo these flags.
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
-  execFileSync('codesign', ['--force', '--options', 'runtime', '--sign', '-', join(app, 'Contents/MacOS/NeuraSleepService')], {stdio: 'inherit'});
+  for (const relative of ['Contents/MacOS/NeuraSleepService','Contents/Resources/Runtime/bin/neura-native-core','Contents/Resources/Runtime/bin/neura-updater']) {
+    const file=join(app,relative);
+    if(existsSync(file))execFileSync('codesign',['--force','--options','runtime','--sign','-',file],{stdio:'inherit'});
+  }
   execFileSync('codesign', ['--force', '--options', 'runtime', '--entitlements', join(import.meta.dirname, 'client.entitlements.plist'), '--sign', '-', app], {stdio: 'inherit'});
 }
