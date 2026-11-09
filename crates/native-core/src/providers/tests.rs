@@ -776,3 +776,48 @@ async fn report_rejects_over_limit_utf16_without_mutation() {
 
 #[path = "instruction_tests.rs"]
 mod instruction_tests;
+
+#[tokio::test]
+async fn codex_history_snapshot_publishes_only_final_summary_and_is_idle_on_replay() {
+    let (store, agents, workspace) = codex_fixture().await;
+    agents
+        .register_codex("t", &workspace, &codex_thread("selected"), None)
+        .await
+        .unwrap();
+    let before = agents.get("selected").await.unwrap().revision;
+    let mut items: Vec<Value> = (0..100)
+        .map(|i| json!({"type":"agentMessage","text":format!("progress {i}")}))
+        .collect();
+    items.push(json!({"type":"agentMessage","text":"final summary"}));
+    items.push(json!({"type":"commandExecution","output":"not a summary"}));
+    let turn = json!({"id":"one","status":"completed","items":items});
+    super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &turn)
+        .await
+        .unwrap();
+    let first = agents.get("selected").await.unwrap();
+    assert_eq!(first.summary.as_deref(), Some("final summary"));
+    assert_eq!(
+        first.revision - before,
+        2,
+        "one summary and one completion write, independent of history size"
+    );
+    assert_eq!(notifications(&store).await, 1);
+    for _ in 0..10 {
+        super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &turn)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        agents.get("selected").await.unwrap().revision,
+        first.revision
+    );
+    assert_eq!(notifications(&store).await, 1);
+    let no_message = json!({"id":"two","status":"failed","items":[{"type":"commandExecution"}]});
+    super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &no_message)
+        .await
+        .unwrap();
+    let next = agents.get("selected").await.unwrap();
+    assert_eq!(next.last_turn_id.as_deref(), Some("two"));
+    assert_eq!(next.status, "failed");
+    assert_eq!(next.summary.as_deref(), Some("final summary"));
+}

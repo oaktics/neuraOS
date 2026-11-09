@@ -640,27 +640,55 @@ async fn reconcile_codex(
                 )
                 .await?;
             if let Some(turn) = history["data"].as_array().and_then(|rows| rows.first()) {
-                if turn["status"] == "inProgress" {
-                    agents.codex_event(terminal,workspace,&json!({"method":"turn/started","params":{"threadId":task,"turn":turn}})).await?;
-                } else if matches!(
-                    turn["status"].as_str(),
-                    Some("completed" | "failed" | "interrupted")
-                ) {
-                    if let Some(items) = turn["items"].as_array() {
-                        for item in items {
-                            if item["type"] == "agentMessage" {
-                                agents.codex_event(terminal,workspace,&json!({"method":"item/completed","params":{"threadId":task,"turnId":turn["id"],"item":item}})).await?;
-                            }
-                        }
-                    }
-                    agents.codex_event(terminal,workspace,&json!({"method":"turn/completed","params":{"threadId":task,"turn":turn}})).await?;
-                }
+                reconcile_codex_turn(agents, terminal, workspace, task, turn).await?;
             }
         }
         cursor = page["nextCursor"].clone();
         if cursor.is_null() {
             break;
         }
+    }
+    Ok(())
+}
+
+// A history page is a snapshot, not a stream: only its final assistant message
+// is the current summary. Replaying earlier messages on every reconciliation
+// causes durable writes and UI invalidations even for unchanged idle sessions.
+pub(super) async fn reconcile_codex_turn(
+    agents: &Agents,
+    terminal: &str,
+    workspace: &Value,
+    task: &str,
+    turn: &Value,
+) -> Result<()> {
+    if turn["status"] == "inProgress" {
+        agents
+            .codex_event(
+                terminal,
+                workspace,
+                &json!({"method":"turn/started","params":{"threadId":task,"turn":turn}}),
+            )
+            .await?;
+    } else if matches!(
+        turn["status"].as_str(),
+        Some("completed" | "failed" | "interrupted")
+    ) {
+        if let Some(items) = turn["items"].as_array() {
+            if let Some(item) = items
+                .iter()
+                .rev()
+                .find(|item| item["type"] == "agentMessage")
+            {
+                agents.codex_event(terminal,workspace,&json!({"method":"item/completed","params":{"threadId":task,"turnId":turn["id"],"item":item}})).await?;
+            }
+        }
+        agents
+            .codex_event(
+                terminal,
+                workspace,
+                &json!({"method":"turn/completed","params":{"threadId":task,"turn":turn}}),
+            )
+            .await?;
     }
     Ok(())
 }
