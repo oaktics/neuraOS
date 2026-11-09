@@ -133,17 +133,109 @@ final class WorkspaceDeletionTests: XCTestCase {
         XCTAssertEqual(model.pendingWorkspaceDeletion?.id, workspace().id)
     }
 
-    @MainActor func testLostAcceptanceReplyStaysBlockedUntilSnapshotRecovery() {
-        let model = AppModel(startPolling: false)
-        model.applySnapshot(snapshot())
-        model.markDeletionUncertain(workspace().id)
-        model.updateConnection(false)
+    @MainActor func testUncertainStartAndRetryPersistAndReplayExactOperation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "fixture".write(to: directory.appendingPathComponent("daemon-token"), atomically: true, encoding: .utf8)
+        defer {try? FileManager.default.removeItem(at: directory)}
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DeletionProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {session.invalidateAndCancel()}
+        let api = DaemonClient(endpoint: URL(string: "http://deletion-test.invalid")!, dataDirectory: directory, session: session)
+        let model = AppModel(startPolling: false, api: api)
+        var current = snapshot()
+        var bodies: [[String: Any]] = []
+        var reply: DeletionJob?
+        DeletionProtocol.handler = {request, body in
+            if request.httpMethod == "POST" {
+                bodies.append(body)
+                guard let reply else {throw URLError(.timedOut)}
+                let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reply))
+                return (200, try JSONSerialization.data(withJSONObject: ["ok": true, "accepted": true, "job": value]))
+            }
+            return (200, try JSONEncoder().encode(current))
+        }
+        defer {DeletionProtocol.handler = nil}
+        model.applySnapshot(current); model.connected = true
+        await model.deleteWorkspace(workspace(), discardChanges: true)
+        let intent = try XCTUnwrap(model.deletionIntents[workspace().id])
         XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
-        XCTAssertFalse(model.isWorkspaceBlocked("other"))
-        model.applySnapshot(snapshot(job()))
-        model.updateConnection(true)
-        XCTAssertTrue(model.uncertainDeletions.isEmpty)
+        model.applySnapshot(snapshot()) // Detached command may still be awaiting admission.
+        model.applySnapshot(snapshot(job("failed", blocks: false)))
         XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
+        await model.deleteWorkspace(workspace())
+        await model.retryDeletion(workspace())
+        XCTAssertEqual(bodies.count, 1)
+        let restored = AppModel(startPolling: false, api: api)
+        restored.applySnapshot(snapshot()); restored.connected = true
+        XCTAssertEqual(restored.deletionIntents[workspace().id], intent)
+        XCTAssertTrue(restored.isWorkspaceBlocked(workspace().id))
+        reply = DeletionJob(id: intent.operationId, workspaceId: workspace().id, status: "failed", phase: "verify-before", revision: 2, createdAt: "", updatedAt: "", retryable: true, blocksWorkspace: false, generation: 1)
+        current = snapshot(reply)
+        await restored.confirmDeletionAcceptance(workspace().id)
+        XCTAssertEqual(bodies[0]["operationId"] as? String, bodies[1]["operationId"] as? String)
+        XCTAssertEqual(bodies[0]["command"] as? NSDictionary, bodies[1]["command"] as? NSDictionary)
+        XCTAssertEqual((bodies[1]["command"] as? [String: Any])?["discardChanges"] as? Bool, true)
+        XCTAssertFalse(restored.isWorkspaceBlocked(workspace().id))
+        reply = nil
+        await restored.retryDeletion(workspace())
+        let retry = try XCTUnwrap(restored.deletionIntents[workspace().id])
+        restored.applySnapshot(current) // Same old failed revision cannot resolve retry.
+        XCTAssertTrue(restored.isWorkspaceBlocked(workspace().id))
+        await restored.retryDeletion(workspace())
+        XCTAssertEqual(bodies.count, 3)
+        reply = DeletionJob(id: intent.operationId, workspaceId: workspace().id, status: "running", phase: "stop-terminals", revision: 3, createdAt: "", updatedAt: "", retryable: true, blocksWorkspace: true, generation: 1)
+        restored.applySnapshot(snapshot(reply)) // Another retry could produce this revision.
+        XCTAssertEqual(restored.deletionIntents[workspace().id], retry)
+        await restored.confirmDeletionAcceptance(workspace().id)
+        XCTAssertEqual(bodies[2]["operationId"] as? String, bodies[3]["operationId"] as? String)
+        XCTAssertEqual(bodies[2]["command"] as? NSDictionary, bodies[3]["command"] as? NSDictionary)
+        XCTAssertTrue(restored.deletionIntents.isEmpty)
+        // Exact start-job evidence also resolves after a lost reply, without replay.
+        try restored.saveDeletionIntent(intent)
+        restored.applySnapshot(snapshot(reply))
+        XCTAssertTrue(restored.deletionIntents.isEmpty)
+    }
+
+    @MainActor func testOnlyMatchingJournaledRejectionResolvesUnknownIntent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "fixture".write(to: directory.appendingPathComponent("daemon-token"), atomically: true, encoding: .utf8)
+        defer {try? FileManager.default.removeItem(at: directory)}
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DeletionProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {session.invalidateAndCancel()}
+        let api = DaemonClient(endpoint: URL(string: "http://deletion-test.invalid")!, dataDirectory: directory, session: session)
+        let model = AppModel(startPolling: false, api: api)
+        model.applySnapshot(snapshot()); model.connected = true
+        let intent = DeletionIntent(workspaceId: workspace().id, request: .init(type: "workspace.delete.start", workspaceId: workspace().id, discardChanges: false, stopTerminals: true), baseline: nil)
+        try model.saveDeletionIntent(intent)
+        var failure = APIError(error: "setup_running", message: "セットアップ中")
+        var operations: [String] = []
+        DeletionProtocol.handler = {request, body in
+            if request.httpMethod == "POST" {
+                operations.append(body["operationId"] as! String)
+                return (409, try JSONEncoder().encode(failure))
+            }
+            return (200, try JSONEncoder().encode(self.snapshot()))
+        }
+        defer {DeletionProtocol.handler = nil}
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
+        failure.operationFinal = true; failure.operationId = "other-operation"
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
+        failure.operationId = intent.operationId; failure.operationFinal = false
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
+        failure.operationFinal = true
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertFalse(model.isWorkspaceBlocked(workspace().id))
+        XCTAssertEqual(Set(operations), [intent.operationId])
+        XCTAssertTrue(AppModel(startPolling: false, api: api).deletionIntents.isEmpty)
+        XCTAssertNil(model.pendingWorkspaceDeletion)
     }
 
     @MainActor func testDirtyFailureNeedsExplicitDiscardAndRetryGuard() async throws {

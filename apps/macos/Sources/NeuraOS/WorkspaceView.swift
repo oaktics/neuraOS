@@ -113,10 +113,12 @@ struct WorkspaceView: View {
     var body: some View {
         VStack(spacing: 0) {
             if let job = model.deletion(workspace.id) {WorkspaceDeletionStatus(workspace: workspace, job: job)}
-            else if deletionBlocked {
+            if model.deletionIntents[workspace.id] != nil || model.deletionIntentLoadFailed {
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("削除の受付を確認しています。再接続後も状態を確認します。").font(.callout)
+                    Text("削除の受付結果が未確認です。起動と編集を停止しています。").font(.callout)
+                    Button("受付を確認") {Task {await model.confirmDeletionAcceptance(workspace.id)}}
+                        .disabled(!model.connected || model.pendingActions[workspace.id] != nil || model.deletionIntentLoadFailed)
                     Spacer()
                 }.padding(16).background(Color.accentColor.opacity(0.07))
             }

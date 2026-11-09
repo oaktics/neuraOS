@@ -127,7 +127,7 @@ struct GitStatus: Codable, Equatable {var branch: String = ""; var changes: [Cha
 struct Diff: Codable {let path: String; let content: String}
 struct TerminalChunk: Codable {let data: String; let cols: Int?; let rows: Int?}
 struct TerminalOutput: Codable {let data: String; let chunks: [TerminalChunk]; let cursor: Int; let more: Bool; let status: String; let cols: Int; let rows: Int}
-struct APIError: Codable, Error, LocalizedError {let error: String; let message: String; var errorDescription: String? {message}}
+struct APIError: Codable, Error, LocalizedError {let error: String; let message: String; var operationId: String? = nil; var operationFinal: Bool? = nil; var errorDescription: String? {message}}
 struct CreatedWorkspace: Decodable {let id: String; let startupErrors: [String]?}
 struct OK: Codable {let ok: Bool}
 
@@ -147,9 +147,9 @@ final class DaemonClient {
         self.session = session ?? URLSession(configuration: config)
     }
     func get<T: Decodable>(_ path: String, query: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> T {try await request(path, query: query, timeout: timeout ?? ((path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15))}
-    func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
+    func command<T: Decodable>(_ command: [String: Any], operationId: String = UUID().uuidString.lowercased()) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
-        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: Self.commandTimeout(command["type"] as? String ?? ""))
+        try await request("v1/commands", body: ["operationId": operationId, "command": command], timeout: Self.commandTimeout(command["type"] as? String ?? ""))
     }
     static func commandTimeout(_ type: String) -> TimeInterval {
         if ["workspace.delete.start", "workspace.deletion.retry"].contains(type) {return 15}
@@ -217,7 +217,8 @@ final class DaemonClient {
         return true
     }
     func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
-    private(set) var uncertainDeletions: Set<String> = []
+    var deletionIntents: [String: DeletionIntent] = [:]
+    var deletionIntentLoadFailed = false
     var pendingWorkspaceDeletion: Workspace?
     var showNewProject = false
     var showNewWorkspace = false
@@ -268,6 +269,7 @@ final class DaemonClient {
     @ObservationIgnored private var acceptedDeletions: [String: DeletionJob] = [:]
     init(startPolling: Bool = true, api: DaemonClient = DaemonClient()) {
         self.api = api
+        loadDeletionIntents()
         guard startPolling else {return}
         agentNotifications = AgentNotifications { [weak self] terminalId in
             guard let self, let terminal = self.terminal(id: terminalId) else {return}
@@ -321,8 +323,14 @@ final class DaemonClient {
         snapshot.workspaces = DeletionSnapshotMerge.apply(next.workspaces, previousJob: {previousJobs[$0]}, accepted: &acceptedDeletions)
         acceptedDeletions = acceptedDeletions.filter {workspaceIDs.contains($0.key)}
         state.apply(snapshot)
-        // A successful authoritative snapshot resolves a lost acceptance reply.
-        if !uncertainDeletions.isEmpty {uncertainDeletions = []}
+        // Only an exact start operation ID proves acceptance. Retry revisions can
+        // advance due to another caller, so those require same-operation replay.
+        for workspace in next.workspaces {
+            if let intent = deletionIntents[workspace.id], intent.request.type == "workspace.delete.start",
+               workspace.deletion?.id == intent.operationId {
+                resolveDeletionIntent(workspace.id)
+            }
+        }
         let retained = openedIds.intersection(workspaceIDs)
         if retained != openedIds {openedIds = retained}
     }
@@ -450,7 +458,6 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
-    func markDeletionUncertain(_ id: String) {uncertainDeletions.insert(id)}
     func pendingDeletionRetryBegin(_ id: String) {
         actionStarted[id] = Date()
         pendingActions[id] = "削除を受け付けています"
@@ -472,19 +479,22 @@ final class DaemonClient {
                 throw APIError(error: "daemon_update_required", message: "変更を破棄する削除にはDaemonの更新が必要です。")
             }
             if supportsDeletionJobs {
-                let response: DeletionAccepted = try await api.command(["type": "workspace.delete.start", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
-                try acceptDeletion(response, workspaceId: workspace.id)
+                let intent = DeletionIntent(workspaceId: workspace.id, request: .init(type: "workspace.delete.start", workspaceId: workspace.id, discardChanges: discardChanges, stopTerminals: true), baseline: deletion(workspace.id))
+                try saveDeletionIntent(intent)
+                await submitDeletionIntent(intent, firstAttempt: true)
             } else {
                 guard state.features?.contains("workspace.delete.stop-terminals") == true else {
                     throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
                 }
-                let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
+                let intent = DeletionIntent(workspaceId: workspace.id, request: .init(type: "workspace.delete", workspaceId: workspace.id, discardChanges: discardChanges, stopTerminals: true), baseline: deletion(workspace.id))
+                try saveDeletionIntent(intent)
+                await submitDeletionIntent(intent, firstAttempt: true)
             }
             await refresh()
         } catch let failure as APIError where !discardChanges && ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
             pendingWorkspaceDeletion = workspace
         } catch let failure as APIError {report(failure); await refresh()}
-        catch {markDeletionUncertain(workspace.id); report(error); await refresh()}
+        catch {report(error); await refresh()}
     }
     func openTerminal(_ workspace: Workspace, provider: String? = nil, resume: Bool = false) async -> TerminalRecord? {
         guard beginAction(workspace.id, label: "ターミナルを起動中") else {return nil}
