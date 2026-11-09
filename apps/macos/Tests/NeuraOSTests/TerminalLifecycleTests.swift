@@ -5,6 +5,28 @@ import MetalKit
 @testable import NeuraOS
 
 final class TerminalLifecycleTests: XCTestCase {
+    @MainActor private func metalRenderer() throws -> (NativeTerminalView, MTKView) {
+        _ = NSApplication.shared
+        _ = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "Metal device unavailable")
+        // Native SwiftPM leaves dependency resources beside the xctest bundle;
+        // SwiftTerm probes inside loaded bundles instead. Mirror the app packager
+        // using only SwiftPM's generated bundle, never dependency source files.
+        let testBundle = Bundle(for: TerminalLifecycleTests.self)
+        XCTAssertEqual(testBundle.bundleURL.pathExtension, "xctest")
+        let resources = try XCTUnwrap(testBundle.resourceURL)
+        let name = "SwiftTerm_SwiftTerm.bundle"
+        let destination = resources.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            let generated = testBundle.bundleURL.deletingLastPathComponent().appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: generated, to: destination)
+        }
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        // Missing resources, invalid shaders and compilation errors remain failures.
+        try view.setUseMetal(true)
+        return (view, try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first))
+    }
+
     @MainActor func testUnchangedGeometryDoesNotInvalidateTerminalRendering() {
         _ = NSApplication.shared
         let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -18,12 +40,7 @@ final class TerminalLifecycleTests: XCTestCase {
     }
 
     @MainActor func testHiddenMetalViewDefersDrawingWithoutReplacingRenderer() async throws {
-        _ = NSApplication.shared
-        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        // Use SwiftTerm's real Metal view without opening a user-visible window.
-        guard MTLCreateSystemDefaultDevice() != nil else {throw XCTSkip("Metal device unavailable")}
-        try view.setUseMetal(true)
-        let metal = try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first)
+        let (view, metal) = try metalRenderer()
         let terminal = view.getTerminal()
         view.setRenderingVisible(false)
         XCTAssertFalse(metal.enableSetNeedsDisplay)
@@ -50,11 +67,7 @@ final class TerminalLifecycleTests: XCTestCase {
     }
 
     @MainActor func testShowingTerminalPreservesSynchronizedOutputUntilReset() async throws {
-        _ = NSApplication.shared
-        guard MTLCreateSystemDefaultDevice() != nil else {throw XCTSkip("Metal device unavailable")}
-        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
-        try view.setUseMetal(true)
-        let metal = try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first)
+        let (view, metal) = try metalRenderer()
         let terminal = view.getTerminal()
         view.feed(text: "initial")
         try await Task.sleep(for: .milliseconds(40))
