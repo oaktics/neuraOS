@@ -44,9 +44,13 @@ async fn bounded_native_runner_reaps_children_on_limit_timeout_and_cancel() {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ESRCH)
     );
+    // Publish complete PID records atomically: exists() must not observe the
+    // empty file between creation and the writer flushing its contents.
     let cancel_pid = dir.join("cancel.pid");
     let source = format!(
-        "import os,time\nopen({:?},'w').write(str(os.getpid()))\ntime.sleep(60)\n",
+        "import os,time\nwith open({:?}+'.tmp','w') as f: f.write(str(os.getpid()))\nos.rename({:?}+'.tmp', {:?})\ntime.sleep(60)\n",
+        cancel_pid.to_string_lossy(),
+        cancel_pid.to_string_lossy(),
         cancel_pid.to_string_lossy()
     );
     let task = tokio::spawn(async move {
@@ -78,7 +82,9 @@ async fn bounded_native_runner_reaps_children_on_limit_timeout_and_cancel() {
     for cancel in [false, true] {
         let pidfile = dir.join(format!("restricted-cancel-{cancel}.pid"));
         let script = format!(
-            "/bin/sleep 60 & echo \"$$ $!\" > '{}'; wait",
+            "/bin/sleep 60 & echo \"$$ $!\" > '{}.tmp'; /bin/mv '{}.tmp' '{}'; wait",
+            pidfile.display(),
+            pidfile.display(),
             pidfile.display()
         );
         let task = tokio::spawn(async move {
