@@ -249,6 +249,65 @@ final class WorkspaceDeletionTests: XCTestCase {
         }
     }
 
+    @MainActor func testLegacyJournalFailureAllowlistForFirstRequestAndExactReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "fixture".write(to: directory.appendingPathComponent("daemon-token"), atomically: true, encoding: .utf8)
+        defer {try? FileManager.default.removeItem(at: directory)}
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DeletionProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {session.invalidateAndCancel()}
+        let api = DaemonClient(endpoint: URL(string: "http://deletion-test.invalid")!, dataDirectory: directory, session: session)
+        let model = AppModel(startPolling: false, api: api)
+        let current = snapshot(jobs: false)
+        model.applySnapshot(current); model.connected = true
+        var failure = APIError(error: "git_failed", message: "Gitの削除に失敗")
+        var bodies: [[String: Any]] = []
+        DeletionProtocol.handler = {request, body in
+            if request.httpMethod == "POST" {
+                bodies.append(body)
+                return (409, try JSONEncoder().encode(failure))
+            }
+            return (200, try JSONEncoder().encode(current))
+        }
+        defer {DeletionProtocol.handler = nil}
+        await model.deleteWorkspace(workspace())
+        XCTAssertEqual(bodies.count, 1, "A final legacy failure must not send a second POST")
+        XCTAssertFalse(model.isWorkspaceBlocked(workspace().id))
+        XCTAssertEqual(model.error, failure.message)
+        XCTAssertNil(model.pendingWorkspaceDeletion)
+        let intent = DeletionIntent(workspaceId: workspace().id, request: .init(type: "workspace.delete", workspaceId: workspace().id, discardChanges: false, stopTerminals: true), baseline: nil)
+        for unsafe in ["operation_unknown", "operation_conflict", "storage_failed", "connection", "operation_failed", "process_cleanup_failed", "git_timeout", "cancelled"] {
+            try model.saveDeletionIntent(intent)
+            failure = APIError(error: unsafe, message: unsafe)
+            await model.confirmDeletionAcceptance(workspace().id)
+            XCTAssertEqual(model.deletionIntents[workspace().id], intent)
+        }
+        for marker in [APIError(error: "git_failed", message: "failure", operationFinal: false),
+                       APIError(error: "git_failed", message: "failure", operationId: "another-operation")] {
+            failure = marker
+            await model.confirmDeletionAcceptance(workspace().id)
+            XCTAssertEqual(model.deletionIntents[workspace().id], intent)
+        }
+        failure = APIError(error: "git_failed", message: "Gitの削除に失敗")
+        let beforeReplay = bodies.count
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertEqual(bodies.count, beforeReplay + 1)
+        XCTAssertTrue(model.deletionIntents.isEmpty)
+        XCTAssertFalse(model.isWorkspaceBlocked(workspace().id))
+        XCTAssertEqual(model.error, failure.message)
+        XCTAssertNil(model.pendingWorkspaceDeletion)
+        XCTAssertTrue(bodies.dropFirst().allSatisfy {($0["operationId"] as? String) == intent.operationId})
+        try model.saveDeletionIntent(intent)
+        failure = APIError(error: "workspace_dirty", message: "変更あり")
+        await model.confirmDeletionAcceptance(workspace().id)
+        XCTAssertTrue(model.deletionIntents.isEmpty)
+        XCTAssertNil(model.pendingWorkspaceDeletion, "Replay must not open a new discard confirmation")
+        await model.deleteWorkspace(workspace())
+        XCTAssertNotNil(model.pendingWorkspaceDeletion, "Initial legacy dirty failure preserves explicit confirmation")
+    }
+
     @MainActor func testOnlyMatchingJournaledRejectionResolvesUnknownIntent() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
