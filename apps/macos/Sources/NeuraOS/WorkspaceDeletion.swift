@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 struct DeletionJob: Codable, Hashable, Identifiable {
     struct Failure: Codable, Hashable {let code: String; let message: String}
@@ -13,6 +14,7 @@ struct DeletionJob: Codable, Hashable, Identifiable {
     let retryable: Bool
     let blocksWorkspace: Bool
     var verifiedAbsent: Bool?
+    var generation: Int? = nil
 
     var inProgress: Bool {status == "queued" || status == "running"}
     // Even a success response must not reopen a workspace awaiting snapshot removal.
@@ -35,11 +37,47 @@ struct DeletionJob: Codable, Hashable, Identifiable {
         }
     }
 }
+@MainActor @Observable final class WorkspaceDeletionState {
+    var job: DeletionJob?
+    init(job: DeletionJob?) {self.job = job}
+}
+
+enum DeletionSnapshotMerge {
+    // One indexed lookup per workspace. The caller builds the index once, so
+    // snapshots without jobs also remain linear in workspace count.
+    static func apply(_ workspaces: [Workspace], previousJob: (String) -> DeletionJob?,
+                      accepted: inout [String: DeletionJob]) -> [Workspace] {
+        workspaces.map {workspace in
+            var workspace = workspace
+            let incoming = workspace.deletion
+            let acknowledged = accepted[workspace.id]
+            let current = previousJob(workspace.id)
+            let known: DeletionJob?
+            if let acknowledged, let current, isOlder(acknowledged, than: current) {known = current}
+            else {known = acknowledged ?? current}
+            if let known, incoming == nil || isOlder(incoming!, than: known) {workspace.deletion = known}
+            if let incoming, let acknowledged, !isOlder(incoming, than: acknowledged) {
+                accepted.removeValue(forKey: workspace.id)
+            }
+            return workspace
+        }
+    }
+    static func isOlder(_ candidate: DeletionJob, than known: DeletionJob) -> Bool {
+        if candidate.id == known.id {return candidate.revision < known.revision}
+        if let candidateGeneration = candidate.generation, let knownGeneration = known.generation {
+            return candidateGeneration < knownGeneration
+        }
+        // Older daemons may omit generation. Prefer their authoritative snapshot
+        // for a different job; wall-clock dates cannot establish ordering.
+        return false
+    }
+}
+
 struct DeletionAccepted: Decodable {let ok: Bool; let accepted: Bool; let job: DeletionJob}
 
 extension AppModel {
     var supportsDeletionJobs: Bool {state.features?.contains("workspace.delete.jobs") == true}
-    func deletion(_ workspaceId: String) -> DeletionJob? {state.workspaces.first {$0.id == workspaceId}?.deletion}
+    func deletion(_ workspaceId: String) -> DeletionJob? {state.deletion(workspaceId)}
     func isWorkspaceBlocked(_ workspaceId: String) -> Bool {
         deletion(workspaceId)?.preventsUse == true || uncertainDeletions.contains(workspaceId) || pendingActions[workspaceId] == "削除を受け付けています"
     }

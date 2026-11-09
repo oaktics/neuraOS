@@ -35,6 +35,28 @@ struct Snapshot: Codable {
     var workspaces: [Workspace] = []
     var terminals: [TerminalRecord] = []
     // Stable observable buckets keep unrelated workspaces and terminal views asleep.
+    @ObservationIgnored private var deletionViews: [String: WorkspaceDeletionState] = [:]
+    @ObservationIgnored private var deletionJobs: [String: DeletionJob] = [:]
+    func deletion(_ id: String) -> DeletionJob? {
+        if deletionViews[id] == nil {deletionViews[id] = WorkspaceDeletionState(job: deletionJobs[id])}
+        return deletionViews[id]!.job
+    }
+    private func applyDeletionIndex(_ next: [String: DeletionJob]) {
+        for id in Set(deletionJobs.keys).union(next.keys) where deletionJobs[id] != next[id] {
+            deletionViews[id]?.job = next[id]
+        }
+        deletionJobs = next
+    }
+    func setDeletion(_ job: DeletionJob) {
+        guard let index = workspaces.firstIndex(where: {$0.id == job.workspaceId}) else {return}
+        var workspace = workspaces[index]
+        if workspace.deletion.map({!DeletionSnapshotMerge.isOlder(job, than: $0)}) ?? true {
+            workspace.deletion = job
+            workspaces[index] = workspace
+            deletionJobs[job.workspaceId] = job
+            if deletionViews[job.workspaceId]?.job != job {deletionViews[job.workspaceId]?.job = job}
+        }
+    }
     @ObservationIgnored private var terminalViews: [String: TerminalViewState] = [:]
     @ObservationIgnored private var workspaceViews: [String: WorkspaceTerminalState] = [:]
     func terminal(id: String) -> TerminalRecord? {
@@ -59,7 +81,12 @@ struct Snapshot: Codable {
         if revision != snapshot.revision {revision = snapshot.revision}
         if features != snapshot.features {features = snapshot.features}
         if projects != snapshot.projects {projects = snapshot.projects}
-        if workspaces != snapshot.workspaces {workspaces = snapshot.workspaces}
+        if workspaces != snapshot.workspaces {
+            applyDeletionIndex(Dictionary(uniqueKeysWithValues: snapshot.workspaces.compactMap {workspace in
+                workspace.deletion.map {(workspace.id, $0)}
+            }))
+            workspaces = snapshot.workspaces
+        }
         let membership = snapshot.terminals.map {TerminalMembership(id: $0.id, workspaceId: $0.workspaceId, provider: $0.provider)}
         if terminalMembership != membership {terminalMembership = membership}
         if terminals != snapshot.terminals {
@@ -287,36 +314,16 @@ final class DaemonClient {
     // Transport polling must not invalidate views when the UI state is unchanged.
     func applySnapshot(_ next: Snapshot) {
         var snapshot = next
-        for index in snapshot.workspaces.indices {
-            let id = snapshot.workspaces[index].id
-            let incoming = snapshot.workspaces[index].deletion
-            let accepted = acceptedDeletions[id]
-            let current = deletion(id)
-            let known: DeletionJob?
-            if let accepted, let current, accepted.id == current.id {
-                known = accepted.revision > current.revision ? accepted : current
-            } else {known = accepted ?? current}
-            if let known {
-                if let incoming {
-                    let older = incoming.id == known.id ? incoming.revision < known.revision
-                        : (ProviderUsage.date(incoming.createdAt) ?? .distantPast) < (ProviderUsage.date(known.createdAt) ?? .distantPast)
-                    if older || (accepted != nil && incoming.id != known.id && incoming.createdAt == known.createdAt) {
-                        snapshot.workspaces[index].deletion = known
-                    }
-                } else {snapshot.workspaces[index].deletion = known}
-            }
-            if let incoming, let accepted, incoming.id == accepted.id && incoming.revision >= accepted.revision {
-                acceptedDeletions.removeValue(forKey: id)
-            } else if let incoming, let accepted,
-                      (ProviderUsage.date(incoming.createdAt) ?? .distantPast) > (ProviderUsage.date(accepted.createdAt) ?? .distantPast) {
-                acceptedDeletions.removeValue(forKey: id)
-            }
-        }
-        acceptedDeletions = acceptedDeletions.filter {id, _ in next.workspaces.contains {$0.id == id}}
+        let previousJobs = Dictionary(uniqueKeysWithValues: state.workspaces.compactMap {workspace in
+            workspace.deletion.map {(workspace.id, $0)}
+        })
+        let workspaceIDs = Set(next.workspaces.map(\.id))
+        snapshot.workspaces = DeletionSnapshotMerge.apply(next.workspaces, previousJob: {previousJobs[$0]}, accepted: &acceptedDeletions)
+        acceptedDeletions = acceptedDeletions.filter {workspaceIDs.contains($0.key)}
         state.apply(snapshot)
         // A successful authoritative snapshot resolves a lost acceptance reply.
         if !uncertainDeletions.isEmpty {uncertainDeletions = []}
-        let retained = openedIds.intersection(Set(next.workspaces.map(\.id)))
+        let retained = openedIds.intersection(workspaceIDs)
         if retained != openedIds {openedIds = retained}
     }
     func updateConnection(_ value: Bool) {
@@ -453,14 +460,9 @@ final class DaemonClient {
             throw APIError(error: "invalid_deletion_response", message: "削除の受付結果を確認できません。再接続して状態を確認してください。")
         }
         acceptedDeletions[workspaceId] = response.job
-        if let index = state.workspaces.firstIndex(where: {$0.id == workspaceId}) {
-            var workspace = state.workspaces[index]
-            if workspace.deletion?.id != response.job.id || (workspace.deletion?.revision ?? -1) <= response.job.revision {
-                workspace.deletion = response.job
-                state.workspaces[index] = workspace
-            }
-        }
+        state.setDeletion(response.job)
     }
+
     func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
         guard connected, workspace.kind == "worktree", !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}),
               beginAction(workspace.id, label: "削除を受け付けています") else {return}
