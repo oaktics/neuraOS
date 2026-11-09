@@ -340,13 +340,27 @@ impl AppState {
         result
     }
     pub async fn stop_workspace(&self, workspace: &str) -> Result<(), ApiError> {
-        for t in self.store.list("terminals").await? {
-            if t["workspaceId"] == workspace && t["status"] == "running" {
-                let id = text(&t, "id")?;
-                self.pty.stop(id).await?;
-                self.providers.close(id).await.map_err(provider_error)?;
-            }
+        let terminals: Vec<_> = self
+            .store
+            .list("terminals")
+            .await?
+            .into_iter()
+            .filter(|t| t["workspaceId"] == workspace && t["status"] == "running")
+            .collect();
+        // Start every independent owner stop before awaiting grace/escalation.
+        // join_all (not try_join_all) drains all attempts even if one fails.
+        let results = futures_util::future::join_all(terminals.iter().map(|t| async {
+            let id = text(t, "id")?;
+            self.pty.stop(id).await?;
+            self.providers.close(id).await.map_err(provider_error)
+        }))
+        .await;
+        for result in results {
+            result?;
         }
+        // Subscribe before reading durable state so an exit between read and
+        // wait cannot be lost. Notifications only wake us; stored status is proof.
+        let mut changes = self.events.subscribe();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let any = self
@@ -365,7 +379,15 @@ impl AppState {
                     409,
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = tokio::time::timeout_at(deadline, async {
+                loop {
+                    match changes.recv().await {
+                        Ok(change) if !change.state => continue,
+                        _ => break, // Includes lag: re-read durable state.
+                    }
+                }
+            })
+            .await;
         }
     }
 }
@@ -1255,19 +1277,35 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
                 ));
             }
             let p = s.entity("projects", text(&w, "projectId")?).await?;
-            verify_delete(&s, &w, c).await?;
+            delete_step(&s, op, Phase::DeleteVerifyBefore, verify_delete(&s, &w, c)).await?;
             if c["stopTerminals"] == true {
-                s.stop_workspace(key).await?;
-                verify_delete(&s, &w, c).await?;
+                delete_step(&s, op, Phase::DeleteStopTerminals, s.stop_workspace(key)).await?;
+                delete_step(&s, op, Phase::DeleteVerifyAfter, verify_delete(&s, &w, c)).await?;
             }
             let mut args = vec!["worktree", "remove"];
             if c["discardChanges"] == true {
                 args.push("--force");
             }
             args.extend(["--", text(&w, "path")?]);
-            work::git(text(&p, "path")?, &args).await?;
-            s.store.call("delete_workspace", json!({"id":key})).await?;
-            s.providers.agents.forget_workspace(key).await;
+            delete_step(
+                &s,
+                op,
+                Phase::DeleteGitRemove,
+                work::git(text(&p, "path")?, &args),
+            )
+            .await?;
+            delete_step(
+                &s,
+                op,
+                Phase::DeleteStore,
+                s.store.call("delete_workspace", json!({"id":key})),
+            )
+            .await?;
+            delete_step(&s, op, Phase::DeleteForgetAgents, async {
+                s.providers.agents.forget_workspace(key).await;
+                Ok(())
+            })
+            .await?;
             Ok(json!({"ok":true}))
         }
         "workspace.sync-default" => {
@@ -1420,6 +1458,25 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
             400,
         )),
     }
+}
+
+// Record completed phases on both success and failure. The outer operation
+// outcome plus operationId identifies the failing phase without paths or errors.
+async fn delete_step<T>(
+    s: &AppState,
+    operation_id: &str,
+    phase: Phase,
+    future: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    let started = std::time::Instant::now();
+    let result = future.await;
+    s.diagnostics.record(
+        phase,
+        Some("workspace.delete"),
+        Some(operation_id),
+        Some(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    result
 }
 
 async fn verify_delete(s: &AppState, w: &Value, c: &Value) -> Result<(), ApiError> {
