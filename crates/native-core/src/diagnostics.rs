@@ -20,6 +20,12 @@ pub enum Phase {
     Failure,
     Start,
     End,
+    DeleteVerifyBefore,
+    DeleteStopTerminals,
+    DeleteVerifyAfter,
+    DeleteGitRemove,
+    DeleteStore,
+    DeleteForgetAgents,
 }
 impl Phase {
     fn name(self) -> &'static str {
@@ -30,6 +36,12 @@ impl Phase {
             Self::Failure => "operation.failure",
             Self::Start => "daemon.start",
             Self::End => "daemon.end",
+            Self::DeleteVerifyBefore => "workspace.delete.verify-before",
+            Self::DeleteStopTerminals => "workspace.delete.stop-terminals",
+            Self::DeleteVerifyAfter => "workspace.delete.verify-after",
+            Self::DeleteGitRemove => "workspace.delete.git-remove",
+            Self::DeleteStore => "workspace.delete.store",
+            Self::DeleteForgetAgents => "workspace.delete.forget-agents",
         }
     }
 }
