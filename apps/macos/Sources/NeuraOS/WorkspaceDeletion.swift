@@ -73,13 +73,93 @@ enum DeletionSnapshotMerge {
     }
 }
 
+// Persist the exact request before its first network side effect. Neither a
+// timeout nor an unrelated snapshot can cancel a detached daemon command.
+struct DeletionIntent: Codable, Equatable {
+    struct Request: Codable, Equatable {
+        let type: String
+        var workspaceId: String? = nil
+        var discardChanges: Bool? = nil
+        var stopTerminals: Bool? = nil
+        var jobId: String? = nil
+        func command() throws -> [String: Any] {
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(self)) as! [String: Any]
+        }
+    }
+    var operationId = UUID().uuidString.lowercased()
+    let workspaceId: String
+    let request: Request
+    let baseline: DeletionJob?
+}
+
+extension AppModel {
+    private var deletionIntentURL: URL {api.dataDirectory.appendingPathComponent("ui-deletion-intents.json")}
+    func loadDeletionIntents() {
+        guard FileManager.default.fileExists(atPath: deletionIntentURL.path) else {return}
+        do {deletionIntents = try JSONDecoder().decode([String: DeletionIntent].self, from: Data(contentsOf: deletionIntentURL))}
+        catch {deletionIntentLoadFailed = true; report(error)}
+    }
+    private func persistDeletionIntents(_ intents: [String: DeletionIntent]) throws {
+        try FileManager.default.createDirectory(at: api.dataDirectory, withIntermediateDirectories: true)
+        try JSONEncoder().encode(intents).write(to: deletionIntentURL, options: .atomic)
+    }
+    func saveDeletionIntent(_ intent: DeletionIntent) throws {
+        var next = deletionIntents
+        next[intent.workspaceId] = intent
+        try persistDeletionIntents(next)
+        deletionIntents = next
+    }
+    func resolveDeletionIntent(_ id: String) {
+        var next = deletionIntents
+        next.removeValue(forKey: id)
+        do {try persistDeletionIntents(next); deletionIntents = next}
+        catch {report(error)} // Keep the guard if durable removal failed.
+    }
+    func submitDeletionIntent(_ intent: DeletionIntent, firstAttempt: Bool = false) async {
+        do {
+            if intent.request.type == "workspace.delete" {
+                let response: OK = try await api.command(intent.request.command(), operationId: intent.operationId)
+                guard response.ok else {throw APIError(error: "invalid_deletion_response", message: "削除結果を確認できません。")}
+                resolveDeletionIntent(intent.workspaceId)
+                return
+            }
+            let response: DeletionAccepted = try await api.command(intent.request.command(), operationId: intent.operationId)
+            // A start may reuse an already blocking job; the operation response
+            // itself is authoritative. Retry must return its requested job.
+            guard intent.request.jobId == nil || response.job.id == intent.request.jobId else {
+                throw APIError(error: "invalid_deletion_response", message: "削除の受付結果を確認できません。")
+            }
+            try acceptDeletion(response, workspaceId: intent.workspaceId)
+            resolveDeletionIntent(intent.workspaceId)
+        } catch let failure as APIError where failure.operationFinal == true && failure.operationId == intent.operationId {
+            resolveDeletionIntent(intent.workspaceId)
+            report(failure)
+        } catch let failure as APIError where firstAttempt && intent.request.type == "workspace.delete" &&
+            ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
+            // The first legacy handler itself rejected this operation: no older
+            // timed-out copy exists. Preserve its explicit discard confirmation.
+            resolveDeletionIntent(intent.workspaceId)
+            if intent.request.discardChanges != true {
+                pendingWorkspaceDeletion = state.workspaces.first {$0.id == intent.workspaceId}
+            } else {report(failure)}
+        } catch {report(error)} // No fresh UUID, option escalation, or automatic replay.
+    }
+    func confirmDeletionAcceptance(_ workspaceId: String) async {
+        guard connected, pendingActions[workspaceId] == nil, let intent = deletionIntents[workspaceId] else {return}
+        pendingDeletionRetryBegin(workspaceId)
+        defer {endAction(workspaceId)}
+        await submitDeletionIntent(intent)
+        await refresh()
+    }
+}
+
 struct DeletionAccepted: Decodable {let ok: Bool; let accepted: Bool; let job: DeletionJob}
 
 extension AppModel {
     var supportsDeletionJobs: Bool {state.features?.contains("workspace.delete.jobs") == true}
     func deletion(_ workspaceId: String) -> DeletionJob? {state.deletion(workspaceId)}
     func isWorkspaceBlocked(_ workspaceId: String) -> Bool {
-        deletion(workspaceId)?.preventsUse == true || uncertainDeletions.contains(workspaceId) || pendingActions[workspaceId] == "削除を受け付けています"
+        deletionIntentLoadFailed || deletion(workspaceId)?.preventsUse == true || deletionIntents[workspaceId] != nil || pendingActions[workspaceId] == "削除を受け付けています"
     }
     func requestDiscardDeletion(_ workspace: Workspace) {
         guard deletion(workspace.id)?.needsDiscardConfirmation == true,
@@ -89,7 +169,7 @@ extension AppModel {
     }
     func retryDeletion(_ workspace: Workspace) async {
         guard connected, supportsDeletionJobs, let job = deletion(workspace.id),
-              job.status == "failed", job.retryable,
+              job.status == "failed", job.retryable, !deletionIntentLoadFailed, deletionIntents[workspace.id] == nil,
               pendingActions[workspace.id] == nil else {return}
         guard !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) else {
             error = "未保存の編集があります。保存または破棄してから削除してください。"
@@ -100,10 +180,10 @@ extension AppModel {
         pendingDeletionRetryBegin(workspace.id)
         defer {endAction(workspace.id)}
         do {
-            let response: DeletionAccepted = try await api.command(["type": "workspace.deletion.retry", "jobId": job.id])
-            try acceptDeletion(response, workspaceId: workspace.id)
-        } catch let failure as APIError {report(failure)}
-        catch {markDeletionUncertain(workspace.id); report(error)}
+            let intent = DeletionIntent(workspaceId: workspace.id, request: .init(type: "workspace.deletion.retry", jobId: job.id), baseline: job)
+            try saveDeletionIntent(intent)
+            await submitDeletionIntent(intent)
+        } catch {report(error)}
         await refresh()
     }
 }
@@ -127,7 +207,7 @@ struct WorkspaceDeletionStatus: View {
                         if job.needsDiscardConfirmation && model.state.features?.contains("workspace.delete.discard") == true {
                             Button("変更を破棄して削除…", role: .destructive) {model.requestDiscardDeletion(workspace)}
                         }
-                    }.disabled(!model.connected || model.pendingActions[workspace.id] != nil)
+                    }.disabled(!model.connected || model.pendingActions[workspace.id] != nil || model.deletionIntents[workspace.id] != nil)
                 }
             }
             Spacer(minLength: 0)
