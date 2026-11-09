@@ -374,6 +374,16 @@ final class WorkspaceDeletionTests: XCTestCase {
         await model.retryDeletion(workspace())
         XCTAssertTrue(commands.isEmpty)
         XCTAssertNil(model.pendingWorkspaceDeletion)
+        let previousDrafts = DraftCache.shared.load(workspace().id)
+        defer {DraftCache.shared.update(workspace().id, previousDrafts)}
+        DraftCache.shared.update(workspace().id, ["note.txt": OpenDocument(
+            original: FileContent(path: "note.txt", content: "saved", hash: "hash"), text: "unsaved")])
+        await model.discardFailedDeletion(workspace())
+        XCTAssertTrue(commands.isEmpty)
+        XCTAssertEqual(model.error, "未保存の編集があります。保存または破棄してから削除してください。")
+        XCTAssertTrue(DraftCache.shared.load(workspace().id)["note.txt"]!.dirty)
+        DraftCache.shared.update(workspace().id, previousDrafts)
+        model.error = nil
         await model.discardFailedDeletion(workspace())
         XCTAssertEqual(commands.count, 1)
         XCTAssertEqual(commands[0]["type"] as? String, "workspace.delete.start")

@@ -187,6 +187,10 @@ extension AppModel {
         guard deletion(workspace.id)?.needsDiscardConfirmation == true,
               state.features?.contains("workspace.delete.discard") == true,
               !isBusy(workspace.id) else {return}
+        guard !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) else {
+            error = "未保存の編集があります。保存または破棄してから削除してください。"
+            return
+        }
         await deleteWorkspace(workspace, discardChanges: true)
     }
     func retryDeletion(_ workspace: Workspace) async {
