@@ -259,7 +259,7 @@ pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Val
             match job["public"]["status"].as_str() {
                 Some("succeeded") => return Ok(json!({"ok":true})),
                 Some("failed") => {
-                    return Err(ApiError::new(
+                    let mut error = ApiError::new(
                         job["public"]["error"]["code"]
                             .as_str()
                             .unwrap_or("deletion_failed"),
@@ -267,7 +267,12 @@ pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Val
                             .as_str()
                             .unwrap_or("削除に失敗しました。"),
                         409,
-                    ))
+                    );
+                    // This durable job has reached a terminal failure, so the
+                    // exact legacy intent can be resolved without guessing.
+                    error.operation_id = Some(op.to_owned());
+                    error.operation_final = Some(true);
+                    return Err(error);
                 }
                 _ => {}
             }

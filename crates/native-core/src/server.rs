@@ -35,6 +35,7 @@ const FEATURES: &[&str] = &[
     "project.remove",
     "github",
     "workspace.delete",
+    "workspace.delete.jobs",
     "workspace.delete.discard",
     "workspace.delete.stop-terminals",
     "terminal.multiple",
