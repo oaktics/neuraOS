@@ -198,6 +198,57 @@ final class WorkspaceDeletionTests: XCTestCase {
         XCTAssertTrue(restored.deletionIntents.isEmpty)
     }
 
+    @MainActor func testAbsentWorkspaceIntentRecoveryIsBoundedAndNeedsDefinitiveProof() async throws {
+        for finalRejection in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try "fixture".write(to: directory.appendingPathComponent("daemon-token"), atomically: true, encoding: .utf8)
+            defer {try? FileManager.default.removeItem(at: directory)}
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [DeletionProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer {session.invalidateAndCancel()}
+            let api = DaemonClient(endpoint: URL(string: "http://deletion-test.invalid")!, dataDirectory: directory, session: session)
+            let intent = DeletionIntent(workspaceId: workspace().id, request: .init(type: "workspace.delete.start", workspaceId: workspace().id, discardChanges: false, stopTerminals: true), baseline: nil)
+            try AppModel(startPolling: false, api: api).saveDeletionIntent(intent)
+            let restored = AppModel(startPolling: false, api: api)
+            var absent = snapshot(); absent.workspaces.removeFirst()
+            var requests: [[String: Any]] = []
+            var definitive = false
+            DeletionProtocol.handler = {request, body in
+                if request.httpMethod == "POST" {
+                    requests.append(body)
+                    guard definitive else {throw URLError(.timedOut)}
+                    if finalRejection {
+                        return (409, try JSONEncoder().encode(APIError(error: "workspace_missing", message: "削除対象なし", operationId: intent.operationId, operationFinal: true)))
+                    }
+                    let job = DeletionJob(id: intent.operationId, workspaceId: intent.workspaceId, status: "succeeded", phase: "completed", revision: 8, createdAt: "", updatedAt: "", retryable: false, blocksWorkspace: false, verifiedAbsent: true, generation: 1)
+                    return (200, try JSONSerialization.data(withJSONObject: ["ok": true, "accepted": true, "job": JSONSerialization.jsonObject(with: JSONEncoder().encode(job))]))
+                }
+                return (200, try JSONEncoder().encode(absent))
+            }
+            defer {DeletionProtocol.handler = nil}
+            restored.applySnapshot(absent)
+            XCTAssertEqual(restored.deletionIntents[intent.workspaceId], intent)
+            restored.updateConnection(true)
+            for task in restored.deletionRecoveryTasks.values {await task.value}
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(restored.deletionIntents[intent.workspaceId], intent)
+            for _ in 0..<5 {await restored.refresh()}
+            XCTAssertEqual(requests.count, 1, "No per-refresh mutation loop")
+            definitive = true
+            restored.updateConnection(false); restored.updateConnection(true)
+            for task in restored.deletionRecoveryTasks.values {await task.value}
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertEqual(requests[0]["operationId"] as? String, intent.operationId)
+            XCTAssertEqual(requests[1]["operationId"] as? String, intent.operationId)
+            XCTAssertEqual(requests[0]["command"] as? NSDictionary, requests[1]["command"] as? NSDictionary)
+            XCTAssertTrue(restored.deletionIntents.isEmpty)
+            XCTAssertTrue(AppModel(startPolling: false, api: api).deletionIntents.isEmpty)
+            XCTAssertNil(restored.pendingActions[intent.workspaceId])
+        }
+    }
+
     @MainActor func testOnlyMatchingJournaledRejectionResolvesUnknownIntent() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

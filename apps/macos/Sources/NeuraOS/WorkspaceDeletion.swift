@@ -142,7 +142,25 @@ extension AppModel {
             if intent.request.discardChanges != true {
                 pendingWorkspaceDeletion = state.workspaces.first {$0.id == intent.workspaceId}
             } else {report(failure)}
-        } catch {report(error)} // No fresh UUID, option escalation, or automatic replay.
+        } catch {report(error)} // Recovery may replay only this exact persisted operation.
+    }
+    // One replay per retained operation per connection. Snapshot refreshes only
+    // recover absent rows, whose WorkspaceView/button can no longer be reached.
+    func scheduleDeletionRecovery(onlyAbsent: Bool) {
+        guard connected, !deletionIntentLoadFailed, !deletionIntents.isEmpty else {return}
+        let visible = onlyAbsent ? Set(state.workspaces.map(\.id)) : []
+        for intent in deletionIntents.values {
+            guard (!onlyAbsent || !visible.contains(intent.workspaceId)),
+                  pendingActions[intent.workspaceId] == nil,
+                  deletionRecoveryTasks[intent.operationId] == nil,
+                  deletionRecoveryAttempted.insert(intent.operationId).inserted else {continue}
+            deletionRecoveryTasks[intent.operationId] = Task { [weak self] in
+                guard let self else {return}
+                defer {self.deletionRecoveryTasks.removeValue(forKey: intent.operationId)}
+                guard self.connected, self.deletionIntents[intent.workspaceId] == intent else {return}
+                await self.confirmDeletionAcceptance(intent.workspaceId)
+            }
+        }
     }
     func confirmDeletionAcceptance(_ workspaceId: String) async {
         guard connected, pendingActions[workspaceId] == nil, let intent = deletionIntents[workspaceId] else {return}
