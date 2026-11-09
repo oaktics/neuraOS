@@ -123,6 +123,42 @@ async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
     let (s, project, w) = fixture(&dir).await;
     let (base, http) = listen(s.clone()).await;
     let root = Path::new(w["path"].as_str().unwrap());
+    // A timed-out start and its concurrent exact replay cannot later disagree.
+    let rejected_op = uuid();
+    server::deletion::setup_fixture(&s, w["id"].as_str().unwrap(), true).await;
+    let lease = mutation::workspace_activity(w["id"].as_str().unwrap()).await;
+    let mut attempts = Vec::new();
+    for _ in 0..2 {
+        let base = base.clone();
+        let op = rejected_op.clone();
+        let c = deletion(&w);
+        attempts.push(tokio::spawn(async move { cmd(&base, &op, c).await }));
+    }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(attempts.iter().all(|t| !t.is_finished()));
+    drop(lease);
+    for attempt in attempts {
+        let (status, rejected) = attempt.await.unwrap();
+        assert_eq!(status, 409);
+        assert_eq!(rejected["error"], "setup_running");
+        assert_eq!(rejected["operationId"], rejected_op);
+        assert_eq!(rejected["operationFinal"], true);
+    }
+    server::deletion::setup_fixture(&s, w["id"].as_str().unwrap(), false).await;
+    let (_, replayed) = cmd(&base, &rejected_op, deletion(&w)).await;
+    assert_eq!(replayed["error"], "setup_running");
+    assert_eq!(replayed["operationFinal"], true);
+    assert!(s
+        .store
+        .call("workspace_deletion_get", json!({"id":rejected_op}))
+        .await
+        .unwrap()
+        .is_null());
+    let mut changed = deletion(&w);
+    changed["discardChanges"] = json!(true);
+    let (_, conflict) = cmd(&base, &rejected_op, changed).await;
+    assert_eq!(conflict["error"], "operation_conflict");
+    assert!(conflict.get("operationFinal").is_none());
     // Safe failure releases admission; explicit retry keeps options/generation.
     std::fs::write(root.join("file"), "dirty").unwrap();
     let op = uuid();
@@ -226,9 +262,31 @@ async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
     });
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert!(!task.is_finished());
+    server::deletion::flush_diagnostics_fixture(&s).await;
+    let log_path = dir.join("data/diagnostics/daemon.jsonl");
+    let rows = || {
+        std::fs::read_to_string(&log_path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| row["operationId"] == delete_id)
+            .collect::<Vec<_>>()
+    };
+    assert!(rows()
+        .iter()
+        .any(|row| row["event"] == "operation.received"));
+    assert!(!rows()
+        .iter()
+        .any(|row| row["event"] == "workspace.delete.admission"));
     drop(lease);
     let (status, accepted) = task.await.unwrap();
     assert_eq!(status, 200, "{accepted}");
+    server::deletion::flush_diagnostics_fixture(&s).await;
+    assert!(rows()
+        .iter()
+        .any(|row| row["event"] == "workspace.delete.admission"
+            && row["durationMs"].as_f64().unwrap() >= 20.0));
+    assert!(rows().iter().any(|row| row["event"] == "operation.success"));
     entered.notified().await;
     assert_eq!(accepted["job"]["generation"], 2);
     assert_eq!(
@@ -361,6 +419,74 @@ async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
     );
     s.shutdown().await.unwrap();
     http.abort();
+    // Durable rejection survives restart and workspace disappearance; mutable
+    // prechecks must not turn the old operation into a new accepted deletion.
+    drop(s);
+    let reopened = server::AppState::new(
+        dir.join("data"),
+        "fixture".into(),
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let (replay_base, replay_http) = listen(reopened.clone()).await;
+    let (_, rejected) = cmd(&replay_base, &rejected_op, deletion(&w)).await;
+    assert_eq!(rejected["error"], "setup_running");
+    assert_eq!(rejected["operationFinal"], true);
+    assert_eq!(rejected["operationId"], rejected_op);
+    reopened.shutdown().await.unwrap();
+    replay_http.abort();
+    drop(reopened);
+    let next = dir.join("shutdown");
+    std::fs::create_dir(&next).unwrap();
+    let (s, p, w) = fixture(&next).await;
+    let (base, http) = listen(s.clone()).await;
+    let target = w["path"].as_str().unwrap();
+    workspace::git(p["path"].as_str().unwrap(), &["worktree", "lock", target])
+        .await
+        .unwrap();
+    let locked = uuid();
+    assert_eq!(cmd(&base, &locked, deletion(&w)).await.0, 200);
+    let job = finished(&base, &locked).await;
+    assert_eq!(job["status"], "failed");
+    assert_eq!(job["blocksWorkspace"], false);
+    assert!(Path::new(target).join("file").exists());
+    workspace::git(p["path"].as_str().unwrap(), &["worktree", "unlock", target])
+        .await
+        .unwrap();
+    let retryop = uuid();
+    let (entered, _release) =
+        server::deletion::pause_fixture(&s, &format!("{locked}:remove-files")).await;
+    assert_eq!(
+        cmd(
+            &base,
+            &retryop,
+            json!({"type":"workspace.deletion.retry","jobId":locked})
+        )
+        .await
+        .0,
+        200
+    );
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    assert_eq!(get(&base, &locked).await["phase"], "remove-files");
+    s.shutdown().await.unwrap();
+    http.abort();
+    drop(s);
+    // Reopen the persisted profile (normal shutdown after isolation). Recovery
+    // must continue, not re-apply clean checks to a partly removed worktree.
+    let restarted = server::AppState::new(
+        next.join("data"),
+        "fixture".into(),
+        "http://127.0.0.1:1".into(),
+    )
+    .await
+    .unwrap();
+    let (base, http) = listen(restarted.clone()).await;
+    assert_eq!(finished(&base, &locked).await["status"], "succeeded");
+    restarted.shutdown().await.unwrap();
+    http.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -409,17 +535,24 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
         "metadata-removed",
         "replacement",
         "symlink",
+        "target-replacement",
+        "wrong-project",
+        "metadata-replacement",
     ] {
         let temp = std::env::temp_dir().join(format!("neura-delete-crash-{}", uuid()));
         std::fs::create_dir(&temp).unwrap();
         let dir = std::fs::canonicalize(temp).unwrap();
         std::fs::create_dir(dir.join("data")).unwrap();
         let id = uuid();
-        let seed = if ["replacement", "symlink"].contains(&window) {
-            "partial-files"
-        } else {
-            window
-        };
+        let corrupt = [
+            "replacement",
+            "symlink",
+            "target-replacement",
+            "wrong-project",
+            "metadata-replacement",
+        ]
+        .contains(&window);
+        let seed = if corrupt { "partial-files" } else { window };
         let status = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "crash_seed_child", "--nocapture"])
             .env("NEURA_DELETE_SEED_DIR", &dir)
@@ -440,6 +573,32 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
             std::fs::rename(&target, &kept).unwrap();
             std::os::unix::fs::symlink(&kept, &target).unwrap();
             std::fs::write(kept.join("keep"), "foreign").unwrap();
+        }
+        if window == "target-replacement" {
+            std::fs::rename(&target, &kept).unwrap();
+            std::fs::create_dir(&target).unwrap();
+            std::fs::write(target.join("keep"), "foreign").unwrap();
+        }
+        if window == "wrong-project" {
+            std::fs::rename(dir.join("repo"), &kept).unwrap();
+            std::fs::create_dir(dir.join("repo")).unwrap();
+            std::fs::create_dir(dir.join("repo/.git")).unwrap();
+            std::fs::write(dir.join("repo/keep"), "foreign").unwrap();
+        }
+        if window == "metadata-replacement" {
+            let db = rusqlite::Connection::open(dir.join("data/developer.sqlite")).unwrap();
+            let data: String = db
+                .query_row(
+                    "SELECT data FROM workspace_deletions WHERE id=?",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let record: Value = serde_json::from_str(&data).unwrap();
+            let admin = Path::new(record["fence"]["admin"].as_str().unwrap());
+            std::fs::rename(admin, &kept).unwrap();
+            std::fs::create_dir(admin).unwrap();
+            std::fs::write(admin.join("keep"), "foreign").unwrap();
         }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -473,20 +632,30 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
         .await
         .unwrap();
         let result = finished(&base, &id).await;
-        if ["replacement", "symlink"].contains(&window) {
+        if corrupt {
             assert_eq!(result["status"], "failed", "{window}: {result}");
             assert_eq!(result["blocksWorkspace"], true);
             assert_eq!(result["retryable"], false);
             assert_eq!(result["error"]["code"], "deletion_identity_changed");
-            assert_eq!(
-                std::fs::read_to_string(if window == "replacement" {
-                    source.join("keep")
-                } else {
-                    kept.join("keep")
-                })
-                .unwrap(),
-                "foreign"
-            );
+            let preserved = match window {
+                "replacement" => source.join("keep"),
+                "target-replacement" => target.join("keep"),
+                "wrong-project" => dir.join("repo/keep"),
+                "metadata-replacement" => {
+                    let db = rusqlite::Connection::open(dir.join("data/developer.sqlite")).unwrap();
+                    let data: String = db
+                        .query_row(
+                            "SELECT data FROM workspace_deletions WHERE id=?",
+                            [&id],
+                            |r| r.get(0),
+                        )
+                        .unwrap();
+                    let record: Value = serde_json::from_str(&data).unwrap();
+                    PathBuf::from(record["fence"]["admin"].as_str().unwrap()).join("keep")
+                }
+                _ => kept.join("keep"),
+            };
+            assert_eq!(std::fs::read_to_string(preserved).unwrap(), "foreign");
         } else {
             assert_eq!(result["status"], "succeeded", "{window}: {result}");
             assert_eq!(result["verifiedAbsent"], true);

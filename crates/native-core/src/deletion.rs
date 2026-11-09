@@ -120,7 +120,13 @@ pub(super) async fn project_gate(s: &AppState, project: &str) -> Result<(), ApiE
     }
     Ok(())
 }
-pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Value, ApiError> {
+async fn accept(
+    s: &AppState,
+    op: &str,
+    c: &Value,
+    canonical: &Value,
+    hash: &str,
+) -> Result<Value, ApiError> {
     let retry = c["type"] == "workspace.deletion.retry";
     let workspace = if retry {
         load(&s, text(c, "jobId")?).await?["public"]["workspaceId"]
@@ -145,11 +151,6 @@ pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Val
     if *s.closing.borrow() {
         return Err(failure("deletion_cancelled"));
     }
-    let mut canonical = c.clone();
-    if !retry {
-        canonical["type"] = json!("workspace.delete");
-    }
-    let hash = work::hash(&canonical.to_string());
     let job = checked(
         s.store
             .call(
@@ -162,8 +163,83 @@ pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Val
             )
             .await?,
     )?;
-    drop(_admission);
-    drop(_scope);
+    Ok(job)
+}
+pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Value, ApiError> {
+    let admission_started = std::time::Instant::now();
+    let retry = c["type"] == "workspace.deletion.retry";
+    let mut canonical = c.clone();
+    if !retry {
+        canonical["type"] = json!("workspace.delete");
+    }
+    let hash = work::hash(&canonical.to_string());
+    // Same-operation serialization includes prechecks and durable rejection, but
+    // ends before legacy completion waiting so replays remain responsive.
+    let lock = {
+        let mut locks = s.operations.lock().await;
+        locks.retain(|_, v| v.strong_count() > 0);
+        if let Some(lock) = locks.get(op).and_then(std::sync::Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(op.to_owned(), Arc::downgrade(&lock));
+            lock
+        }
+    };
+    let guard = lock.lock().await;
+    // Replay before mutable workspace/setup checks, including after workspace removal.
+    let prior = checked(
+        s.store
+            .call(
+                "workspace_deletion_operation",
+                json!({"operationId":op,"hash":hash}),
+            )
+            .await?,
+    )?;
+    let job = if !prior.is_null() {
+        prior
+    } else {
+        match accept(&s,op,c,&canonical,&hash).await {
+            Ok(job)=>job,
+            Err(error) if !["storage_failed","deletion_cancelled","operation_conflict","operation_unknown"].contains(&error.error.as_str()) => {
+                checked(s.store.call("workspace_deletion_reject",json!({"operationId":op,"hash":hash,"rejection":{"code":error.error,"message":error.message,"status":error.status}})).await?)?
+            }
+            Err(error)=>return Err(error),
+        }
+    };
+    drop(guard);
+    if let Some(rejected) = job.get("deletionRejected") {
+        let mut error = ApiError::new(
+            rejected["code"].as_str().unwrap_or("deletion_failed"),
+            rejected["message"]
+                .as_str()
+                .unwrap_or("削除に失敗しました。"),
+            rejected["status"].as_u64().unwrap_or(409) as u16,
+        );
+        error.operation_id = Some(op.to_owned());
+        error.operation_final = Some(true);
+        return Err(error);
+    }
+    s.diagnostics.record(
+        Phase::DeleteAdmission,
+        c["type"].as_str(),
+        Some(op),
+        Some(admission_started.elapsed().as_secs_f64() * 1000.0),
+    );
+    if job.get("legacyOperation").is_some() {
+        if c["type"] != "workspace.delete" {
+            return Err(failure("operation_unknown"));
+        }
+        if job["legacyOperation"] == "done" {
+            return Ok(job["legacyResult"].clone());
+        }
+        let prior = &job["legacyResult"];
+        return Err(ApiError::new(
+            prior["code"].as_str().unwrap_or("deletion_failed"),
+            prior["message"].as_str().unwrap_or("削除に失敗しました。"),
+            prior["status"].as_u64().unwrap_or(409) as u16,
+        ));
+    }
     let id = text(&job, "id")?.to_owned();
     signal(&s, &id).await;
     spawn(s.clone(), &id).await;
@@ -269,7 +345,9 @@ async fn spawn(s: Arc<AppState>, id: &str) {
                         if error.error != "deletion_cancelled" {
                             let blocks = irreversible(&job);
                             let retryable = error.error != "deletion_identity_changed";
-                            let _ = update(&owner, &mut job, json!({"public":{"status":"failed","blocksWorkspace":blocks,"retryable":retryable,"error":{"code":error.error,"message":error.message}}})).await;
+                            // Git stderr can contain private quarantine/admin paths.
+                            let message=if ["git_failed","operation_failed"].contains(&error.error.as_str()) {"Git処理に失敗しました。削除ジョブを確認してください。".to_owned()}else{error.message};
+                            let _ = update(&owner, &mut job, json!({"public":{"status":"failed","blocksWorkspace":blocks,"retryable":retryable,"error":{"code":error.error,"message":message}}})).await;
                         }
                     }
                 }
@@ -443,6 +521,14 @@ async fn metadata(f: &Fence, allow_absent: bool) -> Result<bool, ApiError> {
     {
         return Err(failure("deletion_identity_changed"));
     }
+    let common_link = std::fs::read_to_string(f.admin.join("commondir"))
+        .map_err(|_| failure("deletion_identity_changed"))?;
+    if std::fs::canonicalize(f.admin.join(common_link.trim()))
+        .map_err(|_| failure("deletion_identity_changed"))?
+        != f.common
+    {
+        return Err(failure("deletion_identity_changed"));
+    }
     let head = work::git(
         path_text(&f.parent)?,
         &["--git-dir", path_text(&f.admin)?, "rev-parse", "HEAD"],
@@ -474,15 +560,7 @@ fn link_matches(f: &Fence, root: &Path) -> bool {
 async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
     cancelled(s)?;
     #[cfg(test)]
-    {
-        let pause = s.deletions.pauses.lock().await.remove(text(job, "id")?);
-        if let Some((entered, release)) = pause {
-            entered.notify_one();
-            let mut closing = s.closing.subscribe();
-            tokio::select! {_=release.notified()=>{},_=closing.changed()=>{}}
-            cancelled(s)?;
-        }
-    }
+    pause_point(s, text(job, "id")?).await?;
     let fresh = job["fence"].is_null();
     if fresh {
         phase(s, job, "verify-before").await?;
@@ -592,6 +670,8 @@ async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
         )
         .await?;
     }
+    #[cfg(test)]
+    pause_point(s, &format!("{}:remove-files", text(job, "id")?)).await?;
     cancelled(s)?;
     if Identity::at(&f.source)?.is_some() {
         return Err(failure("deletion_identity_changed"));
@@ -872,4 +952,35 @@ pub(crate) async fn pause_fixture(s: &AppState, id: &str) -> (Arc<Notify>, Arc<N
         .await
         .insert(id.into(), pair.clone());
     pair
+}
+
+#[cfg(test)]
+async fn pause_point(s: &AppState, key: &str) -> Result<(), ApiError> {
+    let pause = s.deletions.pauses.lock().await.remove(key);
+    if let Some((entered, release)) = pause {
+        entered.notify_one();
+        let mut closing = s.closing.subscribe();
+        tokio::select! {_=release.notified()=>{},_=closing.changed()=>{}}
+        cancelled(s)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn flush_diagnostics_fixture(s: &AppState) {
+    s.diagnostics.flush().await;
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_fixture(s: &AppState, id: &str, active: bool) {
+    if active {
+        let (cancel, _) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(std::future::pending::<Result<(), ApiError>>());
+        s.setups
+            .lock()
+            .await
+            .insert(id.to_owned(), super::SetupJob { cancel, task });
+    } else if let Some(job) = s.setups.lock().await.remove(id) {
+        job.task.abort();
+    }
 }
