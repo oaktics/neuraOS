@@ -91,6 +91,22 @@ and exposes `workspace_deletion_status` for subsequent observation. Completion
 requires job success, backend absence proof, and an independent registry read.
 The UI retains the workspace until an authoritative snapshot removes it.
 
+## Recovery and load verification
+
+Isolated production-daemon fixtures seed the durable states before moving, after
+rename but before Git backpointer repair, after moving, after removal intent,
+after partial removal, after physical removal and after Git unregister. A fresh
+daemon completes those jobs. Replacement source directories and quarantine
+symlinks remain untouched and produce a blocked failure.
+
+A real HTTP test disconnects a synchronous deletion request after its job is
+visible, kills only the fixture daemon and starts it again. It checks job success,
+filesystem absence, Git registration absence, snapshot absence, exact operation
+replay and preservation of another workspace and tracked directory-symlink targets.
+A separate 3,000-file / 20 MiB terminal-history fixture issues foreign-workspace
+Store reads and writes while deletion runs; the history purge yields between
+bounded transactions. These checks use disposable repositories and profiles.
+
 ## macOS update scope
 
 Terminal records and workspace membership have stable observable buckets, so a
@@ -106,7 +122,12 @@ queries and replay position remain correct.
 A 1,000-workspace/terminal fixture verifies one terminal reader and one workspace
 reader are invalidated by one activity change, with zero membership invalidations.
 A 1,000-event fixture verifies only the targeted terminal callback is invoked.
-These are deterministic work-count checks, not installed-app CPU benchmarks.
+Deletion snapshot merging also performs one indexed lookup per workspace (2,000
+lookups for a 2,000-workspace fixture), and a job progress update only notifies its
+target workspace bucket. Different jobs use a durable generation counter; retries
+retain their generation and advance revision, so wall-clock rollback cannot
+restore an older failed job. These are deterministic work-count checks, not
+installed-app CPU benchmarks.
 
 ## Delivery boundary
 

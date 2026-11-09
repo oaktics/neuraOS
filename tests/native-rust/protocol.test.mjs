@@ -99,6 +99,8 @@ test('native stream wakes on durable state, reconnects, and closes during daemon
 test('durable workspace deletion survives disconnected HTTP and daemon restart', {timeout:60000}, async t => {
  const f=await fixture();let failure;
  try {
+  await symlink(f.repo,join(f.repo,'linked-directory'));
+  await f.git(['add','linked-directory']);await f.git(['commit','-m','tracked directory symlink']);
   const project=await success(f.command({type:'project.add',path:f.repo}));
   const workspace=await success(f.command({type:'workspace.create',projectId:project.id,baseRef:'HEAD',skipStartup:true}));
   const other=await success(f.command({type:'workspace.create',projectId:project.id,baseRef:'HEAD',skipStartup:true}));
@@ -131,6 +133,7 @@ test('durable workspace deletion survives disconnected HTTP and daemon restart',
   assert.ok(!state.workspaces.some(w=>w.id===workspace.id));assert.ok(state.workspaces.some(w=>w.id===other.id));
   await assert.rejects(stat(workspace.path),{code:'ENOENT'});
   assert.equal(await readFile(join(other.path,'hello.txt'),'utf8'),'hello\n');
+  assert.equal(await readFile(join(f.repo,'hello.txt'),'utf8'),'hello\n','directory symlink target must survive');
   const registrations=(await f.git(['worktree','list','--porcelain'])).stdout;
   assert.ok(!registrations.includes(workspace.path));assert.ok(registrations.includes(other.path));
   assert.equal((await success(f.command(command,operationId))).ok,true);
