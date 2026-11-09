@@ -112,6 +112,57 @@ fn deletion(w: &Value) -> Value {
     json!({"type":"workspace.delete.start","workspaceId":w["id"],"stopTerminals":true,"discardChanges":false})
 }
 
+async fn approved_read_only_directories_are_removed_without_changing_external_targets() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = std::env::temp_dir().join(format!("neura-delete-readonly-{}", uuid()));
+    std::fs::create_dir(&temp).unwrap();
+    let dir = std::fs::canonicalize(temp).unwrap();
+    let (s, _, w) = fixture(&dir).await;
+    let (base, http) = listen(s.clone()).await;
+    let source = Path::new(w["path"].as_str().unwrap());
+    let readonly = source.join("ignored/checkouts");
+    std::fs::create_dir_all(readonly.join("nested")).unwrap();
+    std::fs::write(readonly.join("nested/cache"), "generated").unwrap();
+    let external = dir.join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("keep"), "foreign").unwrap();
+    std::os::unix::fs::symlink(&external, readonly.join("external-link")).unwrap();
+    for path in [&readonly, &readonly.join("nested"), &external] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500)).unwrap();
+    }
+    let guarded = uuid();
+    assert_eq!(cmd(&base, &guarded, deletion(&w)).await.0, 200);
+    let failed = finished(&base, &guarded).await;
+    assert_eq!(failed["error"]["code"], "workspace_ignored_files");
+    assert_eq!(
+        std::fs::metadata(&readonly).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    assert_eq!(
+        std::fs::read_to_string(readonly.join("nested/cache")).unwrap(),
+        "generated"
+    );
+
+    let approved = uuid();
+    let mut command = deletion(&w);
+    command["discardChanges"] = json!(true);
+    assert_eq!(cmd(&base, &approved, command).await.0, 200);
+    let result = finished(&base, &approved).await;
+    assert_eq!(result["status"], "succeeded", "{result}");
+    assert_eq!(result["verifiedAbsent"], true);
+    assert!(!source.exists());
+    assert_eq!(
+        std::fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+        0o500
+    );
+    assert_eq!(
+        std::fs::read_to_string(external.join("keep")).unwrap(),
+        "foreign"
+    );
+    s.shutdown().await.unwrap();
+    http.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn historical_failed_delete_replays_final_marker_without_workspace() {
     let dir = std::env::temp_dir().join(format!("neura-delete-migration-{}", uuid()));
@@ -551,6 +602,9 @@ async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
     assert_eq!(finished(&base, &locked).await["status"], "succeeded");
     restarted.shutdown().await.unwrap();
     http.abort();
+    // Reuse this test process's supervisor profile: it is intentionally a
+    // singleton, so independent API fixtures must not initialize a second one.
+    approved_read_only_directories_are_removed_without_changing_external_targets().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -602,6 +656,12 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
         "target-replacement",
         "wrong-project",
         "metadata-replacement",
+        "move-exit-error",
+        "move-timeout",
+        "move-partial",
+        "remove-exit-error",
+        "move-no-effect",
+        "move-replaced",
     ] {
         let temp = std::env::temp_dir().join(format!("neura-delete-crash-{}", uuid()));
         std::fs::create_dir(&temp).unwrap();
@@ -616,7 +676,14 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
             "metadata-replacement",
         ]
         .contains(&window);
-        let seed = if corrupt { "partial-files" } else { window };
+        let git_fault = window.starts_with("move-") || window == "remove-exit-error";
+        let seed = if git_fault {
+            "before-move"
+        } else if corrupt {
+            "partial-files"
+        } else {
+            window
+        };
         let status = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "crash_seed_child", "--nocapture"])
             .env("NEURA_DELETE_SEED_DIR", &dir)
@@ -668,7 +735,51 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         std::fs::write(dir.join("data/daemon-token"), "fixture").unwrap();
-        let mut daemon = tokio::process::Command::new(binary())
+        let mut command = tokio::process::Command::new(binary());
+        if git_fault {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = dir.join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            // Exercise the real subprocess runner, not a mocked Result. Git
+            // completes its side effect and is reaped with a failing status.
+            std::fs::write(
+                bin.join("git"),
+                r#"#!/bin/sh
+previous=''
+before=''
+step=''
+for arg in "$@"; do
+    if [ "$previous" = worktree ]; then step="$arg"; fi
+    before="$previous"
+    previous="$arg"
+done
+if [ "$step" = move ] && [ "$NEURA_GIT_FAULT" = move-no-effect ]; then exit 1; fi
+if [ "$step" = move ] && [ "$NEURA_GIT_FAULT" = move-partial ]; then
+    /bin/mv "$before" "$previous" || exit 2
+    exit 1
+fi
+/usr/bin/git "$@" || exit $?
+if [ "$step" = move ] && [ "$NEURA_GIT_FAULT" = move-timeout ]; then /bin/sleep 60; fi
+if [ "$step" = move ] && [ "$NEURA_GIT_FAULT" = move-replaced ]; then
+    /bin/mv "$previous" "$previous-kept" || exit 2
+    /bin/mkdir "$previous" || exit 2
+    echo foreign > "$previous/keep"
+    exit 1
+fi
+if [ "$step-exit-error" = "$NEURA_GIT_FAULT" ]; then exit 1; fi
+exit 0
+"#,
+            )
+            .unwrap();
+            std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            command.env(
+                "PATH",
+                format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display()),
+            );
+            command.env("NEURA_GIT_FAULT", window);
+        }
+        let mut daemon = command
             .env("NEURA_DEV_DATA_DIR", dir.join("data"))
             .env("NEURA_DEV_PORT", port.to_string())
             .stdout(std::process::Stdio::null())
@@ -720,6 +831,30 @@ async fn production_restart_recovers_each_destructive_boundary_and_preserves_rep
                 _ => kept.join("keep"),
             };
             assert_eq!(std::fs::read_to_string(preserved).unwrap(), "foreign");
+        } else if window == "move-no-effect" || window == "move-replaced" {
+            assert_eq!(result["status"], "failed", "{window}: {result}");
+            assert_ne!(result["verifiedAbsent"], true);
+            if window == "move-no-effect" {
+                assert_eq!(result["error"]["code"], "git_failed");
+                assert_eq!(result["blocksWorkspace"], false);
+                assert_eq!(
+                    std::fs::read_to_string(source.join("file")).unwrap(),
+                    "original"
+                );
+            } else {
+                assert_eq!(result["error"]["code"], "deletion_identity_changed");
+                assert_eq!(result["retryable"], false);
+                assert_eq!(result["blocksWorkspace"], true);
+                assert_eq!(
+                    std::fs::read_to_string(target.join("keep")).unwrap(),
+                    "foreign\n"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.join(format!(".neura-delete-{id}-kept/file")))
+                        .unwrap(),
+                    "original"
+                );
+            }
         } else {
             assert_eq!(result["status"], "succeeded", "{window}: {result}");
             assert_eq!(result["verifiedAbsent"], true);
