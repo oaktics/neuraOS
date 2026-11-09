@@ -3,12 +3,6 @@ import SwiftUI
 import QuickLookUI
 import UniformTypeIdentifiers
 
-struct OpenDocument: Codable, Equatable {
-    var original: FileContent
-    var text: String
-    var dirty: Bool {text != original.content}
-}
-
 enum FilePresentation {
     static func invalidateCleanDocument(_ path: String, in documents: inout [String: OpenDocument]) {
         // Inspect the current buffer: edits may have arrived while a read was pending.
