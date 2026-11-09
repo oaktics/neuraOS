@@ -14,7 +14,7 @@ struct WorkspaceCommandRequest {
 
 struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var worktreeSetup: String? = nil; var defaultConversationProvider: String? = nil; var defaultDelegationProvider: String? = nil; var inheritedProvider: String {let agents = Set((worktreeStartup ?? []).filter {["codex", "claude"].contains($0)}); return agents.count == 1 ? agents.first! : "codex"}; var conversationProvider: String {defaultConversationProvider ?? inheritedProvider}; var delegationProvider: String {defaultDelegationProvider ?? inheritedProvider}; var supportsGit: Bool {folderless != true && isGit != false}}
 struct WorktreeSetup: Codable, Hashable {let status: String; let script: String; let output: String; var error: String?}
-struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var setup: WorktreeSetup? = nil; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
+struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var setup: WorktreeSetup? = nil; var deletion: DeletionJob? = nil; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
 struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
@@ -122,7 +122,11 @@ final class DaemonClient {
     func get<T: Decodable>(_ path: String, query: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> T {try await request(path, query: query, timeout: timeout ?? ((path.hasSuffix("/github") || path.hasSuffix("/pull-requests")) ? 180 : path.hasSuffix("/checks") ? 90 : 15))}
     func command<T: Decodable>(_ command: [String: Any]) async throws -> T {
         // One operation ID per user action. Never automatically resend uncertain terminal input.
-        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: ((command["type"] as? String)?.hasPrefix("github.") == true || (command["type"] as? String)?.hasPrefix("workspace.") == true) ? 240 : 15)
+        try await request("v1/commands", body: ["operationId": UUID().uuidString.lowercased(), "command": command], timeout: Self.commandTimeout(command["type"] as? String ?? ""))
+    }
+    static func commandTimeout(_ type: String) -> TimeInterval {
+        if ["workspace.delete.start", "workspace.deletion.retry"].contains(type) {return 15}
+        return type.hasPrefix("github.") || type.hasPrefix("workspace.") ? 240 : 15
     }
     private func request<T: Decodable>(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil, timeout: TimeInterval = 15) async throws -> T {
         let operationId = body?["operationId"] as? String
@@ -160,7 +164,7 @@ final class DaemonClient {
 }
 
 @MainActor @Observable final class AppModel {
-    let api = DaemonClient()
+    let api: DaemonClient
     let agentSleep = AgentSleepController()
     let githubUpdated = PassthroughSubject<String, Never>()
     let workspaceUpdated = PassthroughSubject<String, Never>()
@@ -178,7 +182,7 @@ final class DaemonClient {
     func endTerminalLaunch(_ tabId: String) {startingTerminalTabs.remove(tabId)}
     private(set) var actionStarted: [String: Date] = [:]
     private(set) var pendingActions: [String: String] = [:] {didSet {pendingActionsChanged.send()}}
-    func isBusy(_ key: String) -> Bool {pendingActions[key] != nil}
+    func isBusy(_ key: String) -> Bool {pendingActions[key] != nil || isWorkspaceBlocked(key)}
     @discardableResult func beginAction(_ key: String, label: String) -> Bool {
         guard !isBusy(key) else {Diagnostics.shared.record("action.blocked", operation: "resource.busy"); return false}
         actionStarted[key] = Date()
@@ -186,6 +190,7 @@ final class DaemonClient {
         return true
     }
     func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
+    private(set) var uncertainDeletions: Set<String> = []
     var pendingWorkspaceDeletion: Workspace?
     var showNewProject = false
     var showNewWorkspace = false
@@ -233,7 +238,9 @@ final class DaemonClient {
     var gitProjects: [Project] {visibleProjects.filter { $0.supportsGit }}
     var selected: Workspace? {state.workspaces.first {$0.id == selectedId}}
     var supportsGitHub: Bool {connected && state.supportsGitHub}
-    init(startPolling: Bool = true) {
+    @ObservationIgnored private var acceptedDeletions: [String: DeletionJob] = [:]
+    init(startPolling: Bool = true, api: DaemonClient = DaemonClient()) {
+        self.api = api
         guard startPolling else {return}
         agentNotifications = AgentNotifications { [weak self] terminalId in
             guard let self, let terminal = self.terminal(id: terminalId) else {return}
@@ -279,7 +286,36 @@ final class DaemonClient {
     }
     // Transport polling must not invalidate views when the UI state is unchanged.
     func applySnapshot(_ next: Snapshot) {
-        state.apply(next)
+        var snapshot = next
+        for index in snapshot.workspaces.indices {
+            let id = snapshot.workspaces[index].id
+            let incoming = snapshot.workspaces[index].deletion
+            let accepted = acceptedDeletions[id]
+            let current = deletion(id)
+            let known: DeletionJob?
+            if let accepted, let current, accepted.id == current.id {
+                known = accepted.revision > current.revision ? accepted : current
+            } else {known = accepted ?? current}
+            if let known {
+                if let incoming {
+                    let older = incoming.id == known.id ? incoming.revision < known.revision
+                        : (ProviderUsage.date(incoming.createdAt) ?? .distantPast) < (ProviderUsage.date(known.createdAt) ?? .distantPast)
+                    if older || (accepted != nil && incoming.id != known.id && incoming.createdAt == known.createdAt) {
+                        snapshot.workspaces[index].deletion = known
+                    }
+                } else {snapshot.workspaces[index].deletion = known}
+            }
+            if let incoming, let accepted, incoming.id == accepted.id && incoming.revision >= accepted.revision {
+                acceptedDeletions.removeValue(forKey: id)
+            } else if let incoming, let accepted,
+                      (ProviderUsage.date(incoming.createdAt) ?? .distantPast) > (ProviderUsage.date(accepted.createdAt) ?? .distantPast) {
+                acceptedDeletions.removeValue(forKey: id)
+            }
+        }
+        acceptedDeletions = acceptedDeletions.filter {id, _ in next.workspaces.contains {$0.id == id}}
+        state.apply(snapshot)
+        // A successful authoritative snapshot resolves a lost acceptance reply.
+        if !uncertainDeletions.isEmpty {uncertainDeletions = []}
         let retained = openedIds.intersection(Set(next.workspaces.map(\.id)))
         if retained != openedIds {openedIds = retained}
     }
@@ -395,6 +431,7 @@ final class DaemonClient {
         } catch {report(error)}
     }
     func removeProject(_ project: Project) async {
+        guard !state.workspaces.contains(where: {$0.projectId == project.id && isWorkspaceBlocked($0.id)}) else {return}
         let key = "project.remove.\(project.id)"
         guard beginAction(key, label: "プロジェクトを削除中") else {return}
         defer {endAction(key)}
@@ -406,18 +443,46 @@ final class DaemonClient {
             await refresh()
         } catch {report(error)}
     }
+    func markDeletionUncertain(_ id: String) {uncertainDeletions.insert(id)}
+    func pendingDeletionRetryBegin(_ id: String) {
+        actionStarted[id] = Date()
+        pendingActions[id] = "削除を受け付けています"
+    }
+    func acceptDeletion(_ response: DeletionAccepted, workspaceId: String) throws {
+        guard response.ok, response.accepted, response.job.workspaceId == workspaceId else {
+            throw APIError(error: "invalid_deletion_response", message: "削除の受付結果を確認できません。再接続して状態を確認してください。")
+        }
+        acceptedDeletions[workspaceId] = response.job
+        if let index = state.workspaces.firstIndex(where: {$0.id == workspaceId}) {
+            var workspace = state.workspaces[index]
+            if workspace.deletion?.id != response.job.id || (workspace.deletion?.revision ?? -1) <= response.job.revision {
+                workspace.deletion = response.job
+                state.workspaces[index] = workspace
+            }
+        }
+    }
     func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) async {
-        guard workspace.kind == "worktree", beginAction(workspace.id, label: "作業を削除中") else {return}
+        guard connected, workspace.kind == "worktree", !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}),
+              beginAction(workspace.id, label: "削除を受け付けています") else {return}
         defer {endAction(workspace.id)}
         do {
-            guard state.features?.contains("workspace.delete.stop-terminals") == true else {
-                throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+            guard !discardChanges || state.features?.contains("workspace.delete.discard") == true else {
+                throw APIError(error: "daemon_update_required", message: "変更を破棄する削除にはDaemonの更新が必要です。")
             }
-            let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
+            if supportsDeletionJobs {
+                let response: DeletionAccepted = try await api.command(["type": "workspace.delete.start", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
+                try acceptDeletion(response, workspaceId: workspace.id)
+            } else {
+                guard state.features?.contains("workspace.delete.stop-terminals") == true else {
+                    throw APIError(error: "daemon_update_required", message: "Daemonを更新してから削除してください。")
+                }
+                let _: OK = try await api.command(["type": "workspace.delete", "workspaceId": workspace.id, "discardChanges": discardChanges, "stopTerminals": true])
+            }
             await refresh()
         } catch let failure as APIError where !discardChanges && ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
             pendingWorkspaceDeletion = workspace
-        } catch {report(error)}
+        } catch let failure as APIError {report(failure); await refresh()}
+        catch {markDeletionUncertain(workspace.id); report(error); await refresh()}
     }
     func openTerminal(_ workspace: Workspace, provider: String? = nil, resume: Bool = false) async -> TerminalRecord? {
         guard beginAction(workspace.id, label: "ターミナルを起動中") else {return nil}
