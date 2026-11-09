@@ -113,6 +113,63 @@ fn deletion(w: &Value) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn historical_failed_delete_replays_final_marker_without_workspace() {
+    let dir = std::env::temp_dir().join(format!("neura-delete-migration-{}", uuid()));
+    std::fs::create_dir(&dir).unwrap();
+    let s = server::AppState::new(dir.clone(), "fixture".into(), "http://127.0.0.1:1".into())
+        .await
+        .unwrap();
+    let (base, http) = listen(s.clone()).await;
+    let op = uuid();
+    let legacy = json!({"type":"workspace.delete","workspaceId":uuid(),"discardChanges":false,"stopTerminals":false});
+    let hash = workspace::hash(&legacy.to_string());
+    let original = json!({"code":"workspace_dirty","message":"historical failure","status":409});
+    s.store
+        .call("operation_start", json!({"id":op,"hash":hash}))
+        .await
+        .unwrap();
+    s.store
+        .call(
+            "operation_finish",
+            json!({"id":op,"status":"failed","result":original.to_string()}),
+        )
+        .await
+        .unwrap();
+    assert!(s
+        .store
+        .get("workspaces", legacy["workspaceId"].as_str().unwrap())
+        .await
+        .unwrap()
+        .is_none());
+    let (status, replayed) = cmd(&base, &op, legacy.clone()).await;
+    assert_eq!(status, 409);
+    assert_eq!(replayed["error"], original["code"]);
+    assert_eq!(replayed["message"], original["message"]);
+    assert_eq!(replayed["operationId"], op);
+    assert_eq!(replayed["operationFinal"], true);
+    let mut start = legacy.clone();
+    start["type"] = json!("workspace.delete.start");
+    let (_, unknown) = cmd(&base, &op, start).await;
+    assert_eq!(unknown["error"], "operation_unknown");
+    assert!(unknown.get("operationFinal").is_none());
+    let pending = uuid();
+    s.store
+        .call("operation_start", json!({"id":pending,"hash":hash}))
+        .await
+        .unwrap();
+    let (_, unknown) = cmd(&base, &pending, legacy.clone()).await;
+    assert_eq!(unknown["error"], "operation_unknown");
+    assert!(unknown.get("operationFinal").is_none());
+    let mut changed = legacy;
+    changed["discardChanges"] = json!(true);
+    let (_, conflict) = cmd(&base, &op, changed).await;
+    assert_eq!(conflict["error"], "operation_conflict");
+    assert!(conflict.get("operationFinal").is_none());
+    s.shutdown().await.unwrap();
+    http.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
     let temp = std::env::temp_dir().join(format!("neura-delete-api-{}", uuid()));
     std::fs::create_dir(&temp).unwrap();
