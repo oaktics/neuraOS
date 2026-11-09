@@ -99,6 +99,9 @@ test('native stream wakes on durable state, reconnects, and closes during daemon
 test('durable workspace deletion survives disconnected HTTP and daemon restart', {timeout:60000}, async t => {
  const f=await fixture();let failure;
  try {
+  for (const endpoint of ['/v1/state','/v1/capabilities']) {
+   assert.ok((await success(f.request(endpoint))).features.includes('workspace.delete.jobs'), `${endpoint} must enable durable deletion clients`);
+  }
   await symlink(f.repo,join(f.repo,'linked-directory'));
   await f.git(['add','linked-directory']);await f.git(['commit','-m','tracked directory symlink']);
   const project=await success(f.command({type:'project.add',path:f.repo}));

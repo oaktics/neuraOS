@@ -503,7 +503,14 @@ async fn jobs_cutoff_admission_idempotency_retry_and_bounded_purge() {
         .await
         .unwrap();
     let locked = uuid();
-    assert_eq!(cmd(&base, &locked, deletion(&w)).await.0, 200);
+    let mut legacy = deletion(&w);
+    legacy["type"] = json!("workspace.delete");
+    for _ in 0..2 {
+        let (status, failed) = cmd(&base, &locked, legacy.clone()).await;
+        assert_eq!(status, 409);
+        assert_eq!(failed["operationId"], locked);
+        assert_eq!(failed["operationFinal"], true);
+    }
     let job = finished(&base, &locked).await;
     assert_eq!(job["status"], "failed");
     assert_eq!(job["blocksWorkspace"], false);
