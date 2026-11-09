@@ -54,6 +54,43 @@ shutdown, Git removal, store deletion and agent cleanup. Each contains only the
 operation UUID and duration; payloads, paths and error text are excluded. Both
 verification passes remain necessary to catch writes made during shutdown.
 
+## Durable deletion protocol
+
+The shutdown optimization alone does not solve an interrupted Git removal. The
+previous synchronous path had a 30-second Git subprocess timeout; killing a
+large removal could leave a partially removed directory that the next attempt
+would reject as dirty. Extending the client timeout would not make that operation
+recoverable.
+
+Job-capable clients now submit `workspace.delete.start`. Acceptance durably records
+the command and workspace gate; it is not completion. A detached worker performs
+the protected verification and shutdown, isolates the approved worktree, removes
+its contents, unregisters only that worktree, and finally removes the workspace
+record together with the job success transition. `workspace.delete` retains its
+synchronous success semantics while waiting for the same durable worker.
+
+A job records directory and Git metadata identity before isolation. Removal uses
+file-descriptor-relative traversal and does not follow symlinks. Resumption checks
+those identities rather than treating partially removed tracked files as a fresh
+dirty workspace. Replacement directories, ambiguous identity, or changed Git
+registration fail closed. The physical file-removal phase has no overall Git
+subprocess deadline; daemon shutdown is checked between filesystem operations.
+An individual blocked operating-system filesystem call remains outside that
+cooperative cancellation guarantee.
+
+Deletion admission fences new terminal launches, provider requests, queued
+instructions and workspace writes. Other workspaces retain their own admission.
+A failed attempt before isolation can release the workspace for editing; a failed
+attempt after irreversible work keeps it blocked. Explicit retry reuses the job's
+options. UI confirmation is required to create a new discard-enabled attempt;
+MCP cleanup never requests discard.
+
+The workspace snapshot includes public job progress and failure state, so UI
+reconnection restores it. MCP returns a pending job when its bounded wait expires
+and exposes `workspace_deletion_status` for subsequent observation. Completion
+requires job success, backend absence proof, and an independent registry read.
+The UI retains the workspace until an authoritative snapshot removes it.
+
 ## macOS update scope
 
 Terminal records and workspace membership have stable observable buckets, so a
