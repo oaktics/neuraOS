@@ -567,6 +567,12 @@ fn link_matches(f: &Fence, root: &Path) -> bool {
         && std::fs::read_to_string(f.admin.join("gitdir"))
             .is_ok_and(|v| v.trim() == root.join(".git").to_string_lossy())
 }
+// workspace::run only returns these errors after stopping the owned process
+// tree and reaping the child. Never reconcile monitor/cleanup failures: Git
+// might still be mutating the paths in that case.
+fn can_reconcile_git(error: &ApiError) -> bool {
+    matches!(error.error.as_str(), "git_failed" | "operation_timeout")
+}
 async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
     cancelled(s)?;
     #[cfg(test)]
@@ -641,7 +647,7 @@ async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
                     verify_delete(s, &w, &c).await?;
                 }
                 cancelled(s)?;
-                repo_git(
+                let moved = repo_git(
                     &f,
                     &[
                         "worktree",
@@ -651,7 +657,21 @@ async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
                         path_text(&f.target)?,
                     ],
                 )
-                .await?;
+                .await;
+                if let Err(error) = moved {
+                    if !can_reconcile_git(&error) {
+                        return Err(error);
+                    }
+                    // A nonzero exit/timeout can follow the rename. Continue
+                    // through the normal backpointer repair and fence checks
+                    // only when that exact approved inode has been isolated.
+                    metadata(&f, false).await?;
+                    match (Identity::at(&f.source)?, Identity::at(&f.target)?) {
+                        (None, Some(ref id)) if id == &f.root => {}
+                        (Some(ref id), None) if id == &f.root => return Err(error),
+                        _ => return Err(failure("deletion_identity_changed")),
+                    }
+                }
             }
             (None, Some(ref id)) if id == &f.root => {}
             _ => return Err(failure("deletion_identity_changed")),
@@ -709,13 +729,20 @@ async fn run(s: &AppState, job: &mut Value) -> Result<(), ApiError> {
         {
             return Err(failure("deletion_identity_changed"));
         }
-        delete_step(
+        let removed = delete_step(
             s,
             text(job, "id")?,
             Phase::DeleteGitRemove,
             repo_git(&f, &["worktree", "remove", "--", path_text(&f.target)?]),
         )
-        .await?;
+        .await;
+        if let Err(error) = removed {
+            if !can_reconcile_git(&error) || metadata(&f, true).await? {
+                return Err(error);
+            }
+            // The recorded admin directory is gone. The independent list and
+            // path checks below still have to prove complete removal.
+        }
     }
     // Independently check registration and both paths, then atomically retire
     // workspace/terminals/output and mark the durable job succeeded.
@@ -872,6 +899,17 @@ fn clear_fd(fd: RawFd, dev: u64, stopped: &impl Fn() -> bool) -> Result<(), ApiE
             let meta = child.metadata().map_err(|_| ApiError::storage())?;
             if meta.ino() != stat.st_ino || meta.dev() != stat.st_dev as u64 {
                 return Err(failure("deletion_identity_changed"));
+            }
+            // Generated checkouts can contain owner-read-only directories.
+            // Deletion was already authorized before isolation. Add only the
+            // owner's write/search bits on this verified, open directory fd;
+            // never chmod through a pathname or change another owner's modes.
+            if meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o300 != 0o300 {
+                if unsafe { libc::fchmod(child.as_raw_fd(), (meta.mode() | 0o300) as libc::mode_t) }
+                    != 0
+                {
+                    return Err(failure("deletion_filesystem_failed"));
+                }
             }
             clear_fd(child.as_raw_fd(), dev, stopped)?;
             let mut current: libc::stat = unsafe { std::mem::zeroed() };
