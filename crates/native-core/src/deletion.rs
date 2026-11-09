@@ -234,11 +234,16 @@ pub(super) async fn command(s: Arc<AppState>, op: &str, c: &Value) -> Result<Val
             return Ok(job["legacyResult"].clone());
         }
         let prior = &job["legacyResult"];
-        return Err(ApiError::new(
+        let mut error = ApiError::new(
             prior["code"].as_str().unwrap_or("deletion_failed"),
             prior["message"].as_str().unwrap_or("削除に失敗しました。"),
             prior["status"].as_u64().unwrap_or(409) as u16,
-        ));
+        );
+        // Historical terminal failure is also definitive for this exact legacy
+        // operation, even when its workspace has since disappeared.
+        error.operation_id = Some(op.to_owned());
+        error.operation_final = Some(true);
+        return Err(error);
     }
     let id = text(&job, "id")?.to_owned();
     signal(&s, &id).await;
