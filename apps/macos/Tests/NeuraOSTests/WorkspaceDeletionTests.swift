@@ -39,7 +39,7 @@ final class WorkspaceDeletionTests: XCTestCase {
                      retryable: Bool = false, blocks: Bool = true, code: String? = nil) -> DeletionJob {
         DeletionJob(id: "job", workspaceId: "deletion-fixture", status: status, phase: phase, revision: revision,
                     createdAt: "2026-11-09T00:00:00Z", updatedAt: "2026-11-09T00:00:01Z",
-                    error: code.map {DeletionJob.Failure(code: $0, message: "削除できません")}, retryable: retryable, blocksWorkspace: blocks)
+                    error: code.map {DeletionJob.Failure(code: $0, message: "削除できません")}, retryable: retryable, blocksWorkspace: blocks, generation: 1)
     }
     private func snapshot(_ deletion: DeletionJob? = nil, jobs: Bool = true) -> Snapshot {
         var w = workspace(); w.deletion = deletion
@@ -73,7 +73,7 @@ final class WorkspaceDeletionTests: XCTestCase {
         let old = job("failed", retryable: true, blocks: false, code: "workspace_dirty")
         model.applySnapshot(snapshot(old))
         let next = DeletionJob(id: "new-job", workspaceId: workspace().id, status: "queued", phase: "queued", revision: 1,
-                               createdAt: "2026-11-09T00:00:02Z", updatedAt: "2026-11-09T00:00:02Z", retryable: false, blocksWorkspace: true)
+                               createdAt: "2026-11-08T00:00:00Z", updatedAt: "2026-11-08T00:00:00Z", retryable: false, blocksWorkspace: true, generation: 2)
         try model.acceptDeletion(DeletionAccepted(ok: true, accepted: true, job: next), workspaceId: workspace().id)
         model.applySnapshot(snapshot(old))
         XCTAssertEqual(model.deletion(workspace().id)?.id, "new-job")
@@ -81,6 +81,37 @@ final class WorkspaceDeletionTests: XCTestCase {
         model.applySnapshot(snapshot(old))
         XCTAssertEqual(model.deletion(workspace().id)?.id, "new-job")
         XCTAssertTrue(model.isWorkspaceBlocked(workspace().id))
+    }
+
+    @MainActor func testSnapshotGenerationBeatsClockRollbackAndLateAcceptance() throws {
+        let model = AppModel(startPolling: false)
+        let old = job("failed", retryable: true, blocks: false, code: "workspace_dirty")
+        model.applySnapshot(snapshot(old))
+        let newer = DeletionJob(id: "new-job", workspaceId: workspace().id, status: "running", phase: "remove-files", revision: 1,
+                                createdAt: "2020-01-01T00:00:00Z", updatedAt: "2020-01-01T00:00:00Z", retryable: false, blocksWorkspace: true, generation: 2)
+        model.applySnapshot(snapshot(newer))
+        XCTAssertEqual(model.deletion(workspace().id)?.id, "new-job")
+        try model.acceptDeletion(DeletionAccepted(ok: true, accepted: true, job: old), workspaceId: workspace().id)
+        XCTAssertEqual(model.deletion(workspace().id)?.id, "new-job")
+        model.applySnapshot(snapshot(old))
+        XCTAssertEqual(model.deletion(workspace().id)?.id, "new-job")
+        var legacy = old; legacy.generation = nil
+        model.applySnapshot(snapshot(legacy))
+        XCTAssertEqual(model.deletion(workspace().id)?.id, old.id, "Without generations, different-job snapshot is authoritative")
+    }
+
+    func testSnapshotMergePerformsOneIndexedLookupPerWorkspaceWithoutJobs() {
+        let workspaces = (0..<2_000).map {workspace("w\($0)")}
+        let previous: [String: DeletionJob] = [:]
+        var accepted: [String: DeletionJob] = [:]
+        var lookups = 0
+        let merged = DeletionSnapshotMerge.apply(workspaces, previousJob: {id in
+            lookups += 1
+            return previous[id]
+        }, accepted: &accepted)
+        XCTAssertEqual(lookups, workspaces.count)
+        XCTAssertEqual(merged, workspaces)
+        XCTAssertTrue(accepted.isEmpty)
     }
 
     @MainActor func testRestartAndReconnectRestoreFailedJobAndGuards() async {

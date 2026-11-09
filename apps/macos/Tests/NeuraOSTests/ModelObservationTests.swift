@@ -197,6 +197,52 @@ final class ModelObservationTests: XCTestCase {
         XCTAssertTrue(state.workspaceTerminals("moved").membership.isEmpty)
     }
 
+    @MainActor func testJobProgressOnlyInvalidatesItsWorkspaceBucketAndTerminalGuard() {
+        let model = AppModel(startPolling: false)
+        var snapshot = Snapshot()
+        snapshot.workspaces = (0..<1_000).map {
+            Workspace(id: "w\($0)", projectId: "p", name: "Work", path: "/unused", branch: "test", kind: "worktree")
+        }
+        snapshot.terminals = (0..<1_000).map {
+            TerminalRecord(id: "t\($0)", workspaceId: "w\($0)", provider: "shell", status: "running", cols: 80, rows: 24)
+        }
+        model.applySnapshot(snapshot)
+        let flags = (0..<1_000).map {_ in ObservationFlag()}
+        let terminalFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let records = ObservationFlag()
+        withObservationTracking {_ = model.state.terminals} onChange: {records.mark()}
+        for index in 0..<1_000 {
+            let flag = flags[index], terminalFlag = terminalFlags[index]
+            withObservationTracking {_ = model.deletion("w\(index)")} onChange: {flag.mark()}
+            withObservationTracking {
+                _ = model.terminal(id: "t\(index)"); _ = model.isWorkspaceBlocked("w\(index)")
+            } onChange: {terminalFlag.mark()}
+        }
+        snapshot.workspaces[500].deletion = DeletionJob(id: "job", workspaceId: "w500", status: "running", phase: "remove-files", revision: 1,
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", retryable: false, blocksWorkspace: true, generation: 1)
+        model.applySnapshot(snapshot)
+        XCTAssertEqual(flags.filter(\.changed).count, 1)
+        XCTAssertEqual(terminalFlags.filter(\.changed).count, 1)
+        XCTAssertTrue(flags[500].changed)
+        XCTAssertFalse(records.changed)
+        let target = ObservationFlag(), other = ObservationFlag()
+        withObservationTracking {_ = model.deletion("w500")} onChange: {target.mark()}
+        withObservationTracking {_ = model.deletion("w501"); _ = model.isWorkspaceBlocked("w501")} onChange: {other.mark()}
+        var job = snapshot.workspaces[500].deletion!
+        job = DeletionJob(id: job.id, workspaceId: job.workspaceId, status: "running", phase: "finalize", revision: 2,
+            createdAt: job.createdAt, updatedAt: job.updatedAt, retryable: false, blocksWorkspace: true, generation: 1)
+        snapshot.workspaces[500].deletion = job
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(target.changed)
+        XCTAssertFalse(other.changed)
+        let removed = ObservationFlag()
+        withObservationTracking {_ = model.deletion("w500")} onChange: {removed.mark()}
+        snapshot.workspaces.remove(at: 500)
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(removed.changed)
+        XCTAssertNil(model.deletion("w500"))
+    }
+
     private func fixture() -> Snapshot {
         Snapshot(revision: 1, features: ["terminal.multiple"],
                  projects: [Project(id: "project", name: "Project", path: "/tmp/project", isGit: true)],
