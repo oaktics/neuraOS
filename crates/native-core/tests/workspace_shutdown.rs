@@ -299,8 +299,8 @@ async fn deletion_guards_and_diagnostics(dir: &Path) {
             "workspace.delete.stop-terminals",
             "workspace.delete.verify-after",
             "workspace.delete.git-remove",
-            "workspace.delete.store",
-            "workspace.delete.forget-agents"
+            "workspace.delete.forget-agents",
+            "workspace.delete.store"
         ]
     );
 }
