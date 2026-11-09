@@ -41,7 +41,7 @@
   },
   {
     "name": "workspace_delete",
-    "description": "Clean up a completed worktree after verification and an authorized merge. Refuses caller workspace, roots, unfinished tasks, changed HEAD, unmerged/unpushed HEAD, dirty/untracked/ignored files. Stops terminals; NEVER discards changes. Respect retention requests; inspect generated files before cleanup. Read back workspace_list after success or failure. operationId must be a UUID; reuse it for identical retries.",
+    "description": "Clean up a completed worktree after verification and an authorized merge. Refuses caller workspace, roots, unfinished tasks, changed HEAD, unmerged/unpushed HEAD, dirty/untracked/ignored files. Stops terminals; NEVER discards changes. Respect retention requests; inspect generated files before cleanup. Read back workspace_list after success or failure. operationId must be a UUID; reuse it for identical retries. On job-capable daemons deletion is durable and may return accepted=true with completed=false and a jobId; this is NOT deletion success. Use workspace_deletion_status until completed=true and verifiedAbsent=true. A request timeout does not cancel the job. Never start a replacement deletion blindly.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -68,6 +68,32 @@
         "workspaceId",
         "expectedHead",
         "mergedPR"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "workspace_deletion_status",
+    "description": "Read or wait for a durable worktree deletion job. accepted/pending is not success; only completed=true with verifiedAbsent=true confirms deletion. Failed jobs preserve their error and recovery state. This read never starts or retries deletion.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "jobId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "waitMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 25000
+        },
+        "afterRevision": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "jobId"
       ],
       "additionalProperties": false
     }
