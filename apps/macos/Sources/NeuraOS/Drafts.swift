@@ -1,5 +1,12 @@
 import Foundation
 
+struct OpenDocument: Codable, Equatable {
+    var original: FileContent
+    var text: String
+    var dirty: Bool {text != original.content}
+}
+
+
 /// UI drafts stay on the viewing Mac, separately from project files.
 @MainActor final class DraftCache {
     static let shared = DraftCache()

@@ -1,3 +1,5 @@
+#[path = "deletion.rs"]
+pub(crate) mod deletion;
 use crate::diagnostics::{Diagnostics, Phase};
 use crate::workspace::text;
 use crate::{
@@ -33,6 +35,7 @@ const FEATURES: &[&str] = &[
     "project.remove",
     "github",
     "workspace.delete",
+    "workspace.delete.jobs",
     "workspace.delete.discard",
     "workspace.delete.stop-terminals",
     "terminal.multiple",
@@ -69,6 +72,7 @@ pub struct AppState {
     owners: Mutex<HashMap<String, (String, tokio::time::Instant)>>,
     browser_poll_gate: Mutex<()>,
     setups: Mutex<HashMap<String, SetupJob>>,
+    deletions: deletion::Manager,
     pub epoch: String,
     pub closing: tokio::sync::watch::Sender<bool>,
 }
@@ -129,6 +133,7 @@ impl AppState {
             owners: Mutex::new(HashMap::new()),
             browser_poll_gate: Mutex::new(()),
             setups: Mutex::new(HashMap::new()),
+            deletions: deletion::Manager::default(),
             epoch: Uuid::new_v4().to_string(),
             closing: tokio::sync::watch::channel(false).0,
         });
@@ -151,6 +156,7 @@ impl AppState {
                 let _ = s.reconcile().await;
             }
         });
+        deletion::recover(this.clone()).await?;
         Ok(this)
     }
     pub async fn entity(&self, table: &str, key: &str) -> Result<Value, ApiError> {
@@ -233,6 +239,7 @@ impl AppState {
     }
     pub async fn shutdown(&self) -> Result<(), ApiError> {
         self.closing.send_replace(true);
+        deletion::shutdown(self).await;
         self.browser.shutdown();
         let mut failed = false;
         let jobs: Vec<_> = self
@@ -307,6 +314,11 @@ impl AppState {
         resume: bool,
         options: &Value,
     ) -> Result<Value, ApiError> {
+        deletion::gate(self, text(&workspace, "id")?).await?;
+        let _admission = crate::mutation::workspace_activity(text(&workspace, "id")?).await;
+        deletion::gate(self, text(&workspace, "id")?).await?;
+        let workspace = self.entity("workspaces", text(&workspace, "id")?).await?;
+        if *self.closing.borrow() { return Err(ApiError::new("daemon_closing", "終了処理中です。", 503)); }
         let terminal = Uuid::new_v4().to_string();
         let mut record = json!({"id":terminal,"workspaceId":workspace["id"],"provider":provider,"status":"running","createdAt":chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"cols":100,"rows":30});
         if provider != "shell" {
@@ -340,13 +352,27 @@ impl AppState {
         result
     }
     pub async fn stop_workspace(&self, workspace: &str) -> Result<(), ApiError> {
-        for t in self.store.list("terminals").await? {
-            if t["workspaceId"] == workspace && t["status"] == "running" {
-                let id = text(&t, "id")?;
-                self.pty.stop(id).await?;
-                self.providers.close(id).await.map_err(provider_error)?;
-            }
+        let terminals: Vec<_> = self
+            .store
+            .list("terminals")
+            .await?
+            .into_iter()
+            .filter(|t| t["workspaceId"] == workspace && t["status"] == "running")
+            .collect();
+        // Start every independent owner stop before awaiting grace/escalation.
+        // join_all (not try_join_all) drains all attempts even if one fails.
+        let results = futures_util::future::join_all(terminals.iter().map(|t| async {
+            let id = text(t, "id")?;
+            self.pty.stop(id).await?;
+            self.providers.close(id).await.map_err(provider_error)
+        }))
+        .await;
+        for result in results {
+            result?;
         }
+        // Subscribe before reading durable state so an exit between read and
+        // wait cannot be lost. Notifications only wake us; stored status is proof.
+        let mut changes = self.events.subscribe();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let any = self
@@ -365,13 +391,22 @@ impl AppState {
                     409,
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            let _ = tokio::time::timeout_at(deadline, async {
+                loop {
+                    match changes.recv().await {
+                        Ok(change) if !change.state => continue,
+                        _ => break, // Includes lag: re-read durable state.
+                    }
+                }
+            })
+            .await;
         }
     }
 }
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/v1/state", get(state_get))
+        .route("/v1/workspace-deletions/{id}", get(deletion_get))
         .route("/v1/stream", get(stream))
         .route("/v1/capabilities", get(capabilities))
         .route("/v1/usage", get(usage))
@@ -392,6 +427,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state)
+}
+async fn deletion_get(State(s): State<Arc<AppState>>, Path(id): Path<String>, Query(query): Query<HashMap<String,String>>) -> Result<Json<Value>,ApiError> {
+    deletion::read(s,id,query).await.map(Json)
 }
 async fn auth(State(s): State<Arc<AppState>>, req: axum::extract::Request, next: Next) -> Response {
     let h = req.headers();
@@ -730,7 +768,7 @@ async fn command(
     State(s): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    if body["command"]["type"] == "agent.instruction" {
+    if ["agent.instruction", "workspace.delete", "workspace.delete.start", "workspace.deletion.retry"].contains(&body["command"]["type"].as_str().unwrap_or("")) {
         // Keep the durable row, in-memory registry and operation journal in
         // sync even if the MCP/HTTP caller disconnects during the write.
         // Tokio task-locals are not inherited by spawn. Scope the detached
@@ -760,6 +798,32 @@ async fn command_inner(
     if traced {
         s.diagnostics
             .record(Phase::Received, c["type"].as_str(), Some(&op), None);
+    }
+    if [
+        "workspace.delete",
+        "workspace.delete.start",
+        "workspace.deletion.retry",
+    ]
+    .contains(&c["type"].as_str().unwrap_or(""))
+    {
+        s.diagnostics.record(
+            Phase::Executing,
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+        let result = deletion::command(s.clone(), &op, &c).await;
+        s.diagnostics.record(
+            if result.is_ok() {
+                Phase::Success
+            } else {
+                Phase::Failure
+            },
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+        return result.map(Json);
     }
     let digest = work::hash(&c.to_string());
     let lock = {
@@ -855,17 +919,16 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
     if kind.starts_with("agent.") {
         return s.providers.agents.command(c).await.map_err(provider_error);
     }
-    let project = if let Some(key) = c["projectId"].as_str() {
-        Some(key.to_owned())
-    } else if let Some(key) = c["workspaceId"].as_str() {
-        Some(text(&s.entity("workspaces", key).await?, "projectId")?.to_owned())
-    } else {
-        None
-    };
-    let workspace = c["workspaceId"]
-        .as_str()
-        .map(String::from)
-        .or_else(|| c["terminalId"].as_str().map(|v| format!("terminal:{v}")));
+    let terminal_workspace = if let Some(key) = c["terminalId"].as_str() {
+        s.store.get("terminals", key).await?.and_then(|t|t["workspaceId"].as_str().map(String::from))
+    } else { None };
+    let workspace = c["workspaceId"].as_str().map(String::from).or(terminal_workspace);
+    let project = if let Some(key) = c["projectId"].as_str() { Some(key.to_owned()) }
+        else if let Some(key) = workspace.as_deref() { Some(text(&s.entity("workspaces", key).await?, "projectId")?.to_owned()) }
+        else { None };
+    if let Some(workspace) = workspace.as_deref() {
+        if kind != "terminal.stop" { deletion::gate(&s, workspace).await?; }
+    }
     let catalogue = [
         "project.add",
         "project.create",
@@ -884,6 +947,17 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
         )
         .await;
 
+    // open owns its own admission through prepare/spawn; avoid nested readers.
+    let _admission = if kind != "terminal.open" && kind != "terminal.stop" && kind != "workspace.setup" {
+        if let Some(workspace) = workspace.as_deref() {
+            let lease = crate::mutation::workspace_activity(workspace).await;
+            deletion::gate(&s, workspace).await?;
+            Some(lease)
+        } else { None }
+    } else { None };
+    if ["project.remove", "project.attach"].contains(&kind) {
+        if let Some(project) = project.as_deref() { deletion::project_gate(&s, project).await?; }
+    }
     match kind {
         "project.create" => {
             let directory = s.data_dir.join("projects").join(op);
@@ -1224,52 +1298,6 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
             start_setup(s.clone(), w, p, vec![]).await?;
             Ok(json!({"ok":true}))
         }
-        "workspace.delete" => {
-            let key = text(c, "workspaceId")?;
-            let w = s.entity("workspaces", key).await?;
-            if w["kind"] != "worktree" {
-                return Err(ApiError::new(
-                    "worktree_required",
-                    "追加worktreeを選択してください。",
-                    400,
-                ));
-            }
-            if s.setups.lock().await.contains_key(key) {
-                return Err(ApiError::new(
-                    "setup_running",
-                    "セットアップを実行中です。",
-                    409,
-                ));
-            }
-            if c["stopTerminals"] != true
-                && s.store
-                    .list("terminals")
-                    .await?
-                    .iter()
-                    .any(|t| t["workspaceId"] == key && t["status"] == "running")
-            {
-                return Err(ApiError::new(
-                    "workspace_running",
-                    "実行中のターミナルがあります。",
-                    409,
-                ));
-            }
-            let p = s.entity("projects", text(&w, "projectId")?).await?;
-            verify_delete(&s, &w, c).await?;
-            if c["stopTerminals"] == true {
-                s.stop_workspace(key).await?;
-                verify_delete(&s, &w, c).await?;
-            }
-            let mut args = vec!["worktree", "remove"];
-            if c["discardChanges"] == true {
-                args.push("--force");
-            }
-            args.extend(["--", text(&w, "path")?]);
-            work::git(text(&p, "path")?, &args).await?;
-            s.store.call("delete_workspace", json!({"id":key})).await?;
-            s.providers.agents.forget_workspace(key).await;
-            Ok(json!({"ok":true}))
-        }
         "workspace.sync-default" => {
             let w = s.entity("workspaces", text(c, "workspaceId")?).await?;
             if w["kind"] != "root" {
@@ -1422,6 +1450,25 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
     }
 }
 
+// Record completed phases on both success and failure. The outer operation
+// outcome plus operationId identifies the failing phase without paths or errors.
+async fn delete_step<T>(
+    s: &AppState,
+    operation_id: &str,
+    phase: Phase,
+    future: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    let started = std::time::Instant::now();
+    let result = future.await;
+    s.diagnostics.record(
+        phase,
+        Some("workspace.delete"),
+        Some(operation_id),
+        Some(started.elapsed().as_secs_f64() * 1000.0),
+    );
+    result
+}
+
 async fn verify_delete(s: &AppState, w: &Value, c: &Value) -> Result<(), ApiError> {
     let root = text(w, "path")?;
     let key = text(w, "id")?;
@@ -1562,6 +1609,9 @@ async fn start_setup(
     startup: Vec<Value>,
 ) -> Result<(), ApiError> {
     let key = text(&w, "id")?.to_owned();
+    deletion::gate(&s, &key).await?;
+    let _admission = crate::mutation::workspace_activity(&key).await;
+    deletion::gate(&s, &key).await?;
     let root = text(&w, "path")?.to_owned();
     let script = text(&p, "worktreeSetup")?.to_owned();
     let path = work::setup_path(&root, &script).await?;

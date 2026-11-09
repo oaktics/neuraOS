@@ -108,16 +108,27 @@ struct WorkspaceView: View {
     @State private var closingTab: WorkspaceTab?
     @State private var popupViews: [String: NCChromiumView] = [:]
     private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
+    private var deletionBlocked: Bool {model.isWorkspaceBlocked(workspace.id)}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
     var body: some View {
         VStack(spacing: 0) {
-            tabBar
-            if workspace.setup != nil {WorktreeSetupStatus(workspace: workspace)}
+            if let job = model.deletion(workspace.id) {WorkspaceDeletionStatus(workspace: workspace, job: job)}
+            if model.deletionIntents[workspace.id] != nil || model.deletionIntentLoadFailed {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("削除の受付結果が未確認です。起動と編集を停止しています。").font(.callout)
+                    Button("受付を確認") {Task {await model.confirmDeletionAcceptance(workspace.id)}}
+                        .disabled(!model.connected || model.pendingActions[workspace.id] != nil || model.deletionIntentLoadFailed)
+                    Spacer()
+                }.padding(16).background(Color.accentColor.opacity(0.07))
+            }
+            tabBar.disabled(deletionBlocked)
+            if workspace.setup != nil {WorktreeSetupStatus(workspace: workspace).disabled(deletionBlocked)}
             Rectangle().fill(Palette.line).frame(height: 1)
             HSplitView {
                 contents.frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
                 if model.showInspector && workspace.hasFolder {inspectorPane.frame(minWidth: 240, idealWidth: 260, maxWidth: 400)}
-            }
+            }.disabled(deletionBlocked).allowsHitTesting(!deletionBlocked)
             Rectangle().fill(Palette.line).frame(height: 1)
             HStack(spacing: 10) {
                 if workspace.supportsGit {
@@ -135,7 +146,7 @@ struct WorkspaceView: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if model.isBusy(workspace.id) {ProgressView().controlSize(.mini)}
+                if model.pendingActions[workspace.id] != nil || model.deletion(workspace.id)?.inProgress == true {ProgressView().controlSize(.mini)}
                 if workspace.supportsGit && !git.changes.isEmpty {
                     Text("\(git.changes.count)件の変更").fixedSize()
                 }
@@ -144,11 +155,12 @@ struct WorkspaceView: View {
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 12).frame(height: 28)
         }
         .environment(\.openURL, OpenURLAction {url in
+            guard !deletionBlocked else {return .discarded}
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
             return layout.openBrowser(url, workspaceId: workspace.id) ? .handled : .discarded
         })
         .onAppear {restore(); openRequestedTerminal()}
-        .onChange(of: model.state.terminalMembership) {_, _ in reconcileTerminals()}
+        .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
             Task { @MainActor in reconcileTerminals() }
@@ -158,7 +170,7 @@ struct WorkspaceView: View {
             if id == workspace.id {treeVersion += 1; selectedDiff = nil}
         }
         .onReceive(model.workspaceCommands) {request in
-            guard request.workspaceId == workspace.id, model.selectedId == workspace.id,
+            guard !deletionBlocked, request.workspaceId == workspace.id, model.selectedId == workspace.id,
                   closingTab == nil else {return}
             switch request.action {
             case .add(let kind): add(kind)
@@ -184,8 +196,12 @@ struct WorkspaceView: View {
                 Button("キャンセル", role: .cancel) {closingTab = nil}
             }
         } message: {Text("このタブで実行中のCLIやコマンドを終了します。")}
-        .task(id: workspace.supportsGit) {
-            while !Task.isCancelled {if model.selectedId == workspace.id {await refreshGit()}; try? await Task.sleep(for: .seconds(3))}
+        .task(id: workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked) {
+            guard workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked else {return}
+            while !Task.isCancelled {
+                await refreshGit()
+                do {try await Task.sleep(for: .seconds(3))} catch {return}
+            }
         }
     }
     private var tabBar: some View {
@@ -247,7 +263,7 @@ struct WorkspaceView: View {
             }.padding(20)
             Divider()
             if model.state.features?.contains("agent.supervision") == true {
-                AgentSupervisor(workspace: workspace, visible: layout.selectedId == nil && model.selectedId == workspace.id)
+                AgentSupervisor(workspace: workspace, visible: layout.selectedId == nil && model.selectedId == workspace.id && !deletionBlocked)
             } else {
                 Text("新しい作業を始めましょう。")
                     .foregroundStyle(.secondary)
@@ -263,7 +279,7 @@ struct WorkspaceView: View {
                 .accessibilityHidden(layout.selectedId != nil || model.selectedId != workspace.id)
             ForEach(layout.tabs) {item in
                 let active = layout.selectedId == item.id
-                let visible = active && model.selectedId == workspace.id
+                let visible = active && model.selectedId == workspace.id && !deletionBlocked
                 Group {
                     if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible)}
                     else if item.kind == "file", let path = item.filePath {
@@ -364,6 +380,7 @@ struct WorkspaceView: View {
         return true
     }
     private func add(_ kind: String) {
+        guard !deletionBlocked else {return}
         Diagnostics.shared.record("action.add-tab")
         let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
         layout.tabs.append(item); layout.selectedId = item.id
@@ -372,6 +389,7 @@ struct WorkspaceView: View {
         if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
     }
     private func close(_ item: WorkspaceTab) {
+        guard !deletionBlocked else {return}
         guard !model.isTerminalStarting(item.id) else {return}
         Diagnostics.shared.record("action.close-tab")
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
@@ -410,7 +428,7 @@ struct WorkspaceView: View {
         for path in documents.keys.sorted() where documents[path]?.dirty == true {layout.openFile(path)}
         if !wasFiles, previousSelection == nil || layout.tabs.contains(where: {$0.id == previousSelection}) {layout.selectedId = previousSelection}
         // Recover running sessions, including sessions opened while this UI was disconnected.
-        let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
+        let terminals = model.state.terminals(in: workspace.id)
         seenTerminalIds = Set(terminals.map(\.id))
         for terminal in terminals.filter({terminal in terminal.status == "running" || (saved == nil && terminals.last(where: {$0.provider == terminal.provider})?.id == terminal.id)}) {
             if !layout.tabs.contains(where: {$0.terminalId == terminal.id}) {
@@ -423,7 +441,7 @@ struct WorkspaceView: View {
     }
     private func reconcileTerminals() {
         guard restored else {return}
-        layout.reconcileTerminals(model.state.terminals.filter {$0.workspaceId == workspace.id},
+        layout.reconcileTerminals(model.state.terminals(in: workspace.id),
                                   seen: &seenTerminalIds, startingTabs: model.startingTerminalTabs)
     }
     private func persist() {guard restored, let data = try? JSONEncoder().encode(layout) else {return}; UserDefaults.standard.set(data, forKey: storageKey)}
@@ -431,9 +449,11 @@ struct WorkspaceView: View {
         guard workspace.supportsGit else {return}
         do {
             let next: GitStatus = try await model.api.get("v1/workspaces/\(workspace.id)/git")
+            guard !Task.isCancelled else {return}
             if git != next {git = next}
             if gitError != nil {gitError = nil}
         } catch {
+            guard !Task.isCancelled else {return}
             if gitError != error.localizedDescription {gitError = error.localizedDescription}
         }
     }
@@ -564,7 +584,7 @@ struct NativeTextEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {Coordinator(self)}
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true; scroll.drawsBackground = false
-        let editor = NSTextView(); editor.isRichText = false; editor.isEditable = editable; editor.isSelectable = true; editor.allowsUndo = true
+        let editor = NSTextView(); editor.isRichText = false; editor.isEditable = editable && visible; editor.isSelectable = true; editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false; editor.isAutomaticTextReplacementEnabled = false; editor.isAutomaticSpellingCorrectionEnabled = false
         editor.isHorizontallyResizable = true; editor.isVerticallyResizable = true; editor.autoresizingMask = [.width]; editor.textContainer?.widthTracksTextView = false
         editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -578,6 +598,7 @@ struct NativeTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         scroll.isHidden = !visible
         guard let editor = scroll.documentView as? NSTextView else {return}
+        Self.configureInteraction(editor, visible: visible, editable: editable)
         Self.configureWrapping(editor, in: scroll, enabled: wrapsLines)
         if context.coordinator.lastFindRequest != findRequest {
             context.coordinator.lastFindRequest = findRequest
@@ -599,6 +620,10 @@ struct NativeTextEditor: NSViewRepresentable {
             }
         }
     }
+    static func configureInteraction(_ editor: NSTextView, visible: Bool, editable: Bool) {
+        editor.isEditable = editable && visible
+        if !editor.isEditable, editor.window?.firstResponder === editor {editor.window?.makeFirstResponder(nil)}
+    }
     static func configureWrapping(_ editor: NSTextView, in scroll: NSScrollView, enabled: Bool) {
         scroll.hasHorizontalScroller = !enabled
         editor.minSize = NSSize(width: 0, height: scroll.contentSize.height)
@@ -616,6 +641,7 @@ struct NativeTextEditor: NSViewRepresentable {
         var highlightedDark: Bool?
         init(_ parent: NativeTextEditor) {self.parent = parent}
         func textDidChange(_ notification: Notification) {
+            guard parent.editable && parent.visible else {return}
             if let editor = notification.object as? NSTextView {parent.text = editor.string; scheduleHighlight(editor)}
         }
         func scheduleHighlight(_ editor: NSTextView) {

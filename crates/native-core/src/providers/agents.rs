@@ -204,6 +204,23 @@ impl Agents {
             .map(|a| (a.terminal_id.clone(), a.id.clone()))
             .collect()
     }
+    // Never wait on the Store while holding the global registry mutex for a gate
+    // lookup. Deletion closes providers after accepting the durable gate.
+    pub(super) async fn ensure_workspace_active(&self, workspace: &str) -> Result<()> {
+        let gate = self
+            .store
+            .call("workspace_deletion_gate", json!({"workspaceId":workspace}))
+            .await?;
+        match gate["blocked"].as_bool() {
+            Some(false) => Ok(()),
+            Some(true) => Err("workspace_deleting".into()),
+            None => Err("invalid_workspace_deletion_gate".into()),
+        }
+    }
+    async fn ensure_target_active(&self, target: &str) -> Result<()> {
+        let workspace = self.get(target).await?.workspace_id;
+        self.ensure_workspace_active(&workspace).await
+    }
     pub async fn prepare_claude(
         &self,
         workspace: Value,
@@ -212,6 +229,8 @@ impl Agents {
         parent: Option<String>,
         initial: Option<String>,
     ) -> Result<()> {
+        self.ensure_workspace_active(workspace["id"].as_str().ok_or("workspace id")?)
+            .await?;
         let mut s = self.state.lock().await;
         if let Some(p) = &parent {
             get(&s, p)?;
@@ -456,6 +475,21 @@ impl Agents {
         Ok(true)
     }
     pub async fn channel(&self, terminal: &str) -> Result<Value> {
+        let workspace = {
+            let s = self.state.lock().await;
+            s.claude.get(terminal).ok_or("agent_offline")?.workspace["id"]
+                .as_str()
+                .ok_or("workspace id")?
+                .to_owned()
+        };
+        let _activity = crate::mutation::workspace_activity(&workspace).await;
+        if let Err(error) = self.ensure_workspace_active(&workspace).await {
+            return if error == "workspace_deleting" {
+                Ok(json!({}))
+            } else {
+                Err(error)
+            };
+        }
         let mut s = self.state.lock().await;
         let mut live = s.claude.get(terminal).cloned().ok_or("agent_offline")?;
         let Some(session) = live.session.clone() else {
@@ -710,6 +744,19 @@ impl Agents {
         mode: &str,
         expected: Option<&str>,
     ) -> Result<Value> {
+        let workspace = self.get(target).await?.workspace_id;
+        let _activity = crate::mutation::workspace_activity(&workspace).await;
+        self.send_admitted(target, text, mode, expected).await
+    }
+    // Caller already holds workspace activity admission (including prepare).
+    pub(super) async fn send_admitted(
+        &self,
+        target: &str,
+        text: &str,
+        mode: &str,
+        expected: Option<&str>,
+    ) -> Result<Value> {
+        self.ensure_target_active(target).await?;
         let mut s = self.state.lock().await;
         let mut a = get(&s, target)?;
         if !online(&s, &a) {
@@ -747,10 +794,22 @@ impl Agents {
         });
         self.save(&mut s, a).await?;
         drop(s);
-        self.flush(target).await?;
+        self.flush_admitted(target).await?;
         Ok(json!({"ok":true,"messageId":message_id}))
     }
     pub async fn flush(&self, target: &str) -> Result<()> {
+        let workspace = self.get(target).await?.workspace_id;
+        let _activity = crate::mutation::workspace_activity(&workspace).await;
+        self.flush_admitted(target).await
+    }
+    async fn flush_admitted(&self, target: &str) -> Result<()> {
+        if let Err(error) = self.ensure_target_active(target).await {
+            return if error == "workspace_deleting" {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
         let mut s = self.state.lock().await;
         let mut a = get(&s, target)?;
         if a.provider == "claude" || !s.codex.contains(&a.terminal_id) || a.status != "idle" {
@@ -896,6 +955,9 @@ impl Agents {
         Ok(())
     }
     pub async fn respond(&self, target: &str, request: Value, result: Value) -> Result<Value> {
+        let workspace = self.get(target).await?.workspace_id;
+        let _activity = crate::mutation::workspace_activity(&workspace).await;
+        self.ensure_target_active(target).await?;
         let mut s = self.state.lock().await;
         let mut a = get(&s, target)?;
         if !a.requests.iter().any(|r| r["id"] == request) {

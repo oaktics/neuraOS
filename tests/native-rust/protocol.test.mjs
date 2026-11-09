@@ -18,7 +18,7 @@ async function fixture(){
  await git(['init','-b','main']);await git(['config','user.name','Native Test']);await git(['config','user.email','test@example.invalid']);await git(['config','core.hooksPath','/dev/null']);await git(['config','commit.gpgsign','false']);await writeFile(join(repo,'hello.txt'),'hello\n');await git(['add','.']);await git(['commit','-m','fixture']);
  const listener=createServer();await new Promise((r,j)=>{listener.once('error',j);listener.listen(0,'127.0.0.1',r)});const port=listener.address().port;await new Promise(r=>listener.close(r));const base=`http://127.0.0.1:${port}`;
  let child,exit,token,logs='',failure=false;
- const request=async(path,{body,headers={},auth=true}={})=>{const send=init=>headers.host?new Promise((resolve,reject)=>{const req=httpRequest(base+path,init,res=>{const chunks=[];res.on('data',b=>chunks.push(b));res.on('error',reject);res.on('end',()=>resolve({status:res.statusCode,headers:new Headers(res.headers),text:async()=>Buffer.concat(chunks).toString()}));});req.on('error',reject);req.end(init.body);}):fetch(base+path,init);const response=await send({method:body===undefined?'GET':'POST',headers:{...(auth?{authorization:`Bearer ${token}`}:{}) ,'content-type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)});const text=await response.text();let value;try{value=JSON.parse(text)}catch{value={unparsed:text.slice(0,300)}}return {status:response.status,value,headers:response.headers};};
+ const request=async(path,{body,headers={},auth=true,signal}={})=>{const send=init=>headers.host?new Promise((resolve,reject)=>{const req=httpRequest(base+path,init,res=>{const chunks=[];res.on('data',b=>chunks.push(b));res.on('error',reject);res.on('end',()=>resolve({status:res.statusCode,headers:new Headers(res.headers),text:async()=>Buffer.concat(chunks).toString()}));});req.on('error',reject);req.end(init.body);}):fetch(base+path,init);const response=await send({method:body===undefined?'GET':'POST',headers:{...(auth?{authorization:`Bearer ${token}`}:{}) ,'content-type':'application/json',...headers},body:body===undefined?undefined:JSON.stringify(body),signal:signal??AbortSignal.timeout(15000)});const text=await response.text();let value;try{value=JSON.parse(text)}catch{value={unparsed:text.slice(0,300)}}return {status:response.status,value,headers:response.headers};};
  const command=(command,operationId=randomUUID())=>request('/v1/commands',{body:{operationId,command}});
  const start=async()=>{logs='';child=spawn(binary,[],{cwd:root,env:{...process.env,NEURA_DEV_DATA_DIR:data,NEURA_DEV_PORT:String(port)},stdio:['ignore','pipe','pipe'],detached:true});child.stdout.on('data',b=>logs=(logs+b).slice(-8000));child.stderr.on('data',b=>logs=(logs+b).slice(-8000));exit=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));let spawnError;child.once('error',e=>spawnError=e);for(let i=0;i<200;i++){if(spawnError)throw spawnError;if(child.exitCode!==null)throw Error(`Daemon exited ${logs}`);try{token=(await readFile(join(data,'daemon-token'),'utf8')).trim();const r=await request('/v1/state');if(r.status===200)return;}catch{}await sleep(50);}throw Error('Daemon startup timed out');};
  const stop=async()=>{if(!child||child.exitCode!==null)return;child.kill('SIGTERM');let timer;const ended=await Promise.race([exit,new Promise(r=>timer=setTimeout(()=>r(null),10000))]);clearTimeout(timer);if(!ended){process.kill(-child.pid,'SIGKILL');await exit;throw Error('Daemon shutdown timed out');}assert.equal(ended.code,0,logs);};
@@ -93,4 +93,54 @@ test('native stream wakes on durable state, reconnects, and closes during daemon
   await f.start();const op=randomUUID(),command={type:'project.create',name:'Crash replay'};const created=await success(f.command(command,op));
   await f.crash();await f.start();assert.deepEqual(await success(f.command(command,op)),created,'ACKed operation survives abrupt daemon death');
  }catch(e){failure=e;throw e;}finally{sockets.forEach(s=>s.terminate());await f.close(failure);}
+});
+
+
+test('durable workspace deletion survives disconnected HTTP and daemon restart', {timeout:60000}, async t => {
+ const f=await fixture();let failure;
+ try {
+  for (const endpoint of ['/v1/state','/v1/capabilities']) {
+   assert.ok((await success(f.request(endpoint))).features.includes('workspace.delete.jobs'), `${endpoint} must enable durable deletion clients`);
+  }
+  await symlink(f.repo,join(f.repo,'linked-directory'));
+  await f.git(['add','linked-directory']);await f.git(['commit','-m','tracked directory symlink']);
+  const project=await success(f.command({type:'project.add',path:f.repo}));
+  const workspace=await success(f.command({type:'workspace.create',projectId:project.id,baseRef:'HEAD',skipStartup:true}));
+  const other=await success(f.command({type:'workspace.create',projectId:project.id,baseRef:'HEAD',skipStartup:true}));
+  await writeFile(join(workspace.path,'unsaved.txt'),'preserve me');
+  const rejected=await success(f.command({type:'workspace.delete.start',workspaceId:workspace.id,stopTerminals:true}));
+  assert.equal(rejected.accepted,true);
+  let failedJob;
+  await eventually(async()=>{failedJob=await success(f.request(`/v1/workspace-deletions/${rejected.job.id}`));return failedJob.status==='failed';});
+  assert.equal(failedJob.error.code,'workspace_dirty');assert.equal(failedJob.blocksWorkspace,false);
+  assert.equal(await readFile(join(workspace.path,'unsaved.txt'),'utf8'),'preserve me');
+  await rm(join(workspace.path,'unsaved.txt'));
+  const terminal=await success(f.command({type:'terminal.open',workspaceId:workspace.id,provider:'shell'}));
+  const ready=join(f.root,'terminal-ready');
+  await success(f.command({type:'terminal.input',terminalId:terminal.id,clientId:randomUUID(),data:`trap '' TERM; printf ready > '${ready}'; while :; do sleep 1; done\n`}));
+  await eventually(async()=>readFile(ready,'utf8').then(v=>v==='ready',()=>false));
+  const operationId=randomUUID(),command={type:'workspace.delete',workspaceId:workspace.id,stopTerminals:true};
+  const controller=new AbortController();
+  const abandoned=f.request('/v1/commands',{body:{operationId,command},signal:controller.signal}).catch(error=>({aborted:error}));
+  let job;
+  await eventually(async()=>{const state=await success(f.request('/v1/state'));job=state.workspaces.find(w=>w.id===workspace.id)?.deletion;return job?.id===operationId&&job.blocksWorkspace;});
+  assert.ok(job.generation>failedJob.generation);
+  controller.abort();await abandoned;
+  assert.equal((await f.command({type:'terminal.open',workspaceId:workspace.id,provider:'shell'})).value.error,'workspace_deleting');
+  // Kill only the isolated fixture daemon, while its accepted job is durable.
+  await f.crash();await f.start();
+  const deadline=Date.now()+20000;
+  while(Date.now()<deadline){job=await success(f.request(`/v1/workspace-deletions/${operationId}?waitMs=1000&afterRevision=${job.revision}`));if(['succeeded','failed'].includes(job.status))break;}
+  assert.equal(job.status,'succeeded',JSON.stringify(job));assert.equal(job.verifiedAbsent,true);
+  const state=await success(f.request('/v1/state'));
+  assert.ok(!state.workspaces.some(w=>w.id===workspace.id));assert.ok(state.workspaces.some(w=>w.id===other.id));
+  await assert.rejects(stat(workspace.path),{code:'ENOENT'});
+  assert.equal(await readFile(join(other.path,'hello.txt'),'utf8'),'hello\n');
+  assert.equal(await readFile(join(f.repo,'hello.txt'),'utf8'),'hello\n','directory symlink target must survive');
+  const registrations=(await f.git(['worktree','list','--porcelain'])).stdout;
+  assert.ok(!registrations.includes(workspace.path));assert.ok(registrations.includes(other.path));
+  assert.equal((await success(f.command(command,operationId))).ok,true);
+  assert.equal((await f.command({...command,discardChanges:true},operationId)).value.error,'operation_conflict');
+  t.diagnostic(`job ${operationId}: disconnect, SIGKILL recovery, generation ordering, exact replay and independent Git/filesystem/store absence verified`);
+ }catch(error){failure=error;throw error;}finally{await f.close(failure);}
 });

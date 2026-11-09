@@ -22,7 +22,9 @@ async fn direct_codex_startup_cancellation_and_optional_real_connection() {
     .unwrap();
     let marker = profile.join("started");
     let program = profile.join("codex-fixture");
-    std::fs::write(&program,b"#!/bin/sh\ntrap '' TERM HUP\nprintf '%s\\n%s\\n' \"$$\" \"$3\" > \"$NEURA_FIXTURE_MARKER\"\nsleep 30 &\nwait\n").unwrap();
+    // Publish readiness only after both fields are written. Existence alone
+    // must not expose the empty file created by shell output redirection.
+    std::fs::write(&program,b"#!/bin/sh\ntrap '' TERM HUP\nprintf '%s\\n%s\\n' \"$$\" \"$3\" > \"$NEURA_FIXTURE_MARKER.tmp\"\nmv \"$NEURA_FIXTURE_MARKER.tmp\" \"$NEURA_FIXTURE_MARKER\"\nsleep 30 &\nwait\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut env = HashMap::new();
     env.insert("NEURA_FIXTURE_MARKER".into(), marker.display().to_string());

@@ -148,6 +148,101 @@ final class ModelObservationTests: XCTestCase {
         XCTAssertTrue(removal.changed)
     }
 
+    @MainActor func testThousandWorkspaceReadersOnlyInvalidateChangedTerminalAndWorkspace() {
+        let model = AppModel(startPolling: false)
+        var snapshot = Snapshot()
+        snapshot.terminals = (0..<1_000).map {
+            TerminalRecord(id: "t\($0)", workspaceId: "w\($0)", provider: "codex",
+                           status: "running", cols: 80, rows: 24, activity: "working")
+        }
+        model.applySnapshot(snapshot)
+        let terminalFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let workspaceFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let membershipFlags = (0..<1_000).map {_ in ObservationFlag()}
+        for index in 0..<1_000 {
+            let terminal = terminalFlags[index], workspace = workspaceFlags[index], membership = membershipFlags[index]
+            withObservationTracking {_ = model.terminal(id: "t\(index)")} onChange: {terminal.mark()}
+            withObservationTracking {_ = model.state.terminals(in: "w\(index)")} onChange: {workspace.mark()}
+            withObservationTracking {_ = model.state.workspaceTerminals("w\(index)").membership} onChange: {membership.mark()}
+        }
+        snapshot.terminals[500].activity = "waiting"
+        model.applySnapshot(snapshot)
+        XCTAssertEqual(terminalFlags.filter(\.changed).count, 1)
+        XCTAssertEqual(workspaceFlags.filter(\.changed).count, 1)
+        XCTAssertEqual(membershipFlags.filter(\.changed).count, 0)
+        XCTAssertTrue(terminalFlags[500].changed)
+        XCTAssertTrue(workspaceFlags[500].changed)
+    }
+
+    @MainActor func testScopedReadersObserveCreationRemovalAndWorkspaceMove() {
+        let state = DaemonViewState()
+        let created = ObservationFlag()
+        withObservationTracking {_ = state.terminal(id: "terminal")} onChange: {created.mark()}
+        var snapshot = fixture()
+        state.apply(snapshot)
+        XCTAssertTrue(created.changed)
+        let removed = ObservationFlag(), oldWorkspace = ObservationFlag(), newWorkspace = ObservationFlag()
+        withObservationTracking {_ = state.terminal(id: "terminal")} onChange: {removed.mark()}
+        withObservationTracking {_ = state.terminals(in: "workspace")} onChange: {oldWorkspace.mark()}
+        withObservationTracking {_ = state.terminals(in: "moved")} onChange: {newWorkspace.mark()}
+        snapshot.terminals = [TerminalRecord(id: "terminal", workspaceId: "moved", provider: "codex", status: "exited", cols: 80, rows: 24)]
+        state.apply(snapshot)
+        XCTAssertTrue(removed.changed && oldWorkspace.changed && newWorkspace.changed)
+        XCTAssertTrue(state.terminals(in: "workspace").isEmpty)
+        XCTAssertEqual(state.terminals(in: "moved").count, 1)
+        snapshot.terminals = []
+        state.apply(snapshot)
+        XCTAssertNil(state.terminal(id: "terminal"))
+        XCTAssertTrue(state.terminals(in: "moved").isEmpty)
+        XCTAssertTrue(state.workspaceTerminals("moved").membership.isEmpty)
+    }
+
+    @MainActor func testJobProgressOnlyInvalidatesItsWorkspaceBucketAndTerminalGuard() {
+        let model = AppModel(startPolling: false)
+        var snapshot = Snapshot()
+        snapshot.workspaces = (0..<1_000).map {
+            Workspace(id: "w\($0)", projectId: "p", name: "Work", path: "/unused", branch: "test", kind: "worktree")
+        }
+        snapshot.terminals = (0..<1_000).map {
+            TerminalRecord(id: "t\($0)", workspaceId: "w\($0)", provider: "shell", status: "running", cols: 80, rows: 24)
+        }
+        model.applySnapshot(snapshot)
+        let flags = (0..<1_000).map {_ in ObservationFlag()}
+        let terminalFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let records = ObservationFlag()
+        withObservationTracking {_ = model.state.terminals} onChange: {records.mark()}
+        for index in 0..<1_000 {
+            let flag = flags[index], terminalFlag = terminalFlags[index]
+            withObservationTracking {_ = model.deletion("w\(index)")} onChange: {flag.mark()}
+            withObservationTracking {
+                _ = model.terminal(id: "t\(index)"); _ = model.isWorkspaceBlocked("w\(index)")
+            } onChange: {terminalFlag.mark()}
+        }
+        snapshot.workspaces[500].deletion = DeletionJob(id: "job", workspaceId: "w500", status: "running", phase: "remove-files", revision: 1,
+            createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", retryable: false, blocksWorkspace: true, generation: 1)
+        model.applySnapshot(snapshot)
+        XCTAssertEqual(flags.filter(\.changed).count, 1)
+        XCTAssertEqual(terminalFlags.filter(\.changed).count, 1)
+        XCTAssertTrue(flags[500].changed)
+        XCTAssertFalse(records.changed)
+        let target = ObservationFlag(), other = ObservationFlag()
+        withObservationTracking {_ = model.deletion("w500")} onChange: {target.mark()}
+        withObservationTracking {_ = model.deletion("w501"); _ = model.isWorkspaceBlocked("w501")} onChange: {other.mark()}
+        var job = snapshot.workspaces[500].deletion!
+        job = DeletionJob(id: job.id, workspaceId: job.workspaceId, status: "running", phase: "finalize", revision: 2,
+            createdAt: job.createdAt, updatedAt: job.updatedAt, retryable: false, blocksWorkspace: true, generation: 1)
+        snapshot.workspaces[500].deletion = job
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(target.changed)
+        XCTAssertFalse(other.changed)
+        let removed = ObservationFlag()
+        withObservationTracking {_ = model.deletion("w500")} onChange: {removed.mark()}
+        snapshot.workspaces.remove(at: 500)
+        model.applySnapshot(snapshot)
+        XCTAssertTrue(removed.changed)
+        XCTAssertNil(model.deletion("w500"))
+    }
+
     private func fixture() -> Snapshot {
         Snapshot(revision: 1, features: ["terminal.multiple"],
                  projects: [Project(id: "project", name: "Project", path: "/tmp/project", isGit: true)],

@@ -1,3 +1,4 @@
+mod deletions;
 use crate::performance;
 use crate::{error::ApiError, events::Change};
 use rusqlite::{params, types::Value as SqlValue, Connection};
@@ -10,6 +11,10 @@ CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS workspaces(id TEXT PRIMARY KEY,data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS terminals(id TEXT PRIMARY KEY,data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS workspace_deletions(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,blocks INTEGER NOT NULL,public TEXT NOT NULL,data TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS workspace_deletion_workspace ON workspace_deletions(workspace_id);
+CREATE INDEX IF NOT EXISTS workspace_deletion_gate ON workspace_deletions(workspace_id,blocks);
+CREATE INDEX IF NOT EXISTS workspace_deletion_status ON workspace_deletions(status);
 CREATE TABLE IF NOT EXISTS operations(id TEXT PRIMARY KEY,hash TEXT NOT NULL,status TEXT NOT NULL,result TEXT);
 CREATE TABLE IF NOT EXISTS events(sequence INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL,entityId TEXT NOT NULL,at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notification_events(sequence INTEGER PRIMARY KEY,terminalId TEXT NOT NULL,data TEXT NOT NULL);
@@ -91,9 +96,13 @@ fn records(db: &Connection, t: &str, id: Option<&str>) -> Result<Value, String> 
         .iter()
         .map(|r| serde_json::from_str(r["data"].as_str().unwrap()))
         .collect();
-    Ok(json!(values.map_err(|e| e.to_string())?))
+    let mut values = values.map_err(|e| e.to_string())?;
+    if t == "workspaces" { deletions::overlay(db, &mut values)?; }
+    Ok(json!(values))
 }
 fn put(db: &Connection, t: &str, v: &Value, notification: Option<&Value>) -> Result<(), String> {
+    let mut clean;
+    let v = if t == "workspaces" { clean=v.clone();if let Some(row)=clean.as_object_mut(){row.remove("deletion");}&clean } else {v};
     db.execute(
         &format!(
             "INSERT INTO {t}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data"
@@ -126,6 +135,7 @@ static TEST_COMMIT_GATE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sy
 fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
     let a = &r.args;
     match r.op.as_str() {
+        op if op.starts_with("workspace_deletion_") => deletions::handle(db, op, a),
         #[cfg(test)]
         "test_slow_commit" => {
             let tx=db.transaction().map_err(|e|e.to_string())?;
@@ -658,7 +668,7 @@ fn change(r: &Request) -> Option<Change> {
             agent_terminals: vec![],
             browser: false,
         }),
-        "put_pair" | "delete_workspace" | "remove_project" => Some(Change {
+        "workspace_deletion_accept" | "workspace_deletion_retry" | "workspace_deletion_update" | "put_pair" | "delete_workspace" | "remove_project" => Some(Change {
             state: true,
             ..Default::default()
         }),
