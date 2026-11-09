@@ -92,7 +92,7 @@ struct WorkspaceActivityStatus: View {
     let workspaceId: String
 
     var body: some View {
-        WorkspaceActivityIndicator(terminals: model.state.terminals.filter {$0.workspaceId == workspaceId},
+        WorkspaceActivityIndicator(terminals: model.state.terminals(in: workspaceId),
                                    connected: model.connected, showsStopped: false)
     }
 }
