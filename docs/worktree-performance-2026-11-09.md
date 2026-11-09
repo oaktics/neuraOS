@@ -49,7 +49,7 @@ during shutdown, and verify that a failing sibling close does not cancel the
 other stops. These numbers measure the shutdown fixture, not deletion of a large
 real filesystem tree.
 
-Six bounded diagnostics identify verification before/after shutdown, terminal
+Bounded diagnostics identify admission wait, verification before/after shutdown, terminal
 shutdown, Git removal, store deletion and agent cleanup. Each contains only the
 operation UUID and duration; payloads, paths and error text are excluded. Both
 verification passes remain necessary to catch writes made during shutdown.
@@ -89,7 +89,14 @@ The workspace snapshot includes public job progress and failure state, so UI
 reconnection restores it. MCP returns a pending job when its bounded wait expires
 and exposes `workspace_deletion_status` for subsequent observation. Completion
 requires job success, backend absence proof, and an independent registry read.
-The UI retains the workspace until an authoritative snapshot removes it.
+The UI retains the workspace until an authoritative snapshot removes it. Before
+sending, it persists the exact operation UUID and command. A snapshot with no job
+cannot prove that a detached request waiting on admission was rejected, so the
+UI keeps that workspace blocked until the same operation is resolved. Rejected
+requests are durably journaled before returning `operationId` and
+`operationFinal: true`; an exact replay returns the same rejection even if setup
+or workspace state has since changed. Storage uncertainty never receives that
+final marker.
 
 ## Recovery and load verification
 
