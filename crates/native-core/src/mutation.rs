@@ -126,3 +126,28 @@ mod tests {
             .unwrap();
     }
 }
+
+// Shared across server and provider dispatch. A deletion publishes its durable
+// gate while holding the writer; admitted mutations check that gate after taking
+// a reader and retain the reader through their last side effect. Never nest readers.
+fn admission_map() -> &'static std::sync::Mutex<HashMap<String, Weak<RwLock<()>>>> {
+    static MAP: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Weak<RwLock<()>>>>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+fn admission(id: &str) -> Arc<RwLock<()>> {
+    let mut map = admission_map().lock().unwrap();
+    map.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = map.get(id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(RwLock::new(()));
+    map.insert(id.into(), Arc::downgrade(&lock));
+    lock
+}
+pub async fn workspace_activity(id: &str) -> OwnedRwLockReadGuard<()> {
+    admission(id).read_owned().await
+}
+pub async fn workspace_deletion_admission(id: &str) -> OwnedRwLockWriteGuard<()> {
+    admission(id).write_owned().await
+}

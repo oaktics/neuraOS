@@ -281,7 +281,8 @@ pub fn command(body: Value) -> Result<Value, ApiError> {
             ("pullRequest", optional(trimmed(1, 500))),
             ("skipStartup", default_bool()),
         ],
-        "workspace.delete" => vec![
+        "workspace.deletion.retry" => vec![("jobId", Id)],
+        "workspace.delete" | "workspace.delete.start" => vec![
             ("workspaceId", Id),
             ("discardChanges", default_bool()),
             ("stopTerminals", default_bool()),
