@@ -134,14 +134,18 @@ extension AppModel {
         } catch let failure as APIError where failure.operationFinal == true && failure.operationId == intent.operationId {
             resolveDeletionIntent(intent.workspaceId)
             report(failure)
-        } catch let failure as APIError where firstAttempt && intent.request.type == "workspace.delete" &&
-            ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
-            // The first legacy handler itself rejected this operation: no older
-            // timed-out copy exists. Preserve its explicit discard confirmation.
+        } catch let failure as APIError where intent.request.type == "workspace.delete" &&
+            failure.operationFinal != false && (failure.operationId == nil || failure.operationId == intent.operationId) &&
+            ["worktree_required", "setup_running", "workspace_running", "workspace_dirty", "workspace_ignored_files", "git_failed"].contains(failure.error) {
+            // The legacy daemon serializes identical operation IDs and journals
+            // these execute failures before returning, including exact replay.
+            // Never infer success, an intact folder, or permission to discard.
             resolveDeletionIntent(intent.workspaceId)
-            if intent.request.discardChanges != true {
+            report(failure)
+            if firstAttempt && intent.request.discardChanges != true &&
+                ["workspace_dirty", "workspace_ignored_files"].contains(failure.error) {
                 pendingWorkspaceDeletion = state.workspaces.first {$0.id == intent.workspaceId}
-            } else {report(failure)}
+            }
         } catch {report(error)} // Recovery may replay only this exact persisted operation.
     }
     // One replay per retained operation per connection. Snapshot refreshes only
