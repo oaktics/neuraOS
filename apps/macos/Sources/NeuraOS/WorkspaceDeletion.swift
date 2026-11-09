@@ -183,11 +183,11 @@ extension AppModel {
     func isWorkspaceBlocked(_ workspaceId: String) -> Bool {
         deletionIntentLoadFailed || deletion(workspaceId)?.preventsUse == true || deletionIntents[workspaceId] != nil || pendingActions[workspaceId] == "削除を受け付けています"
     }
-    func requestDiscardDeletion(_ workspace: Workspace) {
+    func discardFailedDeletion(_ workspace: Workspace) async {
         guard deletion(workspace.id)?.needsDiscardConfirmation == true,
               state.features?.contains("workspace.delete.discard") == true,
               !isBusy(workspace.id) else {return}
-        pendingWorkspaceDeletion = workspace
+        await deleteWorkspace(workspace, discardChanges: true)
     }
     func retryDeletion(_ workspace: Workspace) async {
         guard connected, supportsDeletionJobs, let job = deletion(workspace.id),
@@ -224,10 +224,14 @@ struct WorkspaceDeletionStatus: View {
                 if !model.connected {Text("再接続後に削除の進捗を確認します。").font(.caption).foregroundStyle(.secondary)}
                 else if job.preventsUse {Text("この作業の起動と編集は停止しています。他の作業は引き続き使えます。").font(.caption).foregroundStyle(.secondary)}
                 if job.status == "failed" {
+                    if job.needsDiscardConfirmation {
+                        Text("変更・未追跡ファイル・.envなどの無視対象ファイルを破棄して削除します。この操作は取り消せません。ブランチは残ります。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     HStack {
                         if job.retryable {Button("削除を再試行") {Task {await model.retryDeletion(workspace)}}}
                         if job.needsDiscardConfirmation && model.state.features?.contains("workspace.delete.discard") == true {
-                            Button("変更を破棄して削除…", role: .destructive) {model.requestDiscardDeletion(workspace)}
+                            Button("変更を破棄して削除", role: .destructive) {Task {await model.discardFailedDeletion(workspace)}}
                         }
                     }.disabled(!model.connected || model.pendingActions[workspace.id] != nil || model.deletionIntents[workspace.id] != nil)
                 }

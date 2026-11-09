@@ -129,8 +129,6 @@ final class WorkspaceDeletionTests: XCTestCase {
         model.applySnapshot(snapshot(job("failed", revision: 3, retryable: true, blocks: false, code: "workspace_dirty")))
         XCTAssertFalse(model.isWorkspaceBlocked(workspace().id))
         XCTAssertNil(model.pendingWorkspaceDeletion) // Reconnect never discards or opens a destructive dialog.
-        model.requestDiscardDeletion(workspace())
-        XCTAssertEqual(model.pendingWorkspaceDeletion?.id, workspace().id)
     }
 
     @MainActor func testUncertainStartAndRetryPersistAndReplayExactOperation() async throws {
@@ -348,19 +346,54 @@ final class WorkspaceDeletionTests: XCTestCase {
         XCTAssertNil(model.pendingWorkspaceDeletion)
     }
 
-    @MainActor func testDirtyFailureNeedsExplicitDiscardAndRetryGuard() async throws {
-        let model = AppModel(startPolling: false)
-        model.applySnapshot(snapshot(job("failed", retryable: false, blocks: false, code: "workspace_ignored_files")))
-        model.connected = true
-        await model.retryDeletion(workspace()) // Must not issue a command for retryable=false.
-        XCTAssertNil(model.error)
-        XCTAssertTrue(model.deletion(workspace().id)!.needsDiscardConfirmation)
-        model.requestDiscardDeletion(workspace())
-        XCTAssertNotNil(model.pendingWorkspaceDeletion)
-        model.pendingWorkspaceDeletion = nil
-        model.applySnapshot(snapshot(job("failed", revision: 3, blocks: true, code: "workspace_dirty")))
-        model.requestDiscardDeletion(workspace())
+    @MainActor func testDiscardButtonSubmitsDirectlyAndKeepsSafetyGuards() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "fixture".write(to: directory.appendingPathComponent("daemon-token"), atomically: true, encoding: .utf8)
+        defer {try? FileManager.default.removeItem(at: directory)}
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DeletionProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {session.invalidateAndCancel()}
+        let api = DaemonClient(endpoint: URL(string: "http://deletion-test.invalid")!, dataDirectory: directory, session: session)
+        let model = AppModel(startPolling: false, api: api)
+        var commands: [[String: Any]] = []
+        var current = snapshot(job("failed", retryable: false, blocks: false, code: "workspace_ignored_files"))
+        DeletionProtocol.handler = {request, body in
+            if request.httpMethod == "POST" {
+                commands.append(body["command"] as! [String: Any])
+                let accepted = self.job("queued", phase: "queued", revision: 3)
+                current = self.snapshot(accepted)
+                return (200, try JSONSerialization.data(withJSONObject: ["ok": true, "accepted": true,
+                    "job": JSONSerialization.jsonObject(with: JSONEncoder().encode(accepted))]))
+            }
+            return (200, try JSONEncoder().encode(current))
+        }
+        defer {DeletionProtocol.handler = nil}
+        model.applySnapshot(current); model.connected = true
+        await model.retryDeletion(workspace())
+        XCTAssertTrue(commands.isEmpty)
         XCTAssertNil(model.pendingWorkspaceDeletion)
+        await model.discardFailedDeletion(workspace())
+        XCTAssertEqual(commands.count, 1)
+        XCTAssertEqual(commands[0]["type"] as? String, "workspace.delete.start")
+        XCTAssertEqual(commands[0]["discardChanges"] as? Bool, true)
+        XCTAssertNil(model.pendingWorkspaceDeletion, "The explicit discard button must not open a second confirmation")
+        await model.discardFailedDeletion(workspace())
+        XCTAssertEqual(commands.count, 1, "An accepted job cannot be submitted again")
+        model.applySnapshot(snapshot(job("failed", revision: 4, blocks: true, code: "workspace_dirty")))
+        await model.discardFailedDeletion(workspace())
+        XCTAssertEqual(commands.count, 1, "An isolated directory cannot be replaced with a new discard job")
+        model.applySnapshot(snapshot(job("failed", revision: 5, blocks: false, code: "workspace_dirty")))
+        model.connected = false
+        await model.discardFailedDeletion(workspace())
+        XCTAssertEqual(commands.count, 1)
+        model.connected = true
+        var unsupported = snapshot(job("failed", revision: 6, blocks: false, code: "workspace_dirty"))
+        unsupported.features = ["workspace.delete.jobs"]
+        model.applySnapshot(unsupported)
+        await model.discardFailedDeletion(workspace())
+        XCTAssertEqual(commands.count, 1)
         XCTAssertThrowsError(try model.acceptDeletion(DeletionAccepted(ok: true, accepted: false, job: job()), workspaceId: workspace().id))
         XCTAssertThrowsError(try model.acceptDeletion(DeletionAccepted(ok: true, accepted: true, job: job()), workspaceId: "other"))
     }
