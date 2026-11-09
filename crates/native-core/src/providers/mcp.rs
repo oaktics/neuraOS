@@ -62,6 +62,48 @@ impl Client {
         )
         .await
     }
+    async fn deletion_job(&self, id: &str, wait_ms: u64, after: Option<u64>) -> Result<Value> {
+        if !crate::contracts::valid_uuid(id) || wait_ms > 25_000 {
+            return Err("invalid_deletion_status_options".into());
+        }
+        let mut path = format!("/v1/workspace-deletions/{id}?waitMs={wait_ms}");
+        if let Some(revision) = after {
+            path.push_str(&format!("&afterRevision={revision}"));
+        }
+        self.request(&path, None, None).await
+    }
+    async fn deletion_result(&self, job: Value) -> Result<Value> {
+        if !job["id"].as_str().is_some_and(crate::contracts::valid_uuid)
+            || !job["workspaceId"]
+                .as_str()
+                .is_some_and(crate::contracts::valid_uuid)
+            || !matches!(
+                job["status"].as_str(),
+                Some("queued" | "running" | "succeeded" | "failed")
+            )
+        {
+            return Err("invalid_deletion_job".into());
+        }
+        let present = self
+            .request("/v1/state", None, None)
+            .await
+            .ok()
+            .and_then(|state| {
+                state["workspaces"]
+                    .as_array()
+                    .map(|rows| rows.iter().any(|w| w["id"] == job["workspaceId"]))
+            });
+        let succeeded = job["status"] == "succeeded";
+        let verified = succeeded && job["verifiedAbsent"] == true && present == Some(false);
+        let result = json!({"accepted":true,"completed":verified,"jobId":job["id"],"workspaceId":job["workspaceId"],"status":job["status"],"job":job,"workspacePresent":present,"verifiedAbsent":verified});
+        if result["status"] == "failed" {
+            return Err(result.to_string());
+        }
+        if succeeded && !verified {
+            return Err(json!({"error":"cleanup_unconfirmed","result":result}).to_string());
+        }
+        Ok(result)
+    }
     async fn context(&self, a: &Value, workspace: &str) -> Result<Value> {
         let (state, list) = tokio::try_join!(
             self.request("/v1/state", None, None),
@@ -177,6 +219,37 @@ impl Client {
                 if self.workspace.is_empty() || a["workspaceId"] == self.workspace {
                     return Err("Cannot delete the caller workspace".into());
                 }
+                let state = self.request("/v1/state", None, None).await?;
+                if state["features"].as_array().is_some_and(|features| {
+                    features
+                        .iter()
+                        .any(|feature| feature == "workspace.delete.jobs")
+                }) {
+                    let accepted = self.command(operation,json!({"type":"workspace.delete.start","workspaceId":a["workspaceId"],"stopTerminals":true,"discardChanges":false,"cleanup":{"callerWorkspaceId":self.workspace,"expectedHead":a["expectedHead"],"mergedPR":a["mergedPR"]}})).await?;
+                    let mut job = accepted["job"].clone();
+                    let id = job["id"].as_str().ok_or("invalid_deletion_job")?.to_owned();
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+                    while matches!(job["status"].as_str(), Some("queued" | "running")) {
+                        let remaining = deadline
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .as_millis() as u64;
+                        if remaining == 0 {
+                            break;
+                        }
+                        match self
+                            .deletion_job(&id, remaining.min(25_000), job["revision"].as_u64())
+                            .await
+                        {
+                            Ok(next) => job = next,
+                            Err(error) => {
+                                let mut pending = self.deletion_result(job).await?;
+                                pending["statusError"] = json!(error);
+                                return Ok(pending);
+                            }
+                        }
+                    }
+                    return self.deletion_result(job).await;
+                }
                 let result=self.command(operation,json!({"type":"workspace.delete","workspaceId":a["workspaceId"],"stopTerminals":true,"discardChanges":false,"cleanup":{"callerWorkspaceId":self.workspace,"expectedHead":a["expectedHead"],"mergedPR":a["mergedPR"]}})).await;
                 let present = self
                     .request("/v1/state", None, None)
@@ -199,6 +272,21 @@ impl Client {
                         Ok(result)
                     }
                 }
+            }
+            "workspace_deletion_status" => {
+                let id = a["jobId"]
+                    .as_str()
+                    .ok_or("invalid_deletion_status_options")?;
+                let wait = match a.get("waitMs") {
+                    None => 0,
+                    Some(value) => value.as_u64().ok_or("invalid_deletion_status_options")?,
+                };
+                let after = match a.get("afterRevision") {
+                    None => None,
+                    Some(value) => Some(value.as_u64().ok_or("invalid_deletion_status_options")?),
+                };
+                self.deletion_result(self.deletion_job(id, wait, after).await?)
+                    .await
             }
             "task_list" => {
                 let mut url = self
@@ -503,3 +591,7 @@ pub async fn run() -> Result<()> {
     while tasks.join_next().await.is_some() {}
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "mcp_deletion_tests.rs"]
+mod deletion_tests;
