@@ -36,7 +36,8 @@ class NativeTerminalView: TerminalView {
                 // Public display-flush hook; does not alter synchronized-output
                 // mode, selection, scroll position, or feed synthetic input.
                 synchronizedOutputChanged(source: terminal, active: false)
-                metal.setNeedsDisplay(metal.bounds)
+                // Let the queued display update honor DEC synchronized output;
+                // drawing directly here could expose a partially written frame.
             }
         }
     }
