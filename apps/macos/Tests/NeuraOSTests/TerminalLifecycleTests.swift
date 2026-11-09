@@ -49,6 +49,38 @@ final class TerminalLifecycleTests: XCTestCase {
         XCTAssertTrue(metal.superview === view)
     }
 
+    @MainActor func testShowingTerminalPreservesSynchronizedOutputUntilReset() async throws {
+        _ = NSApplication.shared
+        guard MTLCreateSystemDefaultDevice() != nil else {throw XCTSkip("Metal device unavailable")}
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        try view.setUseMetal(true)
+        let metal = try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first)
+        let terminal = view.getTerminal()
+        view.feed(text: "initial")
+        try await Task.sleep(for: .milliseconds(40))
+        view.setRenderingVisible(false)
+        view.feed(text: "\u{1b}[?2026h\u{1b}[2;1Hbuffered row")
+        XCTAssertTrue(terminal.synchronizedOutputActive)
+        metal.needsDisplay = false
+        view.setRenderingVisible(true)
+        XCTAssertFalse(metal.needsDisplay, "Show must not bypass the synchronized-output display guard")
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(terminal.synchronizedOutputActive)
+        XCTAssertFalse(metal.needsDisplay)
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        view.feed(text: "\u{1b}[10;1Hfinal row\u{1b}[?2026l")
+        XCTAssertFalse(terminal.synchronizedOutputActive)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertNil(terminal.getUpdateRange(), "Reset must flush the retained full-screen dirty range")
+        // AppKit may already have consumed Metal's needsDisplay by this point;
+        // the cleared range proves the guarded display flush processed the frame.
+        XCTAssertTrue(terminal.getLine(row: 1)?.translateToString().contains("buffered row") == true)
+        XCTAssertTrue(terminal.getLine(row: 9)?.translateToString().contains("final row") == true)
+    }
+
     @MainActor private func renderer() -> (NativeTerminal.Coordinator, TerminalView) {
         _ = NSApplication.shared
         let record = TerminalRecord(id: "test-only", workspaceId: "test", provider: "shell", status: "running", cols: 100, rows: 30)
