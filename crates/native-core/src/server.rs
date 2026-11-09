@@ -792,14 +792,37 @@ async fn command_inner(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let (op, c) = contracts::envelope(body)?;
-    if ["workspace.delete", "workspace.delete.start", "workspace.deletion.retry"].contains(&c["type"].as_str().unwrap_or("")) {
-        return deletion::command(s, &op, &c).await.map(Json);
-    }
     let started = std::time::Instant::now();
     let traced = !["terminal.input", "terminal.resize"].contains(&c["type"].as_str().unwrap_or(""));
     if traced {
         s.diagnostics
             .record(Phase::Received, c["type"].as_str(), Some(&op), None);
+    }
+    if [
+        "workspace.delete",
+        "workspace.delete.start",
+        "workspace.deletion.retry",
+    ]
+    .contains(&c["type"].as_str().unwrap_or(""))
+    {
+        s.diagnostics.record(
+            Phase::Executing,
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+        let result = deletion::command(s.clone(), &op, &c).await;
+        s.diagnostics.record(
+            if result.is_ok() {
+                Phase::Success
+            } else {
+                Phase::Failure
+            },
+            c["type"].as_str(),
+            Some(&op),
+            Some(started.elapsed().as_secs_f64() * 1000.0),
+        );
+        return result.map(Json);
     }
     let digest = work::hash(&c.to_string());
     let lock = {

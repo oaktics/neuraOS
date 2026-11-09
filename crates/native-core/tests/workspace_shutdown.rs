@@ -283,10 +283,11 @@ async fn deletion_guards_and_diagnostics(dir: &Path) {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(phases(&failed_op), vec!["workspace.delete.verify-before"]);
+    assert_eq!(phases(&failed_op), vec!["workspace.delete.admission", "workspace.delete.verify-before"]);
     assert_eq!(
         phases(&after_op),
         vec![
+            "workspace.delete.admission",
             "workspace.delete.verify-before",
             "workspace.delete.stop-terminals",
             "workspace.delete.verify-after"
@@ -295,6 +296,7 @@ async fn deletion_guards_and_diagnostics(dir: &Path) {
     assert_eq!(
         phases(&success_op),
         vec![
+            "workspace.delete.admission",
             "workspace.delete.verify-before",
             "workspace.delete.stop-terminals",
             "workspace.delete.verify-after",

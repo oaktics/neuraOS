@@ -14,6 +14,10 @@ pub struct ApiError {
     pub field: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(rename = "operationId", skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(rename = "operationFinal", skip_serializing_if = "Option::is_none")]
+    pub operation_final: Option<bool>,
 }
 impl ApiError {
     pub fn new(code: impl Into<String>, message: impl Into<String>, status: u16) -> Self {
@@ -23,6 +27,8 @@ impl ApiError {
             status,
             field: None,
             reason: None,
+            operation_id: None,
+            operation_final: None,
         }
     }
     pub fn field(mut self, field: &str, reason: &str) -> Self {

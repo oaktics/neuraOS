@@ -48,8 +48,55 @@ pub(super) fn overlay(db: &Connection, rows: &mut [Value]) -> Result<(), String>
     }
     Ok(())
 }
+fn prior_operation(db: &Connection, id: &str, hash: &Value) -> Result<Value, String> {
+    let rows = query(
+        db,
+        "SELECT hash,result,status FROM operations WHERE id=?",
+        &[json!(id)],
+    )?;
+    let Some(prior) = rows.as_array().unwrap().first() else {
+        return Ok(Value::Null);
+    };
+    if prior["hash"] != *hash {
+        return Ok(error("operation_conflict"));
+    }
+    let result: Value = serde_json::from_str(prior["result"].as_str().unwrap_or("null"))
+        .map_err(|e| e.to_string())?;
+    if let Some(job) = result["workspaceDeletion"].as_str() {
+        return one(db, job);
+    }
+    if let Some(rejected) = result.get("workspaceDeletionRejected") {
+        return Ok(json!({"deletionRejected":rejected}));
+    }
+    if prior["status"] == "done" || prior["status"] == "failed" {
+        return Ok(json!({"legacyOperation":prior["status"],"legacyResult":result}));
+    }
+    // Historical pending operations lack durable identity: never infer permission.
+    Ok(error("operation_unknown"))
+}
 pub(super) fn handle(db: &mut Connection, op: &str, a: &Value) -> Result<Value, String> {
     match op {
+        "workspace_deletion_operation" => prior_operation(
+            db,
+            a["operationId"].as_str().ok_or("operationId")?,
+            &a["hash"],
+        ),
+        "workspace_deletion_reject" => {
+            let tx = db.transaction().map_err(|e| e.to_string())?;
+            let id = a["operationId"].as_str().ok_or("operationId")?;
+            let prior = prior_operation(&tx, id, &a["hash"])?;
+            if !prior.is_null() {
+                return Ok(prior);
+            }
+            let result = json!({"workspaceDeletionRejected":a["rejection"]});
+            tx.execute(
+                "INSERT INTO operations(id,hash,status,result) VALUES(?,?,'failed',?)",
+                params![id, a["hash"].as_str(), result.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
+            Ok(json!({"deletionRejected":a["rejection"]}))
+        }
         "workspace_deletion_gate" => gate(db, a["workspaceId"].as_str().ok_or("workspaceId")?),
         "workspace_deletion_get" => one(db, a["id"].as_str().ok_or("id")?),
         "workspace_deletion_list" => {
@@ -71,22 +118,9 @@ pub(super) fn handle(db: &mut Connection, op: &str, a: &Value) -> Result<Value, 
         "workspace_deletion_accept" | "workspace_deletion_retry" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             let id = a["operationId"].as_str().ok_or("operationId")?;
-            let prior = query(
-                &tx,
-                "SELECT hash,result,status FROM operations WHERE id=?",
-                &[json!(id)],
-            )?;
-            if let Some(prior) = prior.as_array().unwrap().first() {
-                if prior["hash"] != a["hash"] {
-                    return Ok(error("operation_conflict"));
-                }
-                let result: Value =
-                    serde_json::from_str(prior["result"].as_str().unwrap_or("null"))
-                        .map_err(|e| e.to_string())?;
-                if let Some(job) = result["workspaceDeletion"].as_str() {
-                    return one(&tx, job);
-                }
-                return Ok(error("operation_unknown"));
+            let prior = prior_operation(&tx, id, &a["hash"])?;
+            if !prior.is_null() {
+                return Ok(prior);
             }
             let mut job;
             if op == "workspace_deletion_retry" {
@@ -248,5 +282,129 @@ pub(super) fn handle(db: &mut Connection, op: &str, a: &Value) -> Result<Value, 
             Ok(job)
         }
         _ => Err("unknown deletion op".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejection_journal_is_durable_idempotent_and_never_overwrites_acceptance() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let rejection = json!({"operationId":"reject","hash":"h","rejection":{"code":"setup_running","message":"held","status":409}});
+        let first = handle(&mut db, "workspace_deletion_reject", &rejection).unwrap();
+        assert_eq!(first["deletionRejected"]["code"], "setup_running");
+        assert_eq!(
+            handle(&mut db, "workspace_deletion_operation", &rejection).unwrap(),
+            first
+        );
+        assert_eq!(
+            handle(&mut db, "workspace_deletion_accept", &rejection).unwrap(),
+            first
+        );
+        put(
+            &db,
+            "workspaces",
+            &json!({"id":"w","kind":"worktree"}),
+            None,
+        )
+        .unwrap();
+        let accepted = handle(
+            &mut db,
+            "workspace_deletion_accept",
+            &json!({"operationId":"accepted","hash":"h","command":{"workspaceId":"w"}}),
+        )
+        .unwrap();
+        let mut late = rejection.clone();
+        late["operationId"] = json!("accepted");
+        assert_eq!(
+            handle(&mut db, "workspace_deletion_reject", &late).unwrap(),
+            accepted
+        );
+        db.execute_batch("CREATE TRIGGER reject_insert BEFORE INSERT ON operations BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        let mut failed = rejection.clone();
+        failed["operationId"] = json!("uncertain");
+        assert!(handle(&mut db, "workspace_deletion_reject", &failed).is_err());
+        assert!(handle(&mut db, "workspace_deletion_operation", &failed)
+            .unwrap()
+            .is_null());
+    }
+    #[test]
+    fn generations_ignore_clock_and_overlay_is_indexed_derived_and_retry_is_fenced() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        put(
+            &db,
+            "workspaces",
+            &json!({"id":"w","kind":"worktree","projectId":"p","path":"/fixture"}),
+            None,
+        )
+        .unwrap();
+        let c = json!({"type":"workspace.delete","workspaceId":"w","stopTerminals":true,"discardChanges":false});
+        let first = handle(
+            &mut db,
+            "workspace_deletion_accept",
+            &json!({"operationId":"one","hash":"h","command":c}),
+        )
+        .unwrap();
+        assert_eq!(first["public"]["generation"], 1);
+        let first=handle(&mut db,"workspace_deletion_update",&json!({"id":"one","revision":first["public"]["revision"],"patch":{"public":{"status":"failed","blocksWorkspace":false,"createdAt":"9999-01-01","updatedAt":"9999-01-01"}}})).unwrap();
+        let second = handle(
+            &mut db,
+            "workspace_deletion_accept",
+            &json!({"operationId":"two","hash":"h","command":c}),
+        )
+        .unwrap();
+        assert_eq!(second["public"]["generation"], 2);
+        assert!(
+            second["public"]["createdAt"].as_str().unwrap()
+                < first["public"]["createdAt"].as_str().unwrap()
+        );
+        assert_eq!(gate(&db, "w").unwrap()["jobId"], "two");
+        let retry = handle(
+            &mut db,
+            "workspace_deletion_retry",
+            &json!({"operationId":"retry","jobId":"one","hash":"r"}),
+        )
+        .unwrap();
+        assert_eq!(retry["error"], "workspace_deleting");
+        let mut w = records(&db, "workspaces", Some("w")).unwrap()[0].clone();
+        assert_eq!(w["deletion"]["id"], "two");
+        w["deletion"] = json!({"id":"forged"});
+        put(&db, "workspaces", &w, None).unwrap();
+        assert!(query(
+            &db,
+            "SELECT json_extract(data,'$.deletion') AS d FROM workspaces",
+            &[]
+        )
+        .unwrap()[0]["d"]
+            .is_null());
+        assert_eq!(
+            records(&db, "workspaces", Some("w")).unwrap()[0]["deletion"]["generation"],
+            2
+        );
+        let plan=query(&db,"EXPLAIN QUERY PLAN SELECT public FROM workspace_deletions WHERE workspace_id=? ORDER BY rowid DESC LIMIT 1",&[json!("w")]).unwrap();
+        assert!(
+            plan.to_string().contains("workspace_deletion_workspace"),
+            "{plan}"
+        );
+        let plan=query(&db,"EXPLAIN QUERY PLAN SELECT id FROM workspace_deletions WHERE workspace_id=? AND blocks=1 ORDER BY rowid DESC LIMIT 1",&[json!("w")]).unwrap();
+        assert!(
+            plan.to_string().contains("workspace_deletion_gate"),
+            "{plan}"
+        );
+        // A failed final commit must retain both the workspace and running job.
+        db.execute_batch("CREATE TRIGGER refuse_delete BEFORE DELETE ON workspaces BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(handle(&mut db,"workspace_deletion_update",&json!({"id":"two","revision":second["public"]["revision"],"patch":{"public":{"status":"succeeded","blocksWorkspace":false}}})).is_err());
+        assert_eq!(one(&db, "two").unwrap()["public"]["status"], "queued");
+        assert_eq!(
+            records(&db, "workspaces", Some("w"))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
