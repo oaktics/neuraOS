@@ -216,7 +216,12 @@ final class DaemonClient {
         pendingActions[key] = label
         return true
     }
-    func endAction(_ key: String) {actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)}
+    func endAction(_ key: String) {
+        actionStarted.removeValue(forKey: key); pendingActions.removeValue(forKey: key)
+        scheduleDeletionRecovery(onlyAbsent: true)
+    }
+    @ObservationIgnored var deletionRecoveryAttempted: Set<String> = []
+    @ObservationIgnored var deletionRecoveryTasks: [String: Task<Void, Never>] = [:]
     var deletionIntents: [String: DeletionIntent] = [:]
     var deletionIntentLoadFailed = false
     var pendingWorkspaceDeletion: Workspace?
@@ -333,12 +338,15 @@ final class DaemonClient {
         }
         let retained = openedIds.intersection(workspaceIDs)
         if retained != openedIds {openedIds = retained}
+        scheduleDeletionRecovery(onlyAbsent: true)
     }
     func updateConnection(_ value: Bool) {
         // Older Observation runtimes notify even for an equal assignment.
         guard connected != value else {return}
         Diagnostics.shared.record(value ? "daemon.connected" : "daemon.disconnected")
         connected = value
+        if value {scheduleDeletionRecovery(onlyAbsent: false)}
+        else {deletionRecoveryAttempted.removeAll()}
     }
     func select(_ id: String?) {
         Diagnostics.shared.record("action.select-workspace")
