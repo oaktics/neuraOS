@@ -148,6 +148,55 @@ final class ModelObservationTests: XCTestCase {
         XCTAssertTrue(removal.changed)
     }
 
+    @MainActor func testThousandWorkspaceReadersOnlyInvalidateChangedTerminalAndWorkspace() {
+        let model = AppModel(startPolling: false)
+        var snapshot = Snapshot()
+        snapshot.terminals = (0..<1_000).map {
+            TerminalRecord(id: "t\($0)", workspaceId: "w\($0)", provider: "codex",
+                           status: "running", cols: 80, rows: 24, activity: "working")
+        }
+        model.applySnapshot(snapshot)
+        let terminalFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let workspaceFlags = (0..<1_000).map {_ in ObservationFlag()}
+        let membershipFlags = (0..<1_000).map {_ in ObservationFlag()}
+        for index in 0..<1_000 {
+            let terminal = terminalFlags[index], workspace = workspaceFlags[index], membership = membershipFlags[index]
+            withObservationTracking {_ = model.terminal(id: "t\(index)")} onChange: {terminal.mark()}
+            withObservationTracking {_ = model.state.terminals(in: "w\(index)")} onChange: {workspace.mark()}
+            withObservationTracking {_ = model.state.workspaceTerminals("w\(index)").membership} onChange: {membership.mark()}
+        }
+        snapshot.terminals[500].activity = "waiting"
+        model.applySnapshot(snapshot)
+        XCTAssertEqual(terminalFlags.filter(\.changed).count, 1)
+        XCTAssertEqual(workspaceFlags.filter(\.changed).count, 1)
+        XCTAssertEqual(membershipFlags.filter(\.changed).count, 0)
+        XCTAssertTrue(terminalFlags[500].changed)
+        XCTAssertTrue(workspaceFlags[500].changed)
+    }
+
+    @MainActor func testScopedReadersObserveCreationRemovalAndWorkspaceMove() {
+        let state = DaemonViewState()
+        let created = ObservationFlag()
+        withObservationTracking {_ = state.terminal(id: "terminal")} onChange: {created.mark()}
+        var snapshot = fixture()
+        state.apply(snapshot)
+        XCTAssertTrue(created.changed)
+        let removed = ObservationFlag(), oldWorkspace = ObservationFlag(), newWorkspace = ObservationFlag()
+        withObservationTracking {_ = state.terminal(id: "terminal")} onChange: {removed.mark()}
+        withObservationTracking {_ = state.terminals(in: "workspace")} onChange: {oldWorkspace.mark()}
+        withObservationTracking {_ = state.terminals(in: "moved")} onChange: {newWorkspace.mark()}
+        snapshot.terminals = [TerminalRecord(id: "terminal", workspaceId: "moved", provider: "codex", status: "exited", cols: 80, rows: 24)]
+        state.apply(snapshot)
+        XCTAssertTrue(removed.changed && oldWorkspace.changed && newWorkspace.changed)
+        XCTAssertTrue(state.terminals(in: "workspace").isEmpty)
+        XCTAssertEqual(state.terminals(in: "moved").count, 1)
+        snapshot.terminals = []
+        state.apply(snapshot)
+        XCTAssertNil(state.terminal(id: "terminal"))
+        XCTAssertTrue(state.terminals(in: "moved").isEmpty)
+        XCTAssertTrue(state.workspaceTerminals("moved").membership.isEmpty)
+    }
+
     private func fixture() -> Snapshot {
         Snapshot(revision: 1, features: ["terminal.multiple"],
                  projects: [Project(id: "project", name: "Project", path: "/tmp/project", isGit: true)],

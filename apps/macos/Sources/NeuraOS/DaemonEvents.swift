@@ -39,6 +39,8 @@ import Foundation
     private var generation = UUID()
     private var socket: URLSessionWebSocketTask?
     private var observers: [UUID: (Change) -> Void] = [:]
+    private var terminalObservers: [String: [UUID: (Change) -> Void]] = [:]
+    private var observerTerminals: [UUID: String] = [:]
     private let session = URLSession(configuration: .ephemeral)
 
     init(endpoint: URL, dataDirectory: URL) {
@@ -48,7 +50,19 @@ import Foundation
     @discardableResult func observe(_ observer: @escaping (Change) -> Void) -> UUID {
         let id = UUID(); observers[id] = observer; return id
     }
-    func remove(_ id: UUID) {observers.removeValue(forKey: id)}
+    @discardableResult func observeTerminal(_ terminalId: String, _ observer: @escaping (Change) -> Void) -> UUID {
+        let id = UUID()
+        terminalObservers[terminalId, default: [:]][id] = observer
+        observerTerminals[id] = terminalId
+        return id
+    }
+    func remove(_ id: UUID) {
+        observers.removeValue(forKey: id)
+        if let terminal = observerTerminals.removeValue(forKey: id) {
+            terminalObservers[terminal]?.removeValue(forKey: id)
+            if terminalObservers[terminal]?.isEmpty == true {terminalObservers.removeValue(forKey: terminal)}
+        }
+    }
     func configure(features: [String]?) {
         guard features?.contains("state.stream") == true else {
             guard supported else {return}
@@ -64,9 +78,18 @@ import Foundation
         let current = generation
         task = Task { [weak self] in await self?.run(generation: current) }
     }
-    private func publish(_ change: Change) {
-        // Callbacks can remove observers while handling a deleted terminal.
-        for observer in Array(observers.values) {observer(change)}
+    func publish(_ change: Change) {
+        // Snapshot callbacks before delivery: callbacks may remove subscriptions.
+        // Ordinary output dispatch is O(changed terminals), not O(all open tabs).
+        var callbacks = Array(observers.values)
+        if change.type == "ready" || change.type == "disconnected" {
+            for subscribers in terminalObservers.values {callbacks.append(contentsOf: subscribers.values)}
+        } else {
+            for id in Set(change.terminals ?? []) {
+                if let subscribers = terminalObservers[id] {callbacks.append(contentsOf: subscribers.values)}
+            }
+        }
+        for observer in callbacks {observer(change)}
     }
     private func run(generation current: UUID) async {
         var attempt = 0

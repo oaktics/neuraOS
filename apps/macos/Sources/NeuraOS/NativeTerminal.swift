@@ -1,11 +1,45 @@
 import SwiftUI
 import AppKit
 import SwiftTerm
+import MetalKit
 
 /// Cmd-V is a terminal paste action; Codex needs Ctrl-V to read clipboard images.
 class NativeTerminalView: TerminalView {
     var provider = "shell"
     private var darkAppearance: Bool?
+    private var renderingVisible = true
+
+    override func setFrameSize(_ newSize: NSSize) {
+        // SwiftUI re-applies geometry during unrelated state updates. SwiftTerm
+        // requests a Metal frame even when the size has not changed.
+        guard frame.size != newSize else {return}
+        super.setFrameSize(newSize)
+    }
+
+    func setRenderingVisible(_ visible: Bool) {
+        renderingVisible = visible
+        updateMetalVisibility()
+    }
+
+    private func updateMetalVisibility() {
+        // Keep parsing output and retaining glyph/row caches while hidden, but
+        // do not submit offscreen GPU frames. SwiftTerm uses a paused, on-demand
+        // MTKView; disabling setNeedsDisplay prevents feeds from scheduling draws.
+        for case let metal as MTKView in subviews {
+            guard metal.enableSetNeedsDisplay != renderingVisible else {continue}
+            metal.enableSetNeedsDisplay = renderingVisible
+            if renderingVisible {
+                // SwiftTerm replaces (rather than unions) its pending Metal row
+                // range on each display update. Hidden updates can span disjoint
+                // rows, so rebuild all visible rows when resuming cached rendering.
+                terminal.updateFullScreen()
+                // Public display-flush hook; does not alter synchronized-output
+                // mode, selection, scroll position, or feed synthetic input.
+                synchronizedOutputChanged(source: terminal, active: false)
+                metal.setNeedsDisplay(metal.bounds)
+            }
+        }
+    }
     var acceptsFileInput: () -> Bool = { true }
 
     override func viewDidMoveToWindow() {
@@ -15,6 +49,7 @@ class NativeTerminalView: TerminalView {
             do {try setUseMetal(true)}
             catch {Diagnostics.shared.record("terminal.renderer.fallback")}
         }
+        updateMetalVisibility()
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -179,7 +214,8 @@ struct NativeTerminal: NSViewRepresentable {
             eventObserver = nil
         }
         func setVisible(_ value: Bool) {
-            view?.isHidden = !value
+            if view?.isHidden != !value {view?.isHidden = !value}
+            (view as? NativeTerminalView)?.setRenderingVisible(value)
             guard visible != value else {return}
             visible = value
             if value {
@@ -279,11 +315,8 @@ struct NativeTerminal: NSViewRepresentable {
         func start() {
             guard polling == nil else {return}
             outputPulse = EventPulse()
-            eventObserver = api.events.observe { [weak self] change in
-                guard let self else {return}
-                if change.type == "ready" || change.type == "disconnected" || change.terminals?.contains(self.terminal.id) == true {
-                    self.outputPulse.signal()
-                }
+            eventObserver = api.events.observeTerminal(terminal.id) { [weak self] _ in
+                self?.outputPulse.signal()
             }
             polling = Task { [weak self] in
                 guard let self else {return}
@@ -297,7 +330,7 @@ struct NativeTerminal: NSViewRepresentable {
                         reportedError = false
                         if output.more {
                             await Task.yield()
-                        } else if api.events.supported {
+                        } else if api.events.supported && api.events.connected {
                             guard await updates.next() != nil else {return}
                         } else {
                             await pause(milliseconds: visible ? 60 : 500)

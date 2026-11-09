@@ -34,6 +34,20 @@ struct Snapshot: Codable {
     var projects: [Project] = []
     var workspaces: [Workspace] = []
     var terminals: [TerminalRecord] = []
+    // Stable observable buckets keep unrelated workspaces and terminal views asleep.
+    @ObservationIgnored private var terminalViews: [String: TerminalViewState] = [:]
+    @ObservationIgnored private var workspaceViews: [String: WorkspaceTerminalState] = [:]
+    func terminal(id: String) -> TerminalRecord? {
+        if terminalViews[id] == nil {terminalViews[id] = TerminalViewState()}
+        return terminalViews[id]!.record
+    }
+    func terminals(in workspaceId: String) -> [TerminalRecord] {
+        workspaceTerminals(workspaceId).records
+    }
+    func workspaceTerminals(_ id: String) -> WorkspaceTerminalState {
+        if workspaceViews[id] == nil {workspaceViews[id] = WorkspaceTerminalState()}
+        return workspaceViews[id]!
+    }
     // Tab ownership changes independently of activity, dimensions and process status.
     private(set) var terminalMembership: [TerminalMembership] = []
     var supportsMultipleTerminals: Bool {protocolVersion == 1 && features?.contains("terminal.multiple") == true}
@@ -48,8 +62,30 @@ struct Snapshot: Codable {
         if workspaces != snapshot.workspaces {workspaces = snapshot.workspaces}
         let membership = snapshot.terminals.map {TerminalMembership(id: $0.id, workspaceId: $0.workspaceId, provider: $0.provider)}
         if terminalMembership != membership {terminalMembership = membership}
-        if terminals != snapshot.terminals {terminals = snapshot.terminals}
+        if terminals != snapshot.terminals {
+            let nextIDs = Set(snapshot.terminals.map(\.id))
+            for old in terminals where !nextIDs.contains(old.id) {terminalViews[old.id]?.record = nil}
+            for record in snapshot.terminals {
+                if terminalViews[record.id] == nil {terminalViews[record.id] = TerminalViewState()}
+                if terminalViews[record.id]!.record != record {terminalViews[record.id]!.record = record}
+            }
+            let grouped = Dictionary(grouping: snapshot.terminals, by: \.workspaceId)
+            for id in Set(terminals.map(\.workspaceId)).union(grouped.keys) {
+                let bucket = workspaceTerminals(id)
+                let records = grouped[id] ?? []
+                if bucket.records != records {bucket.records = records}
+                let members = records.map {TerminalMembership(id: $0.id, workspaceId: $0.workspaceId, provider: $0.provider)}
+                if bucket.membership != members {bucket.membership = members}
+            }
+            terminals = snapshot.terminals
+        }
     }
+}
+// Keep empty buckets stable while readers may still be observing a removed ID.
+@MainActor @Observable final class TerminalViewState {var record: TerminalRecord?}
+@MainActor @Observable final class WorkspaceTerminalState {
+    var records: [TerminalRecord] = []
+    var membership: [TerminalMembership] = []
 }
 struct TerminalMembership: Equatable {
     let id: String
@@ -398,7 +434,7 @@ final class DaemonClient {
     @discardableResult func stopTerminal(_ terminal: TerminalRecord) async -> Bool {
         do {let _: OK = try await api.command(["type": "terminal.stop", "terminalId": terminal.id]); await refresh(); return true} catch {report(error); return false}
     }
-    func terminal(id: String?) -> TerminalRecord? {state.terminals.first {$0.id == id}}
+    func terminal(id: String?) -> TerminalRecord? {guard let id else {return nil}; return state.terminal(id: id)}
 }
 
 

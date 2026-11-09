@@ -148,7 +148,7 @@ struct WorkspaceView: View {
             return layout.openBrowser(url, workspaceId: workspace.id) ? .handled : .discarded
         })
         .onAppear {restore(); openRequestedTerminal()}
-        .onChange(of: model.state.terminalMembership) {_, _ in reconcileTerminals()}
+        .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
             Task { @MainActor in reconcileTerminals() }
@@ -184,8 +184,12 @@ struct WorkspaceView: View {
                 Button("キャンセル", role: .cancel) {closingTab = nil}
             }
         } message: {Text("このタブで実行中のCLIやコマンドを終了します。")}
-        .task(id: workspace.supportsGit) {
-            while !Task.isCancelled {if model.selectedId == workspace.id {await refreshGit()}; try? await Task.sleep(for: .seconds(3))}
+        .task(id: workspace.supportsGit && model.selectedId == workspace.id) {
+            guard workspace.supportsGit && model.selectedId == workspace.id else {return}
+            while !Task.isCancelled {
+                await refreshGit()
+                do {try await Task.sleep(for: .seconds(3))} catch {return}
+            }
         }
     }
     private var tabBar: some View {
@@ -410,7 +414,7 @@ struct WorkspaceView: View {
         for path in documents.keys.sorted() where documents[path]?.dirty == true {layout.openFile(path)}
         if !wasFiles, previousSelection == nil || layout.tabs.contains(where: {$0.id == previousSelection}) {layout.selectedId = previousSelection}
         // Recover running sessions, including sessions opened while this UI was disconnected.
-        let terminals = model.state.terminals.filter {$0.workspaceId == workspace.id}
+        let terminals = model.state.terminals(in: workspace.id)
         seenTerminalIds = Set(terminals.map(\.id))
         for terminal in terminals.filter({terminal in terminal.status == "running" || (saved == nil && terminals.last(where: {$0.provider == terminal.provider})?.id == terminal.id)}) {
             if !layout.tabs.contains(where: {$0.terminalId == terminal.id}) {
@@ -423,7 +427,7 @@ struct WorkspaceView: View {
     }
     private func reconcileTerminals() {
         guard restored else {return}
-        layout.reconcileTerminals(model.state.terminals.filter {$0.workspaceId == workspace.id},
+        layout.reconcileTerminals(model.state.terminals(in: workspace.id),
                                   seen: &seenTerminalIds, startingTabs: model.startingTerminalTabs)
     }
     private func persist() {guard restored, let data = try? JSONEncoder().encode(layout) else {return}; UserDefaults.standard.set(data, forKey: storageKey)}
@@ -431,9 +435,11 @@ struct WorkspaceView: View {
         guard workspace.supportsGit else {return}
         do {
             let next: GitStatus = try await model.api.get("v1/workspaces/\(workspace.id)/git")
+            guard !Task.isCancelled else {return}
             if git != next {git = next}
             if gitError != nil {gitError = nil}
         } catch {
+            guard !Task.isCancelled else {return}
             if gitError != error.localizedDescription {gitError = error.localizedDescription}
         }
     }

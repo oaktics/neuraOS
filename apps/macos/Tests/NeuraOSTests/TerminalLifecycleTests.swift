@@ -1,9 +1,54 @@
 import XCTest
 import AppKit
 import SwiftTerm
+import MetalKit
 @testable import NeuraOS
 
 final class TerminalLifecycleTests: XCTestCase {
+    @MainActor func testUnchangedGeometryDoesNotInvalidateTerminalRendering() {
+        _ = NSApplication.shared
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.needsDisplay = false
+        for _ in 0..<1_000 {view.setFrameSize(view.frame.size)}
+        XCTAssertFalse(view.needsDisplay)
+        let columns = view.getTerminal().cols
+        view.setFrameSize(NSSize(width: 900, height: 600))
+        XCTAssertEqual(view.frame.width, 900)
+        XCTAssertGreaterThan(view.getTerminal().cols, columns)
+    }
+
+    @MainActor func testHiddenMetalViewDefersDrawingWithoutReplacingRenderer() async throws {
+        _ = NSApplication.shared
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        // Use SwiftTerm's real Metal view without opening a user-visible window.
+        guard MTLCreateSystemDefaultDevice() != nil else {throw XCTSkip("Metal device unavailable")}
+        try view.setUseMetal(true)
+        let metal = try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first)
+        let terminal = view.getTerminal()
+        view.setRenderingVisible(false)
+        XCTAssertFalse(metal.enableSetNeedsDisplay)
+        view.feed(text: "\u{1b}[2;1Hfirst hidden row")
+        try await Task.sleep(for: .milliseconds(40))
+        view.feed(text: "\u{1b}[10;1Hsecond hidden row")
+        try await Task.sleep(for: .milliseconds(40))
+        // Both display passes have run while Metal draws were disabled.
+        XCTAssertNil(terminal.getUpdateRange())
+        XCTAssertTrue(view.getTerminal() === terminal)
+        let cursor = terminal.getCursorLocation()
+        let scroll = view.scrollPosition
+        view.setRenderingVisible(true)
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        XCTAssertEqual(terminal.getCursorLocation().x, cursor.x)
+        XCTAssertEqual(terminal.getCursorLocation().y, cursor.y)
+        XCTAssertEqual(view.scrollPosition, scroll)
+        XCTAssertTrue(terminal.getLine(row: 1)?.translateToString().contains("first hidden row") == true)
+        XCTAssertTrue(terminal.getLine(row: 9)?.translateToString().contains("second hidden row") == true)
+        XCTAssertTrue(metal.enableSetNeedsDisplay)
+        XCTAssertTrue(metal.isPaused)
+        XCTAssertTrue(metal.superview === view)
+    }
+
     @MainActor private func renderer() -> (NativeTerminal.Coordinator, TerminalView) {
         _ = NSApplication.shared
         let record = TerminalRecord(id: "test-only", workspaceId: "test", provider: "shell", status: "running", cols: 100, rows: 30)
