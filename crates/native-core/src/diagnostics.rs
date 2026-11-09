@@ -20,6 +20,13 @@ pub enum Phase {
     Failure,
     Start,
     End,
+    DeleteVerifyBefore,
+    DeleteAdmission,
+    DeleteStopTerminals,
+    DeleteVerifyAfter,
+    DeleteGitRemove,
+    DeleteStore,
+    DeleteForgetAgents,
 }
 impl Phase {
     fn name(self) -> &'static str {
@@ -30,6 +37,13 @@ impl Phase {
             Self::Failure => "operation.failure",
             Self::Start => "daemon.start",
             Self::End => "daemon.end",
+            Self::DeleteVerifyBefore => "workspace.delete.verify-before",
+            Self::DeleteAdmission => "workspace.delete.admission",
+            Self::DeleteStopTerminals => "workspace.delete.stop-terminals",
+            Self::DeleteVerifyAfter => "workspace.delete.verify-after",
+            Self::DeleteGitRemove => "workspace.delete.git-remove",
+            Self::DeleteStore => "workspace.delete.store",
+            Self::DeleteForgetAgents => "workspace.delete.forget-agents",
         }
     }
 }
@@ -104,7 +118,8 @@ impl Diagnostics {
         }
     }
     pub(crate) fn performance(&self, mut row: Value) {
-        row["time"] = json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        row["time"] =
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         row["session"] = json!(self.session);
         if self.sender.try_send(Entry::Row(row)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);

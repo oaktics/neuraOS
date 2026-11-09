@@ -223,6 +223,8 @@ impl ProviderService {
             .get(terminal)
             .is_some_and(|v| equal(&v.1, token))
     }
+    // AppState::open holds workspace activity admission through prepare and PTY spawn.
+    // Do not acquire a nested reader here: a queued deletion writer would deadlock.
     pub async fn prepare(
         self: &Arc<Self>,
         workspace: &Value,
@@ -233,6 +235,9 @@ impl ProviderService {
         prompt: Option<String>,
         choose_history: bool,
     ) -> Result<LaunchSpec> {
+        self.agents
+            .ensure_workspace_active(workspace["id"].as_str().ok_or("workspace id")?)
+            .await?;
         let life = {
             let mut lifecycle = self.lifecycle.lock().unwrap();
             if lifecycle.shutting_down {
@@ -252,6 +257,7 @@ impl ProviderService {
         let gate = life.gate.lock().await;
         let result=async {
             if life.closing.load(Ordering::Acquire){return Err("provider_terminal_closing".into());}
+        self.agents.ensure_workspace_active(workspace["id"].as_str().ok_or("workspace id")?).await?;
         let program = executable(provider).await?;
         let mut env = environment();
         if provider == "shell" {
@@ -285,7 +291,7 @@ impl ProviderService {
     let agents=self.agents.clone();let terminal_id=terminal.to_string();let workspace_copy=workspace.clone();let title_rpc=rpc.clone();tokio::spawn(async move{let mut titled=std::collections::HashSet::new();while let Some(event)=rx.recv().await{
      if event["method"]=="neura/overflow"{let _=agents.codex_event(&terminal_id,&workspace_copy,&json!({"method":"neura/disconnected"})).await;let _=reconcile_codex(&agents,&title_rpc,&terminal_id,&workspace_copy).await;continue;}
      if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_err(){let _=reconcile_codex(&agents,&title_rpc,&terminal_id,&workspace_copy).await;}}
-     let _=agents.codex_event(&terminal_id,&workspace_copy,&event).await;if event["method"]=="turn/completed"&&event["params"]["turn"]["status"]=="completed"{if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_ok()&&titled.insert(task.to_string()){let rpc=title_rpc.clone();let task=task.to_string();let cwd=workspace_copy["path"].as_str().unwrap_or("").to_string();tokio::spawn(async move{let _=codex::generate_title(rpc,task,cwd).await;});}}}}});
+     let _=agents.codex_event(&terminal_id,&workspace_copy,&event).await;if event["method"]=="turn/completed"&&event["params"]["turn"]["status"]=="completed"{if let Some(task)=event["params"]["threadId"].as_str(){if agents.get(task).await.is_ok()&&titled.insert(task.to_string()){let rpc=title_rpc.clone();let task=task.to_string();let cwd=workspace_copy["path"].as_str().unwrap_or("").to_string();let title_agents=agents.clone();let title_workspace=workspace_copy["id"].as_str().unwrap_or("").to_owned();tokio::spawn(async move{let _=codex::generate_title(rpc,task,cwd,title_agents,title_workspace).await;});}}}}});
     let task:Option<String>=if choose_history{None}else{
      let mut params=json!({"cwd":workspace["path"],"approvalPolicy":"never","sandbox":"danger-full-access","config":{"mcp_servers.neuraos":config},"developerInstructions":codex::session_instructions()});if let Some(id)=&resume{params["threadId"]=json!(id);params["excludeTurns"]=json!(true);}
      let result=rpc.call(if resume.is_some(){"thread/resume"}else{"thread/start"},params).await?;let thread=&result["thread"];let id=thread["id"].as_str().ok_or("invalid Codex thread")?;
@@ -293,7 +299,7 @@ impl ProviderService {
      if !self.agents.register_codex(terminal,workspace,thread,parent).await?{return Err("agent_workspace_mismatch".into())}Some(id.into())
     };
     let mut args=vec!["resume".into()];if let Some(task)=&task{args.push(task.clone());}args.extend(["--remote".into(),rpc.endpoint.clone()]);
-    if let (Some(task),Some(prompt))=(&task,prompt){self.agents.send(task,&prompt,"queue",None).await?;}
+    if let (Some(task),Some(prompt))=(&task,prompt){self.agents.send_admitted(task,&prompt,"queue",None).await?;}
     Ok(LaunchSpec{program:program.clone(),args,env,agent_id:task})
    }.await
         } else {
@@ -640,27 +646,55 @@ async fn reconcile_codex(
                 )
                 .await?;
             if let Some(turn) = history["data"].as_array().and_then(|rows| rows.first()) {
-                if turn["status"] == "inProgress" {
-                    agents.codex_event(terminal,workspace,&json!({"method":"turn/started","params":{"threadId":task,"turn":turn}})).await?;
-                } else if matches!(
-                    turn["status"].as_str(),
-                    Some("completed" | "failed" | "interrupted")
-                ) {
-                    if let Some(items) = turn["items"].as_array() {
-                        for item in items {
-                            if item["type"] == "agentMessage" {
-                                agents.codex_event(terminal,workspace,&json!({"method":"item/completed","params":{"threadId":task,"turnId":turn["id"],"item":item}})).await?;
-                            }
-                        }
-                    }
-                    agents.codex_event(terminal,workspace,&json!({"method":"turn/completed","params":{"threadId":task,"turn":turn}})).await?;
-                }
+                reconcile_codex_turn(agents, terminal, workspace, task, turn).await?;
             }
         }
         cursor = page["nextCursor"].clone();
         if cursor.is_null() {
             break;
         }
+    }
+    Ok(())
+}
+
+// A history page is a snapshot, not a stream: only its final assistant message
+// is the current summary. Replaying earlier messages on every reconciliation
+// causes durable writes and UI invalidations even for unchanged idle sessions.
+pub(super) async fn reconcile_codex_turn(
+    agents: &Agents,
+    terminal: &str,
+    workspace: &Value,
+    task: &str,
+    turn: &Value,
+) -> Result<()> {
+    if turn["status"] == "inProgress" {
+        agents
+            .codex_event(
+                terminal,
+                workspace,
+                &json!({"method":"turn/started","params":{"threadId":task,"turn":turn}}),
+            )
+            .await?;
+    } else if matches!(
+        turn["status"].as_str(),
+        Some("completed" | "failed" | "interrupted")
+    ) {
+        if let Some(items) = turn["items"].as_array() {
+            if let Some(item) = items
+                .iter()
+                .rev()
+                .find(|item| item["type"] == "agentMessage")
+            {
+                agents.codex_event(terminal,workspace,&json!({"method":"item/completed","params":{"threadId":task,"turnId":turn["id"],"item":item}})).await?;
+            }
+        }
+        agents
+            .codex_event(
+                terminal,
+                workspace,
+                &json!({"method":"turn/completed","params":{"threadId":task,"turn":turn}}),
+            )
+            .await?;
     }
     Ok(())
 }

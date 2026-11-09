@@ -43,6 +43,7 @@ Codexの会話IDを作業IDとして、`agents`テーブルにworkspace・termin
 | `task_report` | 進捗・完了を報告専用受信箱へ送信 |
 | `task_ack` | 読んだ報告IDを受領確認（実行指示は削除しない） |
 | `workspace_delete` | 検証・依頼済みマージ後の安全なworktree cleanup |
+| `workspace_deletion_status` | 永続削除jobの進捗・完了と登録消失の確認 |
 | `task_interrupt` | 指定ターンの中断、未送信指示と監視の解除 |
 | `task_respond` | 正確なrequest IDに対する回答 |
 | `task_watch` | 次のターン終了時に監督側へ一回だけ報告 |
@@ -114,10 +115,10 @@ agent並列数とwatch対象数に任意の固定上限は設けません。以�
 
 ## 完了したworktreeのcleanup
 
-監督は必要な検証、依頼された範囲のマージ、不要になったworktreeの安全な削除までを別々に確認します。ユーザーの保持指示を優先し、未完了作業・他人の変更は破棄しません。`workspace_delete` は既存 `workspace.delete` に `stopTerminals:true`、`discardChanges:false` とcleanup検証条件を渡します。呼び出し元workspaceは起動時の環境から指定し、自分自身とrootを拒否します。
+監督は必要な検証、依頼された範囲のマージ、不要になったworktreeの安全な削除までを別々に確認します。ユーザーの保持指示を優先し、未完了作業・他人の変更は破棄しません。`workspace_delete` は `stopTerminals:true`、`discardChanges:false` とcleanup検証条件を渡します。`workspace.delete.jobs` 対応daemonでは `workspace.delete.start` で永続jobを受け付け、最大25秒進捗を待ちます。未完了ならjob IDとpending状態を返します。旧daemonでは従来の同期APIを使用します。呼び出し元workspaceは起動時の環境から指定し、自分自身とrootを拒否します。
 
-`expectedHead` と `mergedPR` が必要です。originのGitHub上でPRがMERGEDであり、そのPRのhead SHAが現在のHEADと一致することを確認するため、squash mergeでも対応します。未pushの追加コミット、マージ後の変更、未統合のPRは削除できません。PRを使わない調査用worktreeなど確認材料のない場合は自動削除せず、保持して報告します。実行中・回答待ち・失敗・未実行指示・未受領報告・監視のあるtaskも拒否します。停止前後にHEADとdirty/未追跡/ignoredを再確認し、従来の停止バリアとGitの安全な削除を利用します。コミット済みブランチは保持します。Claude・旧方式Codex・シェルなどで作業終了を確認できない実行中端末も拒否し、人間による確認・停止まで保持します。旧UI/APIの削除動作は変更しません。
+`expectedHead` と `mergedPR` が必要です。originのGitHub上でPRがMERGEDであり、そのPRのhead SHAが現在のHEADと一致することを確認するため、squash mergeでも対応します。未pushの追加コミット、マージ後の変更、未統合のPRは削除できません。PRを使わない調査用worktreeなど確認材料のない場合は自動削除せず、保持して報告します。実行中・回答待ち・失敗・未実行指示・未受領報告・監視のあるtaskも拒否します。停止前後にHEADとdirty/未追跡/ignoredを再確認し、従来の停止バリアとGitの安全な削除を利用します。コミット済みブランチは保持します。Claude・旧方式Codex・シェルなどで作業終了を確認できない実行中端末も拒否し、人間による確認・停止まで保持します。同期の `workspace.delete` は完了応答の意味を維持し、内部では同じ永続jobを待ちます。通信のタイムアウトはjobをキャンセルしません。
 
 `node_modules`、`.build`、`.cef` などもignoredなら削除を拒否します。まず中身・用途・生成元を確認し、再生成可能と確認できた生成物だけを対象を絞って除去してください。名前だけで再生成可能とは判断しません。`.env`、秘密情報、未知のファイル、保持を求められたデータは残し、cleanupの阻害理由として報告します。MCPに汎用force/discardや名前だけに基づく再帰削除を公開しません。
 
-MCPは削除の成功時とAPI失敗時にworkspaceの登録状態を読み戻し、成功時は `verifiedAbsent`、失敗時は `workspacePresent` を返します。読み戻し自体ができなければ確認済みとは扱いません。監督も `workspace_list` で結果を確認し、ブロックされた場合は削除未完了と報告します。
+受付成功は削除完了ではありません。pendingなら返されたjob IDを保持し、`workspace_deletion_status` で進捗を確認します。同ツールは最大25秒のlong-pollに対応し、新たな削除や破棄を行いません。タイムアウトだけを理由に新しいoperationを繰り返さないでください。jobがsucceededで、daemonの `verifiedAbsent` と登録状態の独立した読み戻しが一致した場合だけ `completed:true` / `verifiedAbsent:true` を返します。失敗時もjobと `workspacePresent` を返します。読み戻し自体ができなければ確認済みとは扱いません。監督も `workspace_list` で結果を確認し、ブロックされた場合は削除未完了と報告します。

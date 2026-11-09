@@ -62,6 +62,93 @@ impl Client {
         )
         .await
     }
+    async fn deletion_job(&self, id: &str, wait_ms: u64, after: Option<u64>) -> Result<Value> {
+        if !crate::contracts::valid_uuid(id) || wait_ms > 25_000 {
+            return Err("invalid_deletion_status_options".into());
+        }
+        let mut path = format!("/v1/workspace-deletions/{id}?waitMs={wait_ms}");
+        if let Some(revision) = after {
+            path.push_str(&format!("&afterRevision={revision}"));
+        }
+        let job = tokio::time::timeout(
+            Duration::from_millis(wait_ms) + Duration::from_secs(2),
+            self.request(&path, None, None),
+        )
+        .await
+        .map_err(|_| json!({"error":"deletion_status_timeout","jobId":id}).to_string())??;
+        validate_deletion_job(&job, Some(id), None)?;
+        Ok(job)
+    }
+    async fn await_deletion(
+        &self,
+        mut job: Value,
+        workspace: &str,
+        budget: Duration,
+    ) -> Result<Value> {
+        // An idempotent start can return an older job: pin its returned ID, not operationId.
+        validate_deletion_job(&job, None, Some(workspace))?;
+        let id = job["id"].as_str().unwrap().to_owned();
+        let deadline = tokio::time::Instant::now() + budget;
+        while matches!(job["status"].as_str(), Some("queued" | "running")) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let next = tokio::time::timeout(
+                remaining,
+                self.deletion_job(
+                    &id,
+                    (remaining.as_millis() as u64).min(25_000),
+                    job["revision"].as_u64(),
+                ),
+            )
+            .await
+            .map_err(|_| "deletion_status_timeout".to_string())
+            .and_then(|v| v)
+            .and_then(|next| {
+                validate_deletion_job(&next, Some(&id), Some(workspace))?;
+                Ok(next)
+            });
+            match next {
+                Ok(next) => job = next,
+                Err(error) => {
+                    let mut pending = self.deletion_result(job).await?;
+                    pending["statusError"] = json!(error);
+                    return Ok(pending);
+                }
+            }
+        }
+        self.deletion_result(job).await
+    }
+    async fn deletion_result(&self, job: Value) -> Result<Value> {
+        validate_deletion_job(&job, None, None)?;
+        // Proof has its own short budget, including when status transport failed.
+        let proof = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.request("/v1/state", None, None),
+        )
+        .await
+        .map_err(|_| "deletion_proof_timeout".to_string())
+        .and_then(|v| v);
+        let present = proof.as_ref().ok().and_then(|state| {
+            state["workspaces"]
+                .as_array()
+                .map(|rows| rows.iter().any(|w| w["id"] == job["workspaceId"]))
+        });
+        let succeeded = job["status"] == "succeeded";
+        let verified = succeeded && job["verifiedAbsent"] == true && present == Some(false);
+        let mut result = json!({"accepted":true,"completed":verified,"jobId":job["id"],"workspaceId":job["workspaceId"],"status":job["status"],"job":job,"workspacePresent":present,"verifiedAbsent":verified});
+        if let Err(error) = proof {
+            result["proofError"] = json!(error);
+        }
+        if result["status"] == "failed" {
+            return Err(result.to_string());
+        }
+        if succeeded && !verified {
+            return Err(json!({"error":"cleanup_unconfirmed","result":result}).to_string());
+        }
+        Ok(result)
+    }
     async fn context(&self, a: &Value, workspace: &str) -> Result<Value> {
         let (state, list) = tokio::try_join!(
             self.request("/v1/state", None, None),
@@ -177,6 +264,23 @@ impl Client {
                 if self.workspace.is_empty() || a["workspaceId"] == self.workspace {
                     return Err("Cannot delete the caller workspace".into());
                 }
+                let state = tokio::time::timeout(Duration::from_secs(15), self.request("/v1/state", None, None))
+                    .await.map_err(|_| json!({"error":"deletion_feature_timeout","operationId":operation,"workspaceId":a["workspaceId"],"startRequestSent":false,"completed":false,"recovery":"Inspect workspace state; retry only the identical request with the same operationId."}).to_string())??;
+                if state["features"].as_array().is_some_and(|features| {
+                    features
+                        .iter()
+                        .any(|feature| feature == "workspace.delete.jobs")
+                }) {
+                    let accepted = tokio::time::timeout(Duration::from_secs(15), self.command(operation,json!({"type":"workspace.delete.start","workspaceId":a["workspaceId"],"stopTerminals":true,"discardChanges":false,"cleanup":{"callerWorkspaceId":self.workspace,"expectedHead":a["expectedHead"],"mergedPR":a["mergedPR"]}})))
+                        .await.map_err(|_| json!({"error":"deletion_start_uncertain","operationId":operation,"workspaceId":a["workspaceId"],"outcome":"unknown","completed":false,"recovery":"The start request timed out and may still be accepted. Inspect workspace state; retry only the identical request with the same operationId to recover the existing job. Do not start a replacement operation or infer a jobId from operationId."}).to_string())??;
+                    return self
+                        .await_deletion(
+                            accepted["job"].clone(),
+                            a["workspaceId"].as_str().ok_or("invalid_workspace_id")?,
+                            Duration::from_secs(25),
+                        )
+                        .await;
+                }
                 let result=self.command(operation,json!({"type":"workspace.delete","workspaceId":a["workspaceId"],"stopTerminals":true,"discardChanges":false,"cleanup":{"callerWorkspaceId":self.workspace,"expectedHead":a["expectedHead"],"mergedPR":a["mergedPR"]}})).await;
                 let present = self
                     .request("/v1/state", None, None)
@@ -199,6 +303,21 @@ impl Client {
                         Ok(result)
                     }
                 }
+            }
+            "workspace_deletion_status" => {
+                let id = a["jobId"]
+                    .as_str()
+                    .ok_or("invalid_deletion_status_options")?;
+                let wait = match a.get("waitMs") {
+                    None => 0,
+                    Some(value) => value.as_u64().ok_or("invalid_deletion_status_options")?,
+                };
+                let after = match a.get("afterRevision") {
+                    None => None,
+                    Some(value) => Some(value.as_u64().ok_or("invalid_deletion_status_options")?),
+                };
+                self.deletion_result(self.deletion_job(id, wait, after).await?)
+                    .await
             }
             "task_list" => {
                 let mut url = self
@@ -368,6 +487,22 @@ impl Client {
         }
     }
 }
+fn validate_deletion_job(job: &Value, id: Option<&str>, workspace: Option<&str>) -> Result<()> {
+    if !job["id"].as_str().is_some_and(crate::contracts::valid_uuid)
+        || !job["workspaceId"]
+            .as_str()
+            .is_some_and(crate::contracts::valid_uuid)
+        || !matches!(
+            job["status"].as_str(),
+            Some("queued" | "running" | "succeeded" | "failed")
+        )
+        || id.is_some_and(|id| job["id"] != id)
+        || workspace.is_some_and(|workspace| job["workspaceId"] != workspace)
+    {
+        return Err(json!({"error":"invalid_deletion_job","expectedJobId":id,"expectedWorkspaceId":workspace,"job":job}).to_string());
+    }
+    Ok(())
+}
 fn string<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key].as_str().ok_or_else(|| format!("missing {key}"))
 }
@@ -503,3 +638,7 @@ pub async fn run() -> Result<()> {
     while tasks.join_next().await.is_some() {}
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "mcp_deletion_tests.rs"]
+mod deletion_tests;

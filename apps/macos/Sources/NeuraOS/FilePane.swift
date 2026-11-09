@@ -3,12 +3,6 @@ import SwiftUI
 import QuickLookUI
 import UniformTypeIdentifiers
 
-struct OpenDocument: Codable, Equatable {
-    var original: FileContent
-    var text: String
-    var dirty: Bool {text != original.content}
-}
-
 enum FilePresentation {
     static func invalidateCleanDocument(_ path: String, in documents: inout [String: OpenDocument]) {
         // Inspect the current buffer: edits may have arrived while a read was pending.
@@ -93,7 +87,7 @@ struct FilePane: View {
                     } else {Color.clear}
                 } else {
                     NativeTextEditor(text: Binding(get: {documents[path]?.text ?? ""}, set: {documents[path]?.text = $0}),
-                                     editable: true, diff: false, visible: visible, wrapsLines: wrapsLines, language: CodePresentation.language(path), showsLineNumbers: true, findRequest: findRequest)
+                                     editable: !model.isWorkspaceBlocked(workspace.id), diff: false, visible: visible, wrapsLines: wrapsLines, language: CodePresentation.language(path), showsLineNumbers: true, findRequest: findRequest)
                 }
             } else if let previewURL {
                 if visible {RichFilePreview(url: previewURL).id(revision)} else {Color.clear}
@@ -143,11 +137,12 @@ struct FilePane: View {
     }
 
     private func save() {
-        guard let doc = document, !saving else {return}
+        guard !model.isWorkspaceBlocked(workspace.id), let doc = document, !saving else {return}
         saving = true; error = nil
         Task {
             defer {saving = false}
             do {
+                guard !model.isWorkspaceBlocked(workspace.id) else {return}
                 let content: FileContent = try await model.api.command(["type": "file.save", "workspaceId": workspace.id,
                     "path": path, "content": doc.text, "expectedHash": doc.original.hash])
                 documents[path]?.original = content

@@ -1,9 +1,99 @@
 import XCTest
 import AppKit
 import SwiftTerm
+import MetalKit
 @testable import NeuraOS
 
 final class TerminalLifecycleTests: XCTestCase {
+    @MainActor private func metalRenderer() throws -> (NativeTerminalView, MTKView) {
+        _ = NSApplication.shared
+        _ = try XCTUnwrap(MTLCreateSystemDefaultDevice(), "Metal device unavailable")
+        // Native SwiftPM leaves dependency resources beside the xctest bundle;
+        // SwiftTerm probes inside loaded bundles instead. Mirror the app packager
+        // using only SwiftPM's generated bundle, never dependency source files.
+        let testBundle = Bundle(for: TerminalLifecycleTests.self)
+        XCTAssertEqual(testBundle.bundleURL.pathExtension, "xctest")
+        let resources = try XCTUnwrap(testBundle.resourceURL)
+        let name = "SwiftTerm_SwiftTerm.bundle"
+        let destination = resources.appendingPathComponent(name)
+        if !FileManager.default.fileExists(atPath: destination.path) {
+            let generated = testBundle.bundleURL.deletingLastPathComponent().appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: generated, to: destination)
+        }
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        // Missing resources, invalid shaders and compilation errors remain failures.
+        try view.setUseMetal(true)
+        return (view, try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first))
+    }
+
+    @MainActor func testUnchangedGeometryDoesNotInvalidateTerminalRendering() {
+        _ = NSApplication.shared
+        let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        view.needsDisplay = false
+        for _ in 0..<1_000 {view.setFrameSize(view.frame.size)}
+        XCTAssertFalse(view.needsDisplay)
+        let columns = view.getTerminal().cols
+        view.setFrameSize(NSSize(width: 900, height: 600))
+        XCTAssertEqual(view.frame.width, 900)
+        XCTAssertGreaterThan(view.getTerminal().cols, columns)
+    }
+
+    @MainActor func testHiddenMetalViewDefersDrawingWithoutReplacingRenderer() async throws {
+        let (view, metal) = try metalRenderer()
+        let terminal = view.getTerminal()
+        view.setRenderingVisible(false)
+        XCTAssertFalse(metal.enableSetNeedsDisplay)
+        view.feed(text: "\u{1b}[2;1Hfirst hidden row")
+        try await Task.sleep(for: .milliseconds(40))
+        view.feed(text: "\u{1b}[10;1Hsecond hidden row")
+        try await Task.sleep(for: .milliseconds(40))
+        // Both display passes have run while Metal draws were disabled.
+        XCTAssertNil(terminal.getUpdateRange())
+        XCTAssertTrue(view.getTerminal() === terminal)
+        let cursor = terminal.getCursorLocation()
+        let scroll = view.scrollPosition
+        view.setRenderingVisible(true)
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        XCTAssertEqual(terminal.getCursorLocation().x, cursor.x)
+        XCTAssertEqual(terminal.getCursorLocation().y, cursor.y)
+        XCTAssertEqual(view.scrollPosition, scroll)
+        XCTAssertTrue(terminal.getLine(row: 1)?.translateToString().contains("first hidden row") == true)
+        XCTAssertTrue(terminal.getLine(row: 9)?.translateToString().contains("second hidden row") == true)
+        XCTAssertTrue(metal.enableSetNeedsDisplay)
+        XCTAssertTrue(metal.isPaused)
+        XCTAssertTrue(metal.superview === view)
+    }
+
+    @MainActor func testShowingTerminalPreservesSynchronizedOutputUntilReset() async throws {
+        let (view, metal) = try metalRenderer()
+        let terminal = view.getTerminal()
+        view.feed(text: "initial")
+        try await Task.sleep(for: .milliseconds(40))
+        view.setRenderingVisible(false)
+        view.feed(text: "\u{1b}[?2026h\u{1b}[2;1Hbuffered row")
+        XCTAssertTrue(terminal.synchronizedOutputActive)
+        metal.needsDisplay = false
+        view.setRenderingVisible(true)
+        XCTAssertFalse(metal.needsDisplay, "Show must not bypass the synchronized-output display guard")
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertTrue(terminal.synchronizedOutputActive)
+        XCTAssertFalse(metal.needsDisplay)
+        XCTAssertEqual(terminal.getUpdateRange()?.startY, 0)
+        XCTAssertEqual(terminal.getUpdateRange()?.endY, terminal.rows)
+        view.feed(text: "\u{1b}[10;1Hfinal row\u{1b}[?2026l")
+        XCTAssertFalse(terminal.synchronizedOutputActive)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertNil(terminal.getUpdateRange(), "Reset must flush the retained full-screen dirty range")
+        // AppKit may already have consumed Metal's needsDisplay by this point;
+        // the cleared range proves the guarded display flush processed the frame.
+        XCTAssertTrue(terminal.getLine(row: 1)?.translateToString().contains("buffered row") == true)
+        XCTAssertTrue(terminal.getLine(row: 9)?.translateToString().contains("final row") == true)
+    }
+
     @MainActor private func renderer() -> (NativeTerminal.Coordinator, TerminalView) {
         _ = NSApplication.shared
         let record = TerminalRecord(id: "test-only", workspaceId: "test", provider: "shell", status: "running", cols: 100, rows: 30)

@@ -2,6 +2,35 @@ import XCTest
 @testable import NeuraOS
 
 final class DaemonEventsTests: XCTestCase {
+    @MainActor func testThousandTerminalSubscribersOnlyReceiveTheirOutput() {
+        let events = DaemonEvents(endpoint: URL(string: "http://127.0.0.1:1")!, dataDirectory: URL(fileURLWithPath: "/nonexistent"))
+        var deliveries = Array(repeating: 0, count: 1_000)
+        var ids: [UUID] = []
+        for index in deliveries.indices {
+            ids.append(events.observeTerminal("t\(index)") {_ in deliveries[index] += 1})
+        }
+        for _ in 0..<1_000 {events.publish(.init(type: "changed", terminals: ["t500", "t500"]))}
+        XCTAssertEqual(deliveries.reduce(0, +), 1_000)
+        XCTAssertEqual(deliveries[500], 1_000)
+        events.publish(.init(type: "ready"))
+        XCTAssertEqual(deliveries.reduce(0, +), 2_000)
+        events.remove(ids[500])
+        events.publish(.init(type: "changed", terminals: ["t500"]))
+        XCTAssertEqual(deliveries[500], 1_001)
+        events.publish(.init(type: "disconnected"))
+        XCTAssertEqual(deliveries.reduce(0, +), 2_999)
+    }
+
+    @MainActor func testTerminalObserverCanRemoveItselfDuringDelivery() {
+        let events = DaemonEvents(endpoint: URL(string: "http://127.0.0.1:1")!, dataDirectory: URL(fileURLWithPath: "/nonexistent"))
+        var id: UUID!
+        var calls = 0
+        id = events.observeTerminal("terminal") {_ in calls += 1; events.remove(id)}
+        events.publish(.init(type: "changed", terminals: ["terminal"]))
+        events.publish(.init(type: "ready"))
+        XCTAssertEqual(calls, 1)
+    }
+
     @MainActor func testChangesDuringReplayRemainPendingAndCoalesce() async {
         let pulse = EventPulse()
         var events = pulse.stream.makeAsyncIterator()

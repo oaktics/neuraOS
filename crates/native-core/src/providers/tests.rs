@@ -13,6 +13,9 @@ impl ProviderStore for MemoryStore {
             let mut db = self.0.lock().unwrap();
             let table = args["table"].as_str().unwrap_or("").to_string();
             match op {
+                "workspace_deletion_gate" => Ok(
+                    json!({"blocked":db.get("deleting").is_some_and(|rows| rows.contains_key(args["workspaceId"].as_str().unwrap()))}),
+                ),
                 "list" => Ok(json!(db
                     .entry(table)
                     .or_default()
@@ -776,3 +779,220 @@ async fn report_rejects_over_limit_utf16_without_mutation() {
 
 #[path = "instruction_tests.rs"]
 mod instruction_tests;
+
+#[tokio::test]
+async fn codex_history_snapshot_publishes_only_final_summary_and_is_idle_on_replay() {
+    let (store, agents, workspace) = codex_fixture().await;
+    agents
+        .register_codex("t", &workspace, &codex_thread("selected"), None)
+        .await
+        .unwrap();
+    let before = agents.get("selected").await.unwrap().revision;
+    let mut items: Vec<Value> = (0..100)
+        .map(|i| json!({"type":"agentMessage","text":format!("progress {i}")}))
+        .collect();
+    items.push(json!({"type":"agentMessage","text":"final summary"}));
+    items.push(json!({"type":"commandExecution","output":"not a summary"}));
+    let turn = json!({"id":"one","status":"completed","items":items});
+    super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &turn)
+        .await
+        .unwrap();
+    let first = agents.get("selected").await.unwrap();
+    assert_eq!(first.summary.as_deref(), Some("final summary"));
+    assert_eq!(
+        first.revision - before,
+        2,
+        "one summary and one completion write, independent of history size"
+    );
+    assert_eq!(notifications(&store).await, 1);
+    for _ in 0..10 {
+        super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &turn)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        agents.get("selected").await.unwrap().revision,
+        first.revision
+    );
+    assert_eq!(notifications(&store).await, 1);
+    let no_message = json!({"id":"two","status":"failed","items":[{"type":"commandExecution"}]});
+    super::integration::reconcile_codex_turn(&agents, "t", &workspace, "selected", &no_message)
+        .await
+        .unwrap();
+    let next = agents.get("selected").await.unwrap();
+    assert_eq!(next.last_turn_id.as_deref(), Some("two"));
+    assert_eq!(next.status, "failed");
+    assert_eq!(next.summary.as_deref(), Some("final summary"));
+}
+
+fn block_workspace(store: &MemoryStore, workspace: &str) {
+    store
+        .0
+        .lock()
+        .unwrap()
+        .entry("deleting".into())
+        .or_default()
+        .insert(workspace.into(), json!(true));
+}
+
+#[tokio::test]
+async fn deletion_gate_rejects_send_steer_approval_and_prepare() {
+    let (store, agents, workspace) = codex_fixture().await;
+    let task = id();
+    agents
+        .register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    agents.codex_event("t", &workspace, &json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":task}})).await.unwrap();
+    block_workspace(&store, "w");
+    for mode in ["queue", "steer"] {
+        assert_eq!(
+            agents
+                .send(&task, "must not send", mode, Some("turn"))
+                .await
+                .unwrap_err(),
+            "workspace_deleting"
+        );
+    }
+    assert_eq!(
+        agents
+            .respond(&task, json!(1), json!({}))
+            .await
+            .unwrap_err(),
+        "workspace_deleting"
+    );
+    assert_eq!(
+        agents
+            .prepare_claude(workspace, "new", None, None, None)
+            .await
+            .unwrap_err(),
+        "workspace_deleting"
+    );
+    assert!(agents.get(&task).await.unwrap().pending.is_empty());
+    assert_eq!(agents.get(&task).await.unwrap().requests.len(), 1);
+    // A different workspace remains usable.
+    agents
+        .prepare_claude(json!({"id":"other"}), "other", None, None, None)
+        .await
+        .unwrap();
+    assert!(agents.read(&task, None).await.is_ok());
+}
+
+#[tokio::test]
+async fn deletion_gate_preserves_claude_queue_and_unnotified_reports() {
+    let (store, agents) = fixture().await;
+    let (terminal, task) = claude(&agents, None).await;
+    confirm(&agents, &terminal, &task).await;
+    agents.send(&task, "retained", "queue", None).await.unwrap();
+    block_workspace(&store, "w");
+    agents.report(&task, "retained report", None).await.unwrap();
+    let before = serde_json::to_value(agents.get(&task).await.unwrap()).unwrap();
+    assert_eq!(agents.channel(&terminal).await.unwrap(), json!({}));
+    agents.flush_ready().await;
+    assert_eq!(
+        serde_json::to_value(agents.get(&task).await.unwrap()).unwrap(),
+        before
+    );
+    assert_eq!(before["pending"].as_array().unwrap().len(), 1);
+    assert!(!agents.get(&task).await.unwrap().reports[0].notified);
+}
+
+#[tokio::test]
+async fn deletion_gate_preserves_codex_queue_without_runtime_delivery() {
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(RuntimeStub::default());
+    let agents = Agents::new(store.clone(), runtime.clone()).await.unwrap();
+    let task = id();
+    let workspace = json!({"id":"w","path":"/tmp/w"});
+    let mut thread = codex_thread(&task);
+    thread["status"] = json!({"type":"active"});
+    agents
+        .register_codex("t", &workspace, &thread, None)
+        .await
+        .unwrap();
+    agents.send(&task, "retained", "queue", None).await.unwrap();
+    block_workspace(&store, "w");
+    agents.report(&task, "retained report", None).await.unwrap();
+    agents.codex_event("t", &workspace, &json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":id(),"status":"completed"}}})).await.unwrap();
+    agents.flush(&task).await.unwrap();
+    let a = agents.get(&task).await.unwrap();
+    assert_eq!(a.pending.len(), 1);
+    assert!(a.instructions.is_empty());
+    assert!(a.reports.iter().all(|r| !r.notified));
+    assert!(runtime.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn deletion_gate_suppresses_probe_but_allows_other_workspace_turns() {
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Arc::new(RuntimeStub::default());
+    let agents = Agents::new(store.clone(), runtime.clone()).await.unwrap();
+    let (terminal, _) = claude(&agents, None).await;
+    block_workspace(&store, "w");
+    assert_eq!(agents.channel(&terminal).await.unwrap(), json!({}));
+    let other = id();
+    agents
+        .register_codex(
+            "other",
+            &json!({"id":"other","path":"/tmp/w"}),
+            &codex_thread(&other),
+            None,
+        )
+        .await
+        .unwrap();
+    agents.send(&other, "allowed", "queue", None).await.unwrap();
+    assert_eq!(runtime.calls.lock().unwrap().len(), 1);
+    assert_eq!(runtime.calls.lock().unwrap()[0].0, "turn/start");
+}
+
+#[tokio::test]
+async fn deletion_admission_precedes_provider_gate_check() {
+    let (store, agents, mut workspace) = codex_fixture().await;
+    let workspace_id = id();
+    workspace["id"] = json!(workspace_id);
+    let task = id();
+    agents
+        .register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    let deletion = crate::mutation::workspace_deletion_admission(&workspace_id).await;
+    let sender = agents.clone();
+    let send = tokio::spawn(async move {
+        sender
+            .send(&task, "cannot pass deletion", "queue", None)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(!send.is_finished());
+    block_workspace(&store, &workspace_id);
+    drop(deletion);
+    assert_eq!(send.await.unwrap().unwrap_err(), "workspace_deleting");
+}
+
+#[tokio::test]
+async fn admitted_prepare_send_does_not_reacquire_reader_behind_deletion_writer() {
+    let (store, agents, mut workspace) = codex_fixture().await;
+    let workspace_id = id();
+    workspace["id"] = json!(workspace_id);
+    let task = id();
+    agents
+        .register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    let activity = crate::mutation::workspace_activity(&workspace_id).await;
+    let key = workspace_id.clone();
+    let writer = tokio::spawn(async move {
+        let _deletion = crate::mutation::workspace_deletion_admission(&key).await;
+        block_workspace(&store, &key);
+    });
+    tokio::task::yield_now().await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        agents.send_admitted(&task, "initial prompt", "queue", None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(activity);
+    writer.await.unwrap();
+}

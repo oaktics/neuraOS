@@ -385,12 +385,22 @@ struct Sidebar: View {
                         HStack(spacing: 8) {
                             Image(systemName: workspace.kind == "worktree" ? "arrow.triangle.branch" : "folder")
                                 .font(.system(size: 13)).foregroundStyle(Color.accentColor).frame(width: 18)
-                            Text(workspace.name)
-                                .font(.system(size: 13, weight: model.selectedId == workspace.id ? .medium : .regular))
-                                .foregroundStyle(.primary).lineLimit(1)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(workspace.name)
+                                    .font(.system(size: 13, weight: model.selectedId == workspace.id ? .medium : .regular))
+                                    .foregroundStyle(.primary).lineLimit(1)
+                                if let job = model.deletion(workspace.id) {
+                                    Text(job.label).font(.caption2).foregroundStyle(job.status == "failed" ? Color.orange : Color.secondary).lineLimit(2)
+                                }
+                            }
                             Spacer(minLength: 0)
-                            WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
-                            WorkspaceActivityStatus(workspaceId: workspace.id)
+                            if let job = model.deletion(workspace.id) {
+                                if job.inProgress {ProgressView().controlSize(.mini)}
+                                else if job.status == "failed" {Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)}
+                            } else {
+                                WorkspaceChecksIndicator(workspace: workspace, visible: space.id == model.sidebarSpaces.active.id)
+                                WorkspaceActivityStatus(workspaceId: workspace.id)
+                            }
                         }
                         .padding(.leading, 24)
                         .padding(.vertical, 5)
@@ -411,7 +421,7 @@ struct Sidebar: View {
                             if workspace.kind == "worktree" {
                                 Button("worktreeを削除", role: .destructive) {
                                     deleteWorkspace(workspace)
-                                }.disabled(model.isBusy(workspace.id) || !model.connected || model.state.features?.contains("workspace.delete") != true)
+                                }.disabled(model.isBusy(workspace.id) || !model.connected || (!model.supportsDeletionJobs && model.state.features?.contains("workspace.delete") != true))
                             }
                         }
                     }
