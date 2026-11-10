@@ -1,0 +1,9 @@
+# Deployed by .github/workflows/update-worker.yml. See docs/updates.md.
+name = "neuraos-updates"
+main = "src/index.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[[r2_buckets]]
+binding = "UPDATES"
+bucket_name = "neuraos-updates"

@@ -13,3 +13,4 @@ apps/macos/.cef/
 
 crates/native-core/target/
 .native/
+.wrangler/

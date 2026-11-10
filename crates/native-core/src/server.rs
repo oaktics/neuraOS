@@ -235,6 +235,9 @@ impl AppState {
         s["features"] = json!(FEATURES);
         s["runtime"] = json!("rust");
         s["daemonInstanceId"] = json!(self.epoch);
+        // Release builds embed the same number as the app's CFBundleVersion so
+        // the bundled updater can tell when the running daemon is stale.
+        s["daemonBuild"] = json!(daemon_build());
         Ok(s)
     }
     pub async fn shutdown(&self) -> Result<(), ApiError> {
@@ -1770,4 +1773,12 @@ async fn start_setup(
         .insert(key, SetupJob { cancel, task });
     let _ = begin.send(());
     Ok(())
+}
+
+/// Build number of this executable (`NEURA_BUILD_NUMBER` at compile time).
+/// Development builds without a number report `null`.
+pub fn daemon_build() -> Option<u64> {
+    option_env!("NEURA_BUILD_NUMBER")
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
 }

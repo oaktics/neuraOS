@@ -70,6 +70,8 @@ try {
   await cp(join(original, 'MacOS/NeuraOS'), join(app, 'Contents/MacOS/NeuraOS'));
   await cp(join(original, 'Info.plist'), join(app, 'Contents/Info.plist'));
   await cp(join(original, 'Resources/NeuraOS_NeuraOS.bundle'), join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
+  // The executable links Sparkle.framework at launch.
+  await cp(join(original, 'Frameworks'), join(app, 'Contents/Frameworks'), {recursive: true, verbatimSymlinks: true});
   const executable = join(app, 'Contents/MacOS/NeuraOS');
   execFileSync(executable, ['--check-bundled-resources'], {stdio: 'inherit', timeout: 15000});
   // A unique bundle ID isolates UserDefaults; explicit endpoints isolate app data and services.
@@ -77,7 +79,6 @@ try {
   for (const [key, value] of [['CFBundleIdentifier', 'com.neuraos.reliability-smoke.' + process.pid], ['NeuraDataDirectory', data], ['NeuraEndpoint', 'http://127.0.0.1:1']]) {
     execFileSync('/usr/bin/plutil', ['-replace', key, '-string', value, plist]);
   }
-  await cp(join(original, 'Frameworks'), join(app, 'Contents/Frameworks'), {recursive: true, verbatimSymlinks: true});
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], {stdio: 'inherit'});
   const report = join(data, 'diagnostic-report.json');
   // Run the actual event pump. AX performPress alone misses native modal click routing bugs.
