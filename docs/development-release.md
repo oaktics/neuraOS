@@ -6,8 +6,8 @@
 2. GitHubサイドバーからPush → `staging`向けにPR作成。PR本文に変更内容と確認結果を書く。
 3. CI `native-development / macos` とレビューを確認して`staging`へマージする。この段階ではリリースしない。
 4. 複数の変更をまとめて動作確認したら、`staging` → `main` のリリースPRを作成する。`native-release / build` がApple Silicon向けのアプリ・配布パッケージをビルドし、パッケージ試験まで実行する。PRでは公開しない。
-5. 確認後、リリースPRを**merge commit**で`main`へマージする。`native-release`がマージ後のソースを再検証し、成功したときだけGitHub Release `native-N` を公開する。Intel向けのビルド・配布は廃止。
-6. native版同士はneuraOSメニュー → **アップデートを確認…** → **更新して再起動**。build62以前からの初回native移行は下記の専用手順を使う。
+5. 確認後、リリースPRを**merge commit**で`main`へマージする。`native-release`がマージ後のソースを再検証し、成功したときだけCloudflare R2の更新フィード（と移行期間中はGitHub Release `native-N`）へ公開する。Intel向けのビルド・配布は廃止。
+6. 各Macでは1日以内に更新通知が出る。すぐ確認する場合はneuraOSメニュー → **アップデートを確認…** → **インストールして再起動**。仕組み・初回セットアップ・旧updaterからの移行は[アップデート配信](updates.md)を参照。
 
 ## ブランチ設定
 
@@ -34,55 +34,20 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 
 新規導入ではGitHub Releasesの`neuraOS-darwin-arm64.zip`（Apple Silicon専用）を展開し、`~/Applications/neuraOS.app`へ置く。初回起動時は同梱native helperがLaunchAgentを確認する。既存LaunchAgentにrunning PIDがあれば、旧Node版や別パスのnative版でも温存する。停止中・未登録の場合だけ再登録する。新bundleを別場所から開くだけでは稼働サービスを置換しない。移行は明示的なupdater applyまたはservice installで行い、その前に作業を保存する。既存Node版からの移行は、アプリだけを手動上書きして完了とせず、以下のnative updaterでアプリとLaunchAgentを一緒に移行する。
 
-Runtimeは`bin/neura-native-core`（Rust daemon／PTY／SQLite／provider／MCP）と`bin/neura-updater`（Swift更新helper）の2実行ファイルだけで構成する。これはRuntimeディレクトリの構成であり、Swift UI・CEF framework/helper・Sleep serviceを含むアプリ全体が2プロセスだけという意味ではない。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Git／GitHub CLIなどの開発CLIは引き続き各自の環境を使う。
+Runtimeは`bin/neura-native-core`（Rust daemon／PTY／SQLite／provider／MCP）と`bin/neura-updater`（LaunchAgentの登録とDaemon切替を行うSwift helper）の2実行ファイルだけで構成する。アプリ本体の置換はSparkle.frameworkが行う。これはRuntimeディレクトリの構成であり、Swift UI・CEF framework/helper・Sleep serviceを含むアプリ全体が2プロセスだけという意味ではない。neuraOSの配布RuntimeにNode.js・tsx・node_modulesは含めない。更新にXcode・pnpm・ソースチェックアウトは不要。Codex／Claude／Git／GitHub CLIなどの開発CLIは引き続き各自の環境を使う。
 
-公開リポジトリはGitHub APIとHTTPSから直接更新する。非公開リポジトリは`gh auth login --hostname github.com`済みのGitHub CLIが必要。認証情報をアプリへコピー・保存しない。公開／非公開の設定自体はこの変更では変更しない。
+更新はSparkleがCloudflare R2のフィードから取得する（[アップデート配信](updates.md)）。リポジトリの公開・非公開に依存せず、利用者のMacに`gh`のログインは不要。
 
 公開用ビルドはDeveloper ID Application署名・Appleの公証・チケット添付・Gatekeeper検証を必須とする。資格情報が未設定、署名失敗、公証がAccepted以外の場合は公開しない。設定手順とローカル開発時のKeychain許可については[macOS署名と公証](macos-signing.md)を参照。通常のPR検証は明示的なad-hoc署名で実行し、署名用の秘密鍵を渡さない。
 
-## build62以前からの初回native移行
-
-build62の旧updaterは新アーカイブにも`Runtime/bin/node`を要求し、適用時にNode・tsx・`service.ts`を使う。このため**旧「更新して再起動」だけではNodeを含まないnative版へ直接移行できない**。新しい署名・公証済み公開成果物のhelperを直接使う。以下は利用者が移行を決め、全作業を保存した後の手順であり、開発検証中の通常installed app／daemonには実行しない。
-
-1. GitHub Releasesから公開済みの`neuraOS-darwin-arm64.zip`を取得し、Downloads等に展開する。現在の`~/Applications/neuraOS.app`はまだ上書きしない。
-2. 展開した新アプリ内のhelperを絶対パスで指定し、更新対象tagを確認する。
-
-   ```sh
-   HELPER="$HOME/Downloads/neuraOS.app/Contents/Resources/Runtime/bin/neura-updater"
-   "$HELPER" check
-   ```
-
-3. `check`が返した`native-N`と、現在の**旧neuraOS UIアプリ**のPID（daemonやTerminalのPIDではない、1より大きい値）を指定する。以下の`native-N`と`OLD_APP_PID`は実値へ置き換える。
-
-   ```sh
-   "$HELPER" prepare native-N OLD_APP_PID
-   ```
-
-   helperは公式Releaseを再ダウンロードするため、展開済みbundleだけのoffline installではない。アーカイブはファイルへダウンロードし、SHA-256を1 MiBずつ読み込んで検証するため、CEFを含むZIP全体をメモリへ読み込まない。最新tag一致・署名・Gatekeeper・bundle ID・build番号・native Runtimeも検証する。`{"ready":true}`は準備完了であり移行完了ではない。prepare中に先に旧UIを終了せず、この応答後60秒以内に通常終了する。終了しなければappを置き換える前に中止する。`prepare`がstageへhelperをコピーして`apply`を自動起動するので、`apply`を手動で重ねて実行しない。
-
-   旧UIが起動不能または既に完全終了している場合は、短命のshellの終了を待つ次の形を使う（`native-N`は実値へ置き換える）。旧UIがまだ動いている状態では使わない。sudoは不要。
-
-   ```sh
-   /bin/sh -c '"$1" prepare "$2" "$$"' sh "$HELPER" native-N
-   ```
-
-4. helperが旧appを`~/Applications/neuraOS.app.previous`へ退避し、新appを配置する。旧LaunchAgent plistも`~/Library/Application Support/neuraOS/Updates/previous-launch-agent.plist`へ保存する。Daemonを停止・再登録し、認証付きHTTP health確認後に新appを開く。healthはHTTP 200に加え`runtime: "rust"`、有効なUUIDの`daemonInstanceId`、置換前と異なるinstanceであることを要求し、旧Nodeの200応答や旧native instanceを成功と誤認しない。既存PTY／エージェントは終了する。
-5. 新appのbuild番号、native daemonへの接続、履歴復元を確認する。これをRelease公開・署名公証・fixture成功とは別のinstalled-app受入として記録する。
-
-登録やhealth確認の失敗時は、helperが旧appと旧plistを戻して旧daemonの再登録を試みる。復元の成否はサービス状態と`Updates/last-error.txt`を確認する。旧プロセスの実行継続やDBの巻き戻しは保証しない。復元自体に失敗した場合は`.previous`と保存plistを保持し、進行中のhelperがないことを確認してから調査・復旧する。再実行は既存backupを置き換えるため、原因を確認せず連打しない。
-
-2026-10-29の隔離fixtureでは、旧Node Runtimeを模したappからの移行成功と、health失敗時の旧app・plist復元を含むSwift updater 12 testsが通過した（packaging担当の記録: `/tmp/neura-native-migration-tests.log`）。`launchctl`／`open`／healthはmockで、公開Releaseのdownloadから実ユーザー環境へのapplyを実証したものではない。Developer ID署名済み検証bundle自体は未公証で、そのhelperの直接起動も不正PIDを変更前に拒否するところまでの確認である。通常installed app／daemonはこの検証で変更していない。
-
-追加の`854cc25`では稼働サービス温存・新native instance判定・ファイルdownload／stream hashを実装し、Swift updater 17 testsが成功した（`/tmp/neura-native-review-fixes-tests-final.log`）。続く`5014291`で`pnpm dev`も`service ensure`へ変更し、稼働サービス温存を含む18 testsが成功した（`/tmp/neura-native-dev-preservation-tests.log`）。これらは隔離fixtureの結果であり、最新の署名済み候補からの実サービス移行は別の未実施項目である。
-
 ## 更新の保証範囲
 
-- 更新番号はreleaseワークフローの`github.run_number`。アプリへ同じ番号を埋め込み、現在より新しい番号だけを案内する。
-- Apple Silicon向けの成果物をDraft ReleaseへアップロードしてからLatestとして公開する。ビルド・試験失敗時は公開しない。
-- アーキテクチャ、GitHub assetのSHA-256、署名整合性・Gatekeeperの受理、bundle ID、ビルド番号を検証してから適用する。SHA-256はGitHub APIの認証されたメタデータとの一致確認であり、更新プログラム自体は署名者のTeam IDを固定していない。公開時のDeveloper ID署名・公証・Gatekeeper検証とは別の保証範囲である。
-- 明示的な更新操作後にアプリを終了し、ユーザー所有の`~/Applications/neuraOS.app`を入れ替え、Daemonを再登録する。実行中のPTY／エージェントは終了する。保存済みプロジェクト・履歴は既存のDeveloperディレクトリを引き継ぐ。
-- 旧アプリは`~/Applications/neuraOS.app.previous`へ保存する。起動確認失敗時はアプリとLaunchAgent設定を戻す。更新前の実行プロセスそのものやDBの巻き戻しはしない。将来のDB変更は旧版互換の追加方式とし、破壊的な変更には別途バックアップ・復元設計が必要。
-- 更新失敗は`~/Library/Application Support/neuraOS/Updates/last-error.txt`へ記録する。インストーラーが強制終了した場合は、更新処理が動いていないことを確認して同フォルダの`install.lock`を削除して再試行する。
+- 更新番号はreleaseワークフローの`github.run_number`。アプリの`CFBundleVersion`、Daemonの`daemonBuild`、appcastの`sparkle:version`に同じ番号を入れる。Sparkleは現在より新しい番号だけを案内する。
+- ビルド・試験・公証が失敗した場合は公開しない。R2へはZIP → appcastの順に置き、appcastには自分より新しいビルドがあれば書き込まない。
+- SparkleがZIPのEdDSA署名と、新アプリのDeveloper ID（Team ID）が現行と一致することを検証してから置換する。
+- 置換後の再起動で`neura-updater reconcile`がDaemonを切り替える。実行中のPTY／エージェントは終了する。保存済みプロジェクト・履歴は既存のDeveloperディレクトリを引き継ぐ。明示的な「インストールして再起動」以外の経路では切替前に確認する。
+- アプリ本体の自動ロールバックはしない。Daemon切替の失敗は`~/Library/Application Support/neuraOS/Updates/last-error.txt`に記録し、次回起動時に表示する。将来のDB変更は旧版互換の追加方式とし、破壊的な変更には別途バックアップ・復元設計が必要。
+- 詳細は[アップデート配信](updates.md)。
 
 ## ローカル検証
 

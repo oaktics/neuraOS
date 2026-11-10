@@ -12,7 +12,8 @@ let package = Package(
         .package(url: "https://github.com/smittytone/HighlighterSwift.git", exact: "3.1.0"),
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
-        .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0")
+        .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")
     ],
     targets: [.target(name: "NeuraUpdateKit"),
               .executableTarget(name: "NeuraUpdater", dependencies: ["NeuraUpdateKit"]),
@@ -28,8 +29,11 @@ let package = Package(
         .product(name: "SwiftTerm", package: "SwiftTerm"),
         .product(name: "MarkdownUI", package: "swift-markdown-ui"),
         .product(name: "cmark-gfm", package: "swift-cmark"),
-        .product(name: "cmark-gfm-extensions", package: "swift-cmark")
-    ], resources: [.process("Resources")]),
+        .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
+        .product(name: "Sparkle", package: "Sparkle")
+    ], resources: [.process("Resources")],
+    // Sparkle.framework is embedded in Contents/Frameworks by scripts/native/build.mjs.
+    linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
               .testTarget(name: "NeuraOSTests", dependencies: ["NeuraOS", "SleepControl"])],
     swiftLanguageModes: [.v5],
     cxxLanguageStandard: .cxx20

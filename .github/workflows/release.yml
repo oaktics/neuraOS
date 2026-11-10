@@ -41,6 +41,10 @@ jobs:
     env:
       NEURA_SIGN_IDENTITY: ${{ github.event_name == 'pull_request' && '-' || vars.APPLE_SIGN_IDENTITY }}
       NEURA_REQUIRE_DEVELOPER_ID: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      # Release builds embed the Sparkle feed and EdDSA public key (docs/updates.md).
+      NEURA_REQUIRE_UPDATE_FEED: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+      NEURA_UPDATE_FEED_URL: ${{ github.event_name != 'pull_request' && format('{0}/appcast.xml', vars.UPDATE_BASE_URL) || '' }}
+      NEURA_SPARKLE_PUBLIC_KEY: ${{ github.event_name != 'pull_request' && vars.SPARKLE_PUBLIC_KEY || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -167,10 +171,50 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.13.0'
       - uses: actions/download-artifact@v4
         with:
           name: neuraOS-arm64
+      # Sparkle update feed on Cloudflare R2, served by infra/update-worker.
+      # This works regardless of the repository's visibility.
+      - name: Publish to update feed
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          NEURA_SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+          UPDATE_BASE_URL: ${{ vars.UPDATE_BASE_URL }}
+          BUILD: ${{ github.run_number }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          wrangler() { npx --yes wrangler@4.160.0 "$@"; }
+          bucket=neuraos-updates
+          status=$(curl -sS -o current-appcast.xml -w '%{http_code}' "$UPDATE_BASE_URL/appcast.xml")
+          case "$status" in
+            200) ;;
+            404) rm -f current-appcast.xml; echo "No appcast yet: publishing the first release." ;;
+            *) echo "Unable to read the current appcast (HTTP $status)"; exit 1 ;;
+          esac
+          node scripts/native/release/appcast.mjs --archive neuraOS-darwin-arm64.zip --build "$BUILD" \
+            --version "$(node -p "require('./package.json').version")" --base-url "$UPDATE_BASE_URL" \
+            --existing current-appcast.xml --out appcast.xml --removed removed.txt --commit "$COMMIT"
+          if [ ! -f appcast.xml ]; then exit 0; fi
+          # Archive first, feed last: clients never see an item whose archive is missing.
+          wrangler r2 object put "$bucket/releases/neuraOS-$BUILD-darwin-arm64.zip" --remote \
+            --file neuraOS-darwin-arm64.zip --content-type application/zip
+          wrangler r2 object put "$bucket/appcast.xml" --remote --file appcast.xml --content-type 'application/xml; charset=utf-8'
+          while IFS= read -r key; do
+            [ -n "$key" ] && wrangler r2 object delete "$bucket/$key" --remote
+          done < removed.txt
+      # Builds before Sparkle (native-76 and older) update only from GitHub
+      # Releases. Keep publishing until every installed copy has moved to the
+      # Sparkle build; then set the repository variable PUBLISH_GITHUB_RELEASE=false.
       - name: Publish complete release
+        if: vars.PUBLISH_GITHUB_RELEASE != 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
