@@ -281,7 +281,10 @@ struct WorkspaceView: View {
                 let active = layout.selectedId == item.id
                 let visible = active && model.selectedId == workspace.id && !deletionBlocked
                 Group {
-                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible)}
+                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, onOpenURL: {url in
+                        guard !deletionBlocked else {return}
+                        layout.openBrowser(url, workspaceId: workspace.id)
+                    })}
                     else if item.kind == "file", let path = item.filePath {
                         FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                     }
@@ -477,6 +480,7 @@ struct TerminalPane: View {
     let provider: String
     @Binding var terminalId: String?
     let visible: Bool
+    let onOpenURL: (URL) -> Void
     @State private var showStop = false
     @State private var hasBeenVisible = false
     @State private var attemptedAutoStart = false
@@ -495,7 +499,7 @@ struct TerminalPane: View {
                         Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)
                     }
                 }.padding(.horizontal, 8).frame(height: 24)
-                if visible || hasBeenVisible {NativeTerminal(terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
+                if visible || hasBeenVisible {NativeTerminal(onOpenURL: onOpenURL, terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
                 else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
             } else {
                 VStack(spacing: 16) {
