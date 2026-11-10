@@ -71,16 +71,32 @@ TOOLS=apps/macos/.build/artifacts/sparkle/Sparkle/bin
 
 ### 2. Cloudflare
 
+配信先は個人アカウントの`neuraos-updates`（R2バケットとWorker）で、URLは`https://neuraos.kiichi.dev`（`kiichi.dev`ゾーンのWorkerカスタムドメイン）。アカウントIDは`wrangler.toml`に固定してある。
+
 ```sh
 cd infra/update-worker
 npx --yes wrangler@4.160.0 login
-npx --yes wrangler@4.160.0 r2 bucket create neuraos-updates
-npx --yes wrangler@4.160.0 deploy      # https://neuraos-updates.<subdomain>.workers.dev
+npx --yes wrangler@4.160.0 r2 bucket create neuraos-updates   # 作成済み
+npx --yes wrangler@4.160.0 deploy                             # 以後はCIが実行
 ```
 
-- 表示されたWorkerのURL（末尾の`/`なし）→ Repository variable `UPDATE_BASE_URL`。独自ドメインにする場合は`wrangler.toml`に`routes`を追加し、そのURLを設定する。**このURLはアプリに埋め込まれるため、後から変えると旧版は新URLを知らない。** 変える場合は旧URLでも配信を続ける。
-- APIトークン（Account › Workers Scripts: Edit、Account › Workers R2 Storage: Edit）→ Repository secret `CLOUDFLARE_API_TOKEN`
-- アカウントID → Repository secret `CLOUDFLARE_ACCOUNT_ID`
+GitHubの設定:
+
+| 種類 | 名前 | 値 |
+| --- | --- | --- |
+| variable | `UPDATE_BASE_URL` | `https://neuraos.kiichi.dev` |
+| variable | `SPARKLE_PUBLIC_KEY` | Sparkleの公開鍵 |
+| secret | `SPARKLE_ED_PRIVATE_KEY` | Sparkleの秘密鍵 |
+| secret | `CLOUDFLARE_ACCOUNT_ID` | `992d812f2e80c8534fe771ebc398af07` |
+| secret | `CLOUDFLARE_API_TOKEN` | 下記のAPIトークン |
+
+APIトークンはダッシュボードの「My Profile → API Tokens → Create Token → Custom token」で作る。権限は次のとおり。
+
+- Account › Workers R2 Storage › Edit（リリースのアップロード・削除）
+- Account › Workers Scripts › Edit（Workerのデプロイ）
+- Zone › Workers Routes › Edit、Zone › DNS › Edit（カスタムドメイン。Zone Resourcesは`kiichi.dev`のみ）
+
+**`UPDATE_BASE_URL`はアプリに埋め込まれるため、後から変えると旧版は新しいURLを知らない。** 変える場合も、旧URLでの配信は続ける。
 
 以後、`infra/update-worker/`の変更は`update-worker`ワークフローがmainへのpush時にデプロイする。
 
