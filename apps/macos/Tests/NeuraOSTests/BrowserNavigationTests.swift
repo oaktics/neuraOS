@@ -1,5 +1,6 @@
 import XCTest
 import SwiftTerm
+import SwiftUI
 @testable import NeuraOS
 
 final class BrowserNavigationTests: XCTestCase {
@@ -59,6 +60,60 @@ final class BrowserNavigationTests: XCTestCase {
                 layout.tabs.removeAll {$0.kind == "browser"}
                 XCTAssertEqual(layout.tabs, [conversation])
             }
+        }
+    }
+
+    @MainActor func testRenderedAgentClicksUseExplicitWorkspaceRouteInsteadOfOpenURLEnvironment() throws {
+        _ = NSApplication.shared
+        let suite = "RenderedAgentLinks.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {defaults.removePersistentDomain(forName: suite)}
+        for provider in ["codex", "claude"] {
+            let workspace = "workspace-" + provider
+            var layout = WorkspaceTabState()
+            let record = TerminalRecord(id: provider, workspaceId: workspace, provider: provider, status: "exited", cols: 80, rows: 24)
+            func content(_ route: @escaping (URL) -> Void) -> some View {
+                NativeTerminal(onOpenURL: route, terminal: record, api: DaemonClient(), visible: false, onError: {_ in XCTFail("Unexpected API call")})
+                    .environment(\.openURL, OpenURLAction {_ in
+                        XCTFail("Terminal links must not reach the system OpenURL route")
+                        return .discarded
+                    })
+            }
+            let route: (URL) -> Void = {_ = layout.openBrowser($0, workspaceId: workspace, defaults: defaults)}
+            let host = NSHostingView(rootView: content(route))
+            let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 800, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            func terminal(in view: NSView) -> NativeTerminalView? {
+                if let terminal = view as? NativeTerminalView {return terminal}
+                return view.subviews.lazy.compactMap {terminal(in: $0)}.first
+            }
+            let view = try XCTUnwrap(terminal(in: host))
+            let coordinator = try XCTUnwrap(view.terminalDelegate as? NativeTerminal.Coordinator)
+            // Avoid daemon polling: these tests exercise the real renderer and mouse route.
+            coordinator.stop()
+            defer {window.contentView = nil}
+            for (index, url) in ["http://localhost:3000/path", "https://example.com/path#fragment"].enumerated() {
+                for explicit in [false, true] {
+                    view.feed(text: "\u{1b}[2J\u{1b}[H")
+                    view.feed(text: explicit ? "\u{1b}]8;;\(url)\u{1b}\\click here\u{1b}]8;;\u{1b}\\" : url)
+                    let point = view.convert(NSPoint(x: 8, y: view.bounds.height - 8), to: nil)
+                    let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [.command], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
+                    view.mouseUp(with: event)
+                    XCTAssertEqual(layout.tabs.count, index * 2 + (explicit ? 2 : 1))
+                    let tab = try XCTUnwrap(layout.tabs.last)
+                    XCTAssertEqual(layout.selectedId, tab.id)
+                    XCTAssertEqual(defaults.string(forKey: "browser.\(workspace).\(tab.id)"), url)
+                    XCTAssertNil(defaults.string(forKey: "browser.other.\(tab.id)"))
+                }
+            }
+            // A reused representable must replace, rather than retain, its prior callback.
+            var updated: [URL] = []
+            host.rootView = content {updated.append($0)}
+            host.layoutSubtreeIfNeeded()
+            view.terminalDelegate?.requestOpenLink(source: view, link: "https://updated.example", params: [:])
+            XCTAssertEqual(updated.map(\.absoluteString), ["https://updated.example"])
+            XCTAssertEqual(layout.tabs.count, 4)
         }
     }
 

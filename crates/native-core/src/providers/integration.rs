@@ -344,7 +344,11 @@ impl ProviderService {
             Ok(())
         }
         .await;
-        supported.insert(program.into(), result.clone());
+        // A slow cold start or a CLI update must not poison every later launch
+        // for the lifetime of the daemon. Retry failed checks on the next open.
+        if result.is_ok() {
+            supported.insert(program.into(), result.clone());
+        }
         result
     }
     pub async fn channel(self: &Arc<Self>, terminal: &str) -> Result<Value> {

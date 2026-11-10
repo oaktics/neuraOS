@@ -128,7 +128,8 @@ class NativeTerminalView: TerminalView {
 
 /// Renderer only. The UI never owns a PTY or starts a subprocess.
 struct NativeTerminal: NSViewRepresentable {
-    @Environment(\.openURL) private var openURL
+    // Require the owning workspace route; the default OpenURLAction opens externally.
+    let onOpenURL: (URL) -> Void
     let terminal: TerminalRecord
     let api: DaemonClient
     let visible: Bool
@@ -138,7 +139,7 @@ struct NativeTerminal: NSViewRepresentable {
         let view = NativeTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600), font: .monospacedSystemFont(ofSize: 13, weight: .regular))
         view.provider = terminal.provider
         view.updateAppearanceColors()
-        context.coordinator.openLink = {openURL($0)}
+        context.coordinator.openLink = onOpenURL
         view.terminalDelegate = context.coordinator
         context.coordinator.view = view
         view.acceptsFileInput = { [weak coordinator = context.coordinator] in
@@ -151,7 +152,7 @@ struct NativeTerminal: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: TerminalView, context: Context) {
-        context.coordinator.openLink = {openURL($0)}
+        context.coordinator.openLink = onOpenURL
         context.coordinator.updateStatus(terminal.status)
         context.coordinator.setVisible(visible)
     }
