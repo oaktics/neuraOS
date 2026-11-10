@@ -25,9 +25,11 @@ async function serve(request, bucket, key, cacheControl) {
   if (!('body' in object)) return new Response(null, {status: 304, headers: result});
   let status = 200;
   if (object.range && request.headers.has('range')) {
+    // R2 returns {offset, length} or {suffix}; absent members may be present as undefined.
     const range = object.range;
-    const offset = 'suffix' in range ? object.size - range.suffix : range.offset ?? 0;
-    const length = 'suffix' in range ? range.suffix : range.length ?? object.size - offset;
+    const suffix = typeof range.suffix === 'number';
+    const offset = suffix ? object.size - range.suffix : range.offset ?? 0;
+    const length = suffix ? range.suffix : range.length ?? object.size - offset;
     result.set('content-range', `bytes ${offset}-${offset + length - 1}/${object.size}`);
     result.set('content-length', String(length));
     status = 206;

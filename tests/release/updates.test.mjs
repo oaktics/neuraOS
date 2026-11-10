@@ -75,8 +75,9 @@ function bucket(files) {
     let slice = bytes, selected;
     const match = header && /^bytes=(\d*)-(\d*)$/.exec(header);
     if (match) {
-      selected = match[1] === '' ? {suffix: Number(match[2])} : {offset: Number(match[1]), length: (match[2] === '' ? bytes.length - 1 : Number(match[2])) - Number(match[1]) + 1};
-      slice = 'suffix' in selected ? bytes.subarray(bytes.length - selected.suffix) : bytes.subarray(selected.offset, selected.offset + selected.length);
+      // Like production R2, the unused member is present but undefined.
+      selected = match[1] === '' ? {offset: undefined, length: undefined, suffix: Number(match[2])} : {offset: Number(match[1]), length: (match[2] === '' ? bytes.length - 1 : Number(match[2])) - Number(match[1]) + 1, suffix: undefined};
+      slice = selected.suffix !== undefined ? bytes.subarray(bytes.length - selected.suffix) : bytes.subarray(selected.offset, selected.offset + selected.length);
     }
     return {size: bytes.length, range: selected, httpEtag: '"e"', body: new Blob([slice]).stream(),
       writeHttpMetadata: headers => headers.set('content-type', key.endsWith('.xml') ? 'application/xml' : 'application/zip')};
