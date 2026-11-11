@@ -110,9 +110,11 @@ test('terminal input is not queued behind a slow mutation of the same workspace,
   let stopped=false;const started=Date.now(),stop=f.command({type:'terminal.stop',terminalId:slow.id}).then(r=>{stopped=true;return r;});
   await sleep(150);
   const input=await success(f.command({type:'terminal.input',terminalId:typed.id,clientId,data:"printf 'typed-%s\\n' during-stop\n"}));
+  // Checked on the command reply itself: the stop cannot finish before its 1.5 s
+  // kill escalation, so only an input held behind it can observe it finished.
+  assert.equal(stopped,false,`input must not wait for the stop (${Date.now()-started} ms)`);
   assert.deepEqual(input,{ok:true});
   await eventually(async()=>/typed-during-stop/.test((await text(typed.id)).data));
-  assert.equal(stopped,false,`input and its output must not wait for the ${Date.now()-started} ms stop`);
   assert.equal((await stop).status,200);assert.ok(Date.now()-started>=1000,'fixture stop must outlast the input');
   // Both encodings of one page agree, carry the terminal fields, and a missing terminal is still 404.
   const joined=await success(f.request(`/v1/terminals/${typed.id}/output?after=0`)),compact=await success(f.request(`/v1/terminals/${typed.id}/output?after=0&chunksOnly=true`));

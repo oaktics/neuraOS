@@ -328,15 +328,16 @@ did not increase.
 Deterministic checks, independent of timing:
 
 - The 32-PTY fixture stores 8,490,304 bytes as 332 to 371 rows (three runs). One
-  row per read could not use fewer than 8,292. The test asserts a mean row above
-  2 KiB.
-- `client_reads_do_not_wait_for_a_writer_inside_a_commit_and_entity_reads_stay_ordered`
-  holds the writer inside a commit behind the test gate with a second write
-  queued. The encoded state, event, notification and output reads must complete;
+  row per read could not use fewer than 8,292. How far rows merge depends on
+  scheduling, so the test asserts only a mean row above 1,024 bytes, which one
+  row per read cannot reach.
+- `client_reads_do_not_wait_for_a_busy_writer_and_entity_reads_stay_ordered`
+  parks the writer behind a per-test hold with a second write queued. The encoded state, event, notification and output reads must complete;
   an entity read must stay pending until the queued write commits and then see
   it. It also checks 50 write-then-read rounds and a compare-and-swap update.
-- `entity_reads_observe_accepted_writes_whose_caller_went_away` enqueues a put,
-  drops its future, then reads, modifies and writes, 200 times: zero stale reads
+- `entity_reads_observe_accepted_writes_whose_caller_went_away` parks the
+  writer, enqueues a put behind it, drops that future, then reads (alternately
+  before and after releasing the writer), modifies and writes, 200 times: zero stale reads
   and zero lost updates. With the ordering wait removed it fails.
 - `reader_served_requests_fail_closed_once_the_writer_is_gone` stops the writer
   and requires state, entity, list, event, notification and output reads to

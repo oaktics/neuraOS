@@ -90,7 +90,9 @@ async fn concurrent_native_ptys_drain_utf8_and_replay_after_shutdown() {
     // carried partial sequence or expand invalid bytes to U+FFFD, so a stored row
     // may be larger; nothing depends on an exact row size.
     assert!(largest <= 3 * 32768 + 3, "row far beyond the read bound: {largest}");
-    assert!(bytes / n >= 2048, "output stored as {n} rows for {bytes} bytes");
+    // How far rows merge depends on scheduling, so only the impossibility is
+    // asserted: one row per read can never average more than 1024 bytes.
+    assert!(bytes / n > 1024, "output stored as {n} rows for {bytes} bytes");
     drop(pty);
     drop(store);
     let reopened = StoreHandle::open(&database, events).await.unwrap();

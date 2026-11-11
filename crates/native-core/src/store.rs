@@ -150,6 +150,10 @@ fn delete_workspace(db: &Connection, id: &str) -> Result<(), String> {
     db.execute("INSERT INTO events(kind,entityId,at) VALUES('workspaces',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",[id]).map_err(|e|e.to_string())?;
     Ok(())
 }
+/// Writer holds keyed per test: present = the writer is parked, true = released.
+#[cfg(test)]
+static TEST_HOLDS: (std::sync::Mutex<std::collections::BTreeMap<String, bool>>, std::sync::Condvar) =
+    (std::sync::Mutex::new(std::collections::BTreeMap::new()), std::sync::Condvar::new());
 #[cfg(test)]
 static TEST_COMMIT_GATE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
 /// Statements that never write. The writer serves them in FIFO order when asked;
@@ -355,6 +359,21 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
             Ok(Value::Null)
         },
         "barrier" => Ok(json!({})),
+        #[cfg(test)]
+        "test_hold" => {
+            // Parks the writer until the test releases this key, so a test can
+            // place jobs behind it instead of racing the writer thread.
+            let key = a["key"].as_str().ok_or("key")?;
+            let (lock, wake) = &TEST_HOLDS;
+            let mut holds = lock.lock().unwrap();
+            holds.insert(key.into(), false);
+            wake.notify_all();
+            while !holds[key] {
+                holds = wake.wait(holds).unwrap();
+            }
+            holds.remove(key);
+            Ok(Value::Null)
+        }
         #[cfg(test)]
         "test_abandon_transaction" => {
             // Leaves the writer inside a transaction, which makes it close its queues.
@@ -1416,8 +1435,43 @@ mod read_lane_tests {
         assert_eq!(limited["chunks"].as_array().unwrap().len(), 3);
         assert_eq!(limited["chunks"], output(&db, &args).unwrap()["chunks"]);
     }
+    type Pending<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+    /// Parks the writer and returns once it is parked. Nothing here depends on
+    /// which thread runs first: the job is enqueued by one poll and the test then
+    /// blocks until the writer reports that it is inside the hold.
+    async fn hold(store: &StoreHandle) -> (String, Pending<'_, Result<Value, ApiError>>) {
+        let key = uuid::Uuid::new_v4().to_string();
+        let mut held: Pending<'_, _> = Box::pin(store.call("test_hold", json!({"key":key})));
+        assert!(futures_util::poll!(&mut held).is_pending());
+        let parked = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let (lock, wake) = &TEST_HOLDS;
+            let mut holds = lock.lock().unwrap();
+            while !holds.contains_key(&parked) {
+                holds = wake.wait(holds).unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        (key, held)
+    }
+    fn release(key: &str) {
+        let (lock, wake) = &TEST_HOLDS;
+        *lock.lock().unwrap().get_mut(key).unwrap() = true;
+        wake.notify_all();
+    }
+    /// One poll moves a store call into its queue (credits and queue space are
+    /// free in these tests). While the writer is parked it cannot have a reply.
+    fn enqueue<'a, T>(call: impl std::future::Future<Output = T> + 'a) -> Pending<'a, T> {
+        let mut call: Pending<'a, T> = Box::pin(call);
+        assert!(
+            futures_util::FutureExt::now_or_never(&mut call).is_none(),
+            "a call behind a parked writer cannot complete"
+        );
+        call
+    }
     #[tokio::test]
-    async fn client_reads_do_not_wait_for_a_writer_inside_a_commit_and_entity_reads_stay_ordered() {
+    async fn client_reads_do_not_wait_for_a_busy_writer_and_entity_reads_stay_ordered() {
         let dir = std::env::temp_dir().join(format!("neura-store-read-lane-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let (events, _) = broadcast::channel(8);
@@ -1429,36 +1483,31 @@ mod read_lane_tests {
         assert_eq!(pragma("PRAGMA synchronous").await["synchronous"], 2);
         assert_eq!(pragma("PRAGMA journal_mode").await["journal_mode"], "wal");
         assert_eq!(pragma("PRAGMA journal_size_limit").await["journal_size_limit"], 64 * 1024 * 1024);
-        // The writer enters an explicit commit and stays there; a second write queues behind it.
-        let writer = store.clone();
-        let slow = tokio::spawn(async move { writer.call("test_slow_commit", json!({})).await });
-        let writer = store.clone();
-        let queued = tokio::spawn(async move { writer.put("projects", json!({"id":"p"}), None).await });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let reads = async {
-            let state = store.call("state_json", json!({"hostName":"h"})).await.unwrap();
-            let state: Value = serde_json::from_str(&(state.as_str().unwrap().to_owned() + "}")).unwrap();
-            assert_eq!(state["terminals"][0]["id"], "t");
-            assert_eq!(state["projects"], json!([]));
-            assert_eq!(store.call("events", json!({"after":0})).await.unwrap().as_array().unwrap().len(), 1);
-            assert_eq!(store.call("notifications", json!({"after":0})).await.unwrap()["events"], json!([]));
-            let page = store.call("output_page", json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();
-            let page: Value = serde_json::from_str(page.as_str().unwrap()).unwrap();
-            assert_eq!(page["chunks"][0]["data"], "before");
-            assert_eq!(page["status"], "running");
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(5), reads).await.expect("reads waited for the writer");
-        // An entity read keeps its place behind the accepted put, as on the old FIFO.
-        let reader = store.clone();
-        let ordered = tokio::spawn(async move { reader.get("projects", "p").await });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(!slow.is_finished() && !queued.is_finished() && !ordered.is_finished());
-        *TEST_COMMIT_GATE.0.lock().unwrap() = true;
-        TEST_COMMIT_GATE.1.notify_all();
-        slow.await.unwrap().unwrap();
-        queued.await.unwrap().unwrap();
-        assert_eq!(ordered.await.unwrap().unwrap().unwrap()["id"], "p");
-        assert_eq!(store.call("state", json!({"hostName":"h"})).await.unwrap()["projects"][0]["id"], "p");
+        // The writer is parked; a second write is accepted behind it.
+        let (key, held) = hold(&store).await;
+        let queued = enqueue(store.put("projects", json!({"id":"p"}), None));
+        // Client reads are served without the writer. No deadline is needed: if
+        // they waited for it, this test would hang rather than pass.
+        let state = store.call("state_json", json!({"hostName":"h"})).await.unwrap();
+        let state: Value = serde_json::from_str(&(state.as_str().unwrap().to_owned() + "}")).unwrap();
+        assert_eq!(state["terminals"][0]["id"], "t");
+        assert_eq!(state["projects"], json!([]));
+        assert_eq!(store.call("events", json!({"after":0})).await.unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(store.call("notifications", json!({"after":0})).await.unwrap()["events"], json!([]));
+        let page = store.call("output_page", json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();
+        let page: Value = serde_json::from_str(page.as_str().unwrap()).unwrap();
+        assert_eq!(page["chunks"][0]["data"], "before");
+        assert_eq!(page["status"], "running");
+        // Entity reads keep their place behind the accepted put, as on the old FIFO.
+        let ordered = enqueue(store.get("projects", "p"));
+        let listed = enqueue(store.list("projects"));
+        let snapshot = enqueue(store.call("state", json!({"hostName":"h"})));
+        release(&key);
+        assert_eq!(ordered.await.unwrap().unwrap()["id"], "p");
+        assert_eq!(listed.await.unwrap()[0]["id"], "p");
+        assert_eq!(snapshot.await.unwrap()["projects"][0]["id"], "p");
+        held.await.unwrap();
+        queued.await.unwrap();
         assert_eq!(store.get("terminals", "t").await.unwrap().unwrap()["cols"], 80);
         assert_eq!(store.list("terminals").await.unwrap().len(), 1);
         // A write whose reply has been received is visible to the very next read.
@@ -1475,8 +1524,11 @@ mod read_lane_tests {
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
-    /// A handler can enqueue a write and lose its caller before the reply. The
-    /// next handler's read must still observe that accepted write.
+    /// A handler can enqueue a write and lose its caller before the reply. A read
+    /// issued after that write was accepted must observe it. Both interleavings
+    /// are forced rather than hoped for: the write is abandoned while the writer
+    /// is provably parked in front of it, and the read is issued either while the
+    /// write is still queued or after the writer has moved on.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn entity_reads_observe_accepted_writes_whose_caller_went_away() {
         let dir = std::env::temp_dir().join(format!("neura-store-accepted-{}", uuid::Uuid::new_v4()));
@@ -1486,12 +1538,21 @@ mod read_lane_tests {
         store.put("projects", json!({"id":"p","count":0}), None).await.unwrap();
         let (mut stale, mut lost) = (0, 0);
         for round in 1..=200 {
-            {
-                // Polled once: the write is in the writer's queue. Then abandoned.
-                let mut abandoned = Box::pin(store.put("projects", json!({"id":"p","count":round,"abandoned":true}), None));
-                assert!(futures_util::poll!(&mut abandoned).is_pending());
-            }
-            let mut current = store.get("projects", "p").await.unwrap().unwrap();
+            let (key, held) = hold(&store).await;
+            // Accepted into the queue behind the parked writer, then abandoned.
+            drop(enqueue(store.put("projects", json!({"id":"p","count":round,"abandoned":true}), None)));
+            let mut current = if round % 2 == 0 {
+                // Read issued while the abandoned write is still queued.
+                let read = enqueue(store.get("projects", "p"));
+                release(&key);
+                read.await.unwrap().unwrap()
+            } else {
+                // Read issued after the writer was released; it may or may not
+                // have reached the abandoned write yet.
+                release(&key);
+                store.get("projects", "p").await.unwrap().unwrap()
+            };
+            held.await.unwrap();
             if current["count"] != round { stale += 1; }
             assert_eq!(store.list("projects").await.unwrap()[0], current);
             assert_eq!(store.call("state", json!({})).await.unwrap()["projects"][0], current);
