@@ -2,7 +2,7 @@ mod deletions;
 use crate::performance;
 use crate::{error::ApiError, events::Change};
 use rusqlite::{params, types::Value as SqlValue, Connection};
-use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{path::Path, sync::Arc};
 use tokio::sync::{broadcast, mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
@@ -21,11 +21,34 @@ CREATE TABLE IF NOT EXISTS notification_events(sequence INTEGER PRIMARY KEY,term
 CREATE INDEX IF NOT EXISTS notification_terminal ON notification_events(terminalId);
 CREATE TABLE IF NOT EXISTS output(sequence INTEGER PRIMARY KEY AUTOINCREMENT,terminalId TEXT NOT NULL,data TEXT NOT NULL,cols INTEGER,rows INTEGER);
 CREATE INDEX IF NOT EXISTS output_terminal ON output(terminalId,sequence);";
-#[derive(Deserialize)]
+/// One PTY output record. Terminal bytes reach the writer as owned strings and
+/// are bound to SQLite directly; they are never re-encoded as a JSON tree.
+pub struct OutputRow {
+    pub terminal_id: String,
+    pub data: String,
+    /// A resize marker (cols, rows) ordered with the surrounding output.
+    pub size: Option<(u16, u16)>,
+}
 struct Request {
     op: String,
-    #[serde(default)]
     args: Value,
+    rows: Vec<OutputRow>,
+}
+impl Request {
+    fn new(op: &str, args: Value) -> Self {
+        Self { op: op.into(), args, rows: Vec::new() }
+    }
+}
+/// Counts serialized bytes for queue credits without allocating the encoding.
+struct ByteCount(usize);
+impl std::io::Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 fn query(db: &Connection, sql: &str, args: &[Value]) -> Result<Value, String> {
     let mut statement = db.prepare(sql).map_err(|e| e.to_string())?;
@@ -81,47 +104,44 @@ fn table(a: &Value) -> Result<&str, String> {
     }
 }
 fn records(db: &Connection, t: &str, id: Option<&str>) -> Result<Value, String> {
-    let rows = if let Some(id) = id {
-        query(
-            db,
-            &format!("SELECT data FROM {t} WHERE id=?"),
-            &[json!(id)],
-        )?
-    } else {
-        query(db, &format!("SELECT data FROM {t} ORDER BY rowid"), &[])?
-    };
-    let values: Result<Vec<Value>, _> = rows
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|r| serde_json::from_str(r["data"].as_str().unwrap()))
-        .collect();
-    let mut values = values.map_err(|e| e.to_string())?;
+    let mut statement = db
+        .prepare_cached(&if id.is_some() {
+            format!("SELECT data FROM {t} WHERE id=?")
+        } else {
+            format!("SELECT data FROM {t} ORDER BY rowid")
+        })
+        .map_err(|e| e.to_string())?;
+    let mut rows = match id {
+        Some(id) => statement.query([id]),
+        None => statement.query([]),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut values: Vec<Value> = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let text = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)).map_err(|e| e.to_string())?;
+        values.push(serde_json::from_str(text).map_err(|e| e.to_string())?);
+    }
     if t == "workspaces" { deletions::overlay(db, &mut values)?; }
     Ok(json!(values))
 }
 fn put(db: &Connection, t: &str, v: &Value, notification: Option<&Value>) -> Result<(), String> {
     let mut clean;
     let v = if t == "workspaces" { clean=v.clone();if let Some(row)=clean.as_object_mut(){row.remove("deletion");}&clean } else {v};
-    db.execute(
-        &format!(
-            "INSERT INTO {t}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data"
-        ),
-        params![v["id"].as_str().ok_or("missing id")?, v.to_string()],
-    )
+    db.prepare_cached(&format!(
+        "INSERT INTO {t}(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data"
+    ))
+    .and_then(|mut q| q.execute(params![v["id"].as_str().ok_or(rusqlite::Error::InvalidQuery)?, v.to_string()]))
     .map_err(|e| e.to_string())?;
-    db.execute(
+    db.prepare_cached(
         "INSERT INTO events(kind,entityId,at) VALUES(?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-        params![t, v["id"].as_str()],
     )
+    .and_then(|mut q| q.execute(params![t, v["id"].as_str()]))
     .map_err(|e| e.to_string())?;
     if let Some(n) = notification.filter(|n| !n.is_null()) {
         let seq = db.last_insert_rowid();
-        db.execute(
-            "INSERT INTO notification_events(sequence,terminalId,data) VALUES(?,?,?)",
-            params![seq, n["terminalId"].as_str(), n.to_string()],
-        )
-        .map_err(|e| e.to_string())?;
+        db.prepare_cached("INSERT INTO notification_events(sequence,terminalId,data) VALUES(?,?,?)")
+            .and_then(|mut q| q.execute(params![seq, n["terminalId"].as_str(), n.to_string()]))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -130,10 +150,205 @@ fn delete_workspace(db: &Connection, id: &str) -> Result<(), String> {
     db.execute("INSERT INTO events(kind,entityId,at) VALUES('workspaces',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",[id]).map_err(|e|e.to_string())?;
     Ok(())
 }
+/// Writer holds keyed per test: present = the writer is parked, true = released.
+#[cfg(test)]
+static TEST_HOLDS: (std::sync::Mutex<std::collections::BTreeMap<String, bool>>, std::sync::Condvar) =
+    (std::sync::Mutex::new(std::collections::BTreeMap::new()), std::sync::Condvar::new());
 #[cfg(test)]
 static TEST_COMMIT_GATE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+/// Statements that never write. The writer serves them in FIFO order when asked;
+/// the read-only connections serve them from one WAL snapshot per request.
+fn read(db: &Connection, r: &Request) -> Option<Result<Value, String>> {
+    let a = &r.args;
+    Some(match r.op.as_str() {
+        "list" => table(a).and_then(|t| records(db, t, None)),
+        "get" => table(a).and_then(|t| records(db, t, a["id"].as_str())).map(|mut rows| {
+            rows.as_array_mut().and_then(|v| v.pop()).unwrap_or(Value::Null)
+        }),
+        "state" => (|| {
+            Ok(json!({"protocolVersion":1,"hostName":a["hostName"],"revision":revision(db)?,"projects":records(db,"projects",None)?,"workspaces":records(db,"workspaces",None)?,"terminals":records(db,"terminals",None)?}))
+        })(),
+        "state_json" => state_json(db, a).map(Value::String),
+        "notifications" => (|| {
+            let rows=query(db,"SELECT sequence,data FROM notification_events WHERE sequence>? ORDER BY sequence LIMIT 256",&[a["after"].clone()])?;
+            let mut events = Vec::new();
+            let mut cursor = a["after"].clone();
+            for r in rows.as_array().unwrap() {
+                let mut v: Value =
+                    serde_json::from_str(r["data"].as_str().unwrap()).map_err(|e| e.to_string())?;
+                v["sequence"] = r["sequence"].clone();
+                cursor = r["sequence"].clone();
+                events.push(v);
+            }
+            Ok(json!({"more":events.len()==256,"cursor":cursor,"events":events}))
+        })(),
+        "events" => query(
+            db,
+            "SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256",
+            &[a["after"].clone()],
+        ),
+        "output" => output(db, a),
+        "output_page" => output_page(db, a),
+        _ => return None,
+    })
+}
+fn revision(db: &Connection) -> Result<i64, String> {
+    db.prepare_cached("SELECT COALESCE(MAX(sequence),0) FROM events")
+        .and_then(|mut q| q.query_row([], |r| r.get(0)))
+        .map_err(|e| e.to_string())
+}
+/// Appends the stored rows of one table as a JSON array without building a
+/// value tree. Each row is still validated so corrupt data fails closed.
+fn raw_rows(db: &Connection, t: &str, out: &mut String) -> Result<(), String> {
+    let mut statement = db
+        .prepare_cached(&format!("SELECT data FROM {t} ORDER BY rowid"))
+        .map_err(|e| e.to_string())?;
+    let mut rows = statement.query([]).map_err(|e| e.to_string())?;
+    out.push('[');
+    let mut first = true;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let text = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)).map_err(|e| e.to_string())?;
+        serde_json::from_str::<serde::de::IgnoredAny>(text).map_err(|e| e.to_string())?;
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(text);
+    }
+    out.push(']');
+    Ok(())
+}
+/// The `state` object as JSON text with its closing brace omitted, so the HTTP
+/// layer can append process-level members. Same members and order as `state`.
+fn state_json(db: &Connection, a: &Value) -> Result<String, String> {
+    let mut out = String::with_capacity(8 * 1024);
+    out.push_str("{\"protocolVersion\":1,\"hostName\":");
+    out.push_str(&a["hostName"].to_string());
+    out.push_str(",\"revision\":");
+    out.push_str(&revision(db)?.to_string());
+    out.push_str(",\"projects\":");
+    raw_rows(db, "projects", &mut out)?;
+    out.push_str(",\"workspaces\":");
+    let overlaid: bool = db
+        .prepare_cached("SELECT EXISTS(SELECT 1 FROM workspace_deletions)")
+        .and_then(|mut q| q.query_row([], |r| r.get(0)))
+        .map_err(|e| e.to_string())?;
+    if overlaid {
+        out.push_str(&records(db, "workspaces", None)?.to_string());
+    } else {
+        raw_rows(db, "workspaces", &mut out)?;
+    }
+    out.push_str(",\"terminals\":");
+    raw_rows(db, "terminals", &mut out)?;
+    Ok(out)
+}
+const OUTPUT_PAGE: &str = "SELECT sequence,data,cols,rows FROM output WHERE terminalId=? AND sequence>? ORDER BY sequence LIMIT 256";
+fn output(db: &Connection, a: &Value) -> Result<Value, String> {
+    let after = a["after"].as_i64().ok_or("invalid cursor")?;
+    let mut stmt = db.prepare_cached(OUTPUT_PAGE).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params![a["terminalId"].as_str(), after])
+        .map_err(|e| e.to_string())?;
+    let mut chunks = Vec::new();
+    let mut bytes = 0;
+    let mut more = false;
+    let mut cursor = after;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        if bytes >= 256 * 1024 {
+            more = true;
+            break;
+        }
+        let data: String = row.get(1).map_err(|e| e.to_string())?;
+        cursor = row.get(0).map_err(|e| e.to_string())?;
+        bytes += data.len();
+        chunks.push(json!({"sequence":cursor,"data":data,"cols":row.get::<_,Option<i64>>(2).map_err(|e|e.to_string())?,"rows":row.get::<_,Option<i64>>(3).map_err(|e|e.to_string())?}));
+    }
+    more |= chunks.len() == 256;
+    let data: String = if a["chunksOnly"] == true {
+        String::new()
+    } else {
+        chunks.iter().map(|c| c["data"].as_str().unwrap()).collect()
+    };
+    Ok(json!({"data":data,"chunks":chunks,"cursor":cursor,"more":more}))
+}
+#[derive(Serialize)]
+struct Chunk<'a> {
+    sequence: i64,
+    data: &'a str,
+    cols: Option<i64>,
+    rows: Option<i64>,
+}
+/// The complete `/output` response body as JSON text, or null when the terminal
+/// does not exist. Same members, order and paging limits as `output` plus the
+/// terminal's status/cols/rows. Terminal bytes go from SQLite straight into the
+/// encoder. The terminal row is read first inside the request's snapshot, so an
+/// exited status is never paired with output older than that exit.
+fn output_page(db: &Connection, a: &Value) -> Result<Value, String> {
+    let id = a["terminalId"].as_str().ok_or("missing id")?;
+    let after = a["after"].as_i64().ok_or("invalid cursor")?;
+    let terminal: Value = {
+        let mut statement = db
+            .prepare_cached("SELECT data FROM terminals WHERE id=?")
+            .map_err(|e| e.to_string())?;
+        let mut rows = statement.query([id]).map_err(|e| e.to_string())?;
+        let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+            return Ok(Value::Null);
+        };
+        let text = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)).map_err(|e| e.to_string())?;
+        serde_json::from_str(text).map_err(|e| e.to_string())?
+    };
+    let joined = a["chunksOnly"] != true;
+    let mut stmt = db.prepare_cached(OUTPUT_PAGE).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query(params![id, after]).map_err(|e| e.to_string())?;
+    let mut chunks: Vec<u8> = Vec::with_capacity(1024);
+    let mut data = String::new();
+    let (mut bytes, mut count, mut more, mut cursor) = (0, 0, false, after);
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        if bytes >= 256 * 1024 {
+            more = true;
+            break;
+        }
+        let text = row.get_ref(1).and_then(|v| v.as_str().map_err(Into::into)).map_err(|e| e.to_string())?;
+        cursor = row.get(0).map_err(|e| e.to_string())?;
+        bytes += text.len();
+        if joined {
+            data.push_str(text);
+        }
+        chunks.push(if count == 0 { b'[' } else { b',' });
+        count += 1;
+        serde_json::to_writer(
+            &mut chunks,
+            &Chunk {
+                sequence: cursor,
+                data: text,
+                cols: row.get(2).map_err(|e| e.to_string())?,
+                rows: row.get(3).map_err(|e| e.to_string())?,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    more |= count == 256;
+    let mut out: Vec<u8> = Vec::with_capacity(chunks.len() + data.len() + 160);
+    out.extend_from_slice(b"{\"data\":");
+    serde_json::to_writer(&mut out, &data).map_err(|e| e.to_string())?;
+    out.extend_from_slice(b",\"chunks\":");
+    if count == 0 {
+        out.push(b'[');
+    } else {
+        out.append(&mut chunks);
+    }
+    out.extend_from_slice(format!("],\"cursor\":{cursor},\"more\":{more}").as_bytes());
+    for key in ["status", "cols", "rows"] {
+        out.extend_from_slice(format!(",\"{key}\":{}", terminal[key]).as_bytes());
+    }
+    out.push(b'}');
+    String::from_utf8(out).map(Value::String).map_err(|e| e.to_string())
+}
 fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
     let a = &r.args;
+    if let Some(result) = read(db, r) {
+        return result;
+    }
     match r.op.as_str() {
         op if op.starts_with("workspace_deletion_") => deletions::handle(db, op, a),
         #[cfg(test)]
@@ -144,16 +359,27 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
             Ok(Value::Null)
         },
         "barrier" => Ok(json!({})),
-        "list" => records(db, table(a)?, None),
-        "get" => Ok(records(db, table(a)?, a["id"].as_str())?
-            .as_array()
-            .unwrap()
-            .first()
-            .cloned()
-            .unwrap_or(Value::Null)),
-        "state" => Ok(
-            json!({"protocolVersion":1,"hostName":a["hostName"],"revision":query(db,"SELECT COALESCE(MAX(sequence),0) AS n FROM events",&[])?[0]["n"],"projects":records(db,"projects",None)?,"workspaces":records(db,"workspaces",None)?,"terminals":records(db,"terminals",None)?}),
-        ),
+        #[cfg(test)]
+        "test_hold" => {
+            // Parks the writer until the test releases this key, so a test can
+            // place jobs behind it instead of racing the writer thread.
+            let key = a["key"].as_str().ok_or("key")?;
+            let (lock, wake) = &TEST_HOLDS;
+            let mut holds = lock.lock().unwrap();
+            holds.insert(key.into(), false);
+            wake.notify_all();
+            while !holds[key] {
+                holds = wake.wait(holds).unwrap();
+            }
+            holds.remove(key);
+            Ok(Value::Null)
+        }
+        #[cfg(test)]
+        "test_abandon_transaction" => {
+            // Leaves the writer inside a transaction, which makes it close its queues.
+            db.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "put" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             put(&tx, table(a)?, &a["value"], a.get("notification"))?;
@@ -224,48 +450,27 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
             performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
-        "notifications" => {
-            let rows=query(db,"SELECT sequence,data FROM notification_events WHERE sequence>? ORDER BY sequence LIMIT 256",&[a["after"].clone()])?;
-            let mut events = Vec::new();
-            let mut cursor = a["after"].clone();
-            for r in rows.as_array().unwrap() {
-                let mut v: Value =
-                    serde_json::from_str(r["data"].as_str().unwrap()).map_err(|e| e.to_string())?;
-                v["sequence"] = r["sequence"].clone();
-                cursor = r["sequence"].clone();
-                events.push(v);
-            }
-            Ok(json!({"more":events.len()==256,"cursor":cursor,"events":events}))
+        "operation" => {
+            let mut statement = db
+                .prepare_cached("SELECT id,hash,status,result FROM operations WHERE id=?")
+                .map_err(|e| e.to_string())?;
+            let mut rows = statement.query([a["id"].as_str()]).map_err(|e| e.to_string())?;
+            let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+                return Ok(Value::Null);
+            };
+            let text = |i| row.get::<_, Option<String>>(i).map_err(|e| e.to_string());
+            Ok(json!({"id":text(0)?,"hash":text(1)?,"status":text(2)?,"result":text(3)?}))
         }
-        "events" => query(
-            db,
-            "SELECT * FROM events WHERE sequence>? ORDER BY sequence LIMIT 256",
-            &[a["after"].clone()],
-        ),
-        "operation" => Ok(query(
-            db,
-            "SELECT * FROM operations WHERE id=?",
-            &[a["id"].clone()],
-        )?
-        .as_array()
-        .unwrap()
-        .first()
-        .cloned()
-        .unwrap_or(Value::Null)),
         "operation_start" => {
-            db.execute(
-                "INSERT INTO operations(id,hash,status) VALUES(?,?,'pending')",
-                params![a["id"].as_str(), a["hash"].as_str()],
-            )
-            .map_err(|e| e.to_string())?;
+            db.prepare_cached("INSERT INTO operations(id,hash,status) VALUES(?,?,'pending')")
+                .and_then(|mut q| q.execute(params![a["id"].as_str(), a["hash"].as_str()]))
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "operation_finish" => {
-            db.execute(
-                "UPDATE operations SET status=?,result=? WHERE id=?",
-                params![a["status"].as_str(), a["result"].as_str(), a["id"].as_str()],
-            )
-            .map_err(|e| e.to_string())?;
+            db.prepare_cached("UPDATE operations SET status=?,result=? WHERE id=?")
+                .and_then(|mut q| q.execute(params![a["status"].as_str(), a["result"].as_str(), a["id"].as_str()]))
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "pty_exit" => {
@@ -320,47 +525,32 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
                 let mut insert = tx
                     .prepare_cached("INSERT INTO output(terminalId,data,cols,rows) VALUES(?,?,?,?)")
                     .map_err(|e| e.to_string())?;
-                for row in a.as_array().ok_or("invalid output")? {
+                // The PTY path supplies typed rows; the JSON form remains for other callers.
+                for row in &r.rows {
                     insert
                         .execute(params![
-                            row["terminalId"].as_str(),
-                            row["data"].as_str(),
-                            row["cols"].as_i64(),
-                            row["rows"].as_i64()
+                            row.terminal_id,
+                            row.data,
+                            row.size.map(|s| i64::from(s.0)),
+                            row.size.map(|s| i64::from(s.1))
                         ])
                         .map_err(|e| e.to_string())?;
+                }
+                if r.rows.is_empty() {
+                    for row in a.as_array().ok_or("invalid output")? {
+                        insert
+                            .execute(params![
+                                row["terminalId"].as_str(),
+                                row["data"].as_str(),
+                                row["cols"].as_i64(),
+                                row["rows"].as_i64()
+                            ])
+                            .map_err(|e| e.to_string())?;
+                    }
                 }
             }
             performance::commit(|| tx.commit()).map_err(|e| e.to_string())?;
             Ok(json!({}))
-        }
-        "output" => {
-            let after = a["after"].as_i64().ok_or("invalid cursor")?;
-            let mut stmt=db.prepare_cached("SELECT sequence,data,cols,rows FROM output WHERE terminalId=? AND sequence>? ORDER BY sequence LIMIT 256").map_err(|e|e.to_string())?;
-            let mut rows = stmt
-                .query(params![a["terminalId"].as_str(), after])
-                .map_err(|e| e.to_string())?;
-            let mut chunks = Vec::new();
-            let mut bytes = 0;
-            let mut more = false;
-            let mut cursor = after;
-            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                if bytes >= 256 * 1024 {
-                    more = true;
-                    break;
-                }
-                let data: String = row.get(1).map_err(|e| e.to_string())?;
-                cursor = row.get(0).map_err(|e| e.to_string())?;
-                bytes += data.len();
-                chunks.push(json!({"sequence":cursor,"data":data,"cols":row.get::<_,Option<i64>>(2).map_err(|e|e.to_string())?,"rows":row.get::<_,Option<i64>>(3).map_err(|e|e.to_string())?}));
-            }
-            more |= chunks.len() == 256;
-            let data: String = if a["chunksOnly"] == true {
-                String::new()
-            } else {
-                chunks.iter().map(|c| c["data"].as_str().unwrap()).collect()
-            };
-            Ok(json!({"data":data,"chunks":chunks,"cursor":cursor,"more":more}))
         }
         "query" => query(
             db,
@@ -372,6 +562,8 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
 }
 
 struct Job {
+    /// Position in the control lane's FIFO; 0 for other lanes.
+    seq: u64,
     trace: Option<String>,
     request: Request,
     reply: oneshot::Sender<Result<Value, ApiError>>,
@@ -447,29 +639,64 @@ fn execute_group(db: &mut Connection, jobs: Vec<Job>, changes: &broadcast::Sende
     }
     db.is_autocommit()
 }
+fn serve_reads(mut rx: mpsc::Receiver<Job>, db: Connection) {
+    while let Some(job) = rx.blocking_recv() {
+        let _scope = performance::StoreScope::enter(job.trace.iter().cloned().collect());
+        // One deferred transaction pins a single committed snapshot for every
+        // statement of the request. Replies follow commit, so a caller always
+        // observes the writes whose replies it has already received. Entity reads
+        // additionally wait for accepted control writes before they get here.
+        let result = db
+            .unchecked_transaction()
+            .map_err(|e| e.to_string())
+            .and_then(|tx| read(&tx, &job.request).unwrap_or_else(|| Err("not a read".into())))
+            .map_err(|_| ApiError::storage());
+        if let Some(id) = &job.trace {
+            performance::event(id, "store.sqlite.end");
+        }
+        let _ = job.reply.send(result);
+    }
+}
 #[derive(Clone)]
 pub struct StoreHandle {
     events:broadcast::Sender<Change>,
     writes: mpsc::Sender<Job>,
     bulk: mpsc::Sender<Job>,
     reads: mpsc::Sender<Job>,
+    state_reads: mpsc::Sender<Job>,
     credit: Arc<Semaphore>,
     bulk_credit: Arc<Semaphore>,
     enqueue: Arc<tokio::sync::RwLock<()>>,
+    /// Sequence of the last job accepted into the control lane. The lock also
+    /// makes the sequence order equal the channel order.
+    accepted: Arc<std::sync::Mutex<u64>>,
+    /// Sequence of the last control job the writer finished. Its sender lives on
+    /// the writer thread, so a closed channel means the writer is gone.
+    settled: tokio::sync::watch::Receiver<u64>,
 }
 impl StoreHandle {
     pub async fn open(path: &Path, events: broadcast::Sender<Change>) -> Result<Self, ApiError> {
         let path = path.to_owned();
         let (writes, mut rx) = mpsc::channel::<Job>(64);
         let (bulk, mut bulk_rx) = mpsc::channel::<Job>(128);
-        let (reads, mut read_rx) = mpsc::channel::<Job>(16);
+        let (reads, read_rx) = mpsc::channel::<Job>(16);
+        let (state_reads, state_rx) = mpsc::channel::<Job>(16);
         let (ready, ready_rx) = oneshot::channel();
+        let (settle, settled) = tokio::sync::watch::channel(0u64);
         let changes=events.clone();
         std::thread::Builder::new().name("native-store".into()).spawn(move||{
-   let init=(||->Result<(Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;Ok((writer,reader))})();
-   let Ok((mut writer,mut reader))=init else {let _=ready.send(false);return;};
-   std::thread::Builder::new().name("native-output-read".into()).spawn(move||{while let Some(job)=read_rx.blocking_recv(){let _scope=performance::StoreScope::enter(job.trace.iter().cloned().collect());let result=handle(&mut reader,&job.request).map_err(|_|ApiError::storage());if let Some(id)=&job.trace{performance::event(id,"store.sqlite.end");}let _=job.reply.send(result);}}).ok();
-   let _=ready.send(true);
+   let init=(||->Result<(Connection,Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}writer.set_prepared_statement_cache_capacity(64);
+    // Terminal output and state snapshots each have a read-only connection, so
+    // neither waits behind the writer's commits or behind the other's pages.
+    // A large transaction such as a history purge otherwise leaves the WAL file at
+    // its high-water mark indefinitely. Durability and checkpointing are unchanged.
+    writer.execute_batch("PRAGMA journal_size_limit=67108864;").map_err(|e|e.to_string())?;
+    let reader=|| -> Result<Connection,String> {let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;reader.set_prepared_statement_cache_capacity(32);Ok(reader)};
+    Ok((writer,reader()?,reader()?))})();
+   let Ok((mut writer,reader,state_reader))=init else {let _=ready.send(false);return;};
+   let started=[("native-output-read",read_rx,reader),("native-state-read",state_rx,state_reader)].into_iter().all(|(name,rx,db)|std::thread::Builder::new().name(name.into()).spawn(move||serve_reads(rx,db)).is_ok());
+   let _=ready.send(started);
+   if !started {return;}
    let runtime=tokio::runtime::Builder::new_current_thread().build().expect("store executor");
    runtime.block_on(async {
     let mut control_run=0;
@@ -485,7 +712,10 @@ impl StoreHandle {
      let Some((job,control))=next else{continue;};
      let jobs=if control {ready_group(job,&mut rx,&mut pending,CONTROL_QUANTUM-control_run)}else{vec![job]};
      control_run=if control{control_run+jobs.len()}else{0};
-     if !execute_group(&mut writer,jobs,&changes){break;}
+     let top=jobs.iter().map(|j|j.seq).max().unwrap_or(0);
+     let healthy=execute_group(&mut writer,jobs,&changes);
+     if top>0 {settle.send_replace(top);}
+     if !healthy {break;}
     }
    });
   }).map_err(|_|ApiError::storage())?;
@@ -497,9 +727,12 @@ impl StoreHandle {
             writes,
             bulk,
             reads,
+            state_reads,
             credit: Arc::new(Semaphore::new(4 * 1024 * 1024)),
             bulk_credit: Arc::new(Semaphore::new(12 * 1024 * 1024)),
             enqueue: Arc::new(tokio::sync::RwLock::new(())),
+            accepted: Arc::new(std::sync::Mutex::new(0)),
+            settled,
         };
         store.call("recover", json!({})).await?;
         Ok(store)
@@ -512,27 +745,64 @@ impl StoreHandle {
             // Exclude new enqueues while FIFO fences pass through both lanes. Jobs already
             // awaiting credits are not accepted yet and therefore fall after this barrier.
             let _gate = self.enqueue.write().await;
-            for tx in [&self.bulk, &self.writes] {
+            for control in [false, true] {
                 let (reply, rx) = oneshot::channel();
-                tx.send(Job {
+                let job = Job {
+                    seq: 0,
                     trace: trace.clone(),
-                    request: Request {
-                        op: "barrier".into(),
-                        args: Value::Null,
-                    },
+                    request: Request::new("barrier", Value::Null),
                     reply,
                     _credit: None,
-                })
-                .await
-                .map_err(|_| ApiError::storage())?;
+                };
+                if control {
+                    self.accept(job).await?;
+                } else {
+                    self.bulk.send(job).await.map_err(|_| ApiError::storage())?;
+                }
                 rx.await.map_err(|_| ApiError::storage())??;
             }
             return Ok(json!({}));
         }
-        let bytes = serde_json::to_vec(&args)
-            .map_err(|_| ApiError::storage())?
-            .len()
-            .max(1);
+        let mut bytes = ByteCount(0);
+        serde_json::to_writer(&mut bytes, &args).map_err(|_| ApiError::storage())?;
+        self.submit(Request::new(op, args), bytes.0, trace).await
+    }
+    /// Durably appends PTY output in order. Credits use the raw byte length.
+    pub async fn append(&self, rows: Vec<OutputRow>) -> Result<(), ApiError> {
+        let trace=performance::context();
+        if let Some(id)=&trace { performance::event(id,"store.queue.begin"); }
+        let bytes = rows.iter().map(|r| r.terminal_id.len() + r.data.len() + 16).sum();
+        self.submit(Request { op: "append".into(), args: Value::Null, rows }, bytes, trace).await.map(|_| ())
+    }
+    /// Enqueues a control-lane job. Reserving first means the sequence is assigned
+    /// only when the job is certain to enter the queue, with no await in between.
+    async fn accept(&self, mut job: Job) -> Result<(), ApiError> {
+        let slot = self.writes.reserve().await.map_err(|_| ApiError::storage())?;
+        let mut accepted = self.accepted.lock().unwrap();
+        *accepted += 1;
+        job.seq = *accepted;
+        slot.send(job);
+        Ok(())
+    }
+    /// Waits until the writer has finished every control job accepted so far.
+    /// This is the ordering reads had while they shared the writer's FIFO: a
+    /// read observes each accepted write, including one whose caller went away
+    /// before its reply. It returns at once when nothing is queued.
+    async fn settle(&self) -> Result<(), ApiError> {
+        let target = *self.accepted.lock().unwrap();
+        if *self.settled.borrow() >= target {
+            return Ok(());
+        }
+        let mut settled = self.settled.clone();
+        settled
+            .wait_for(|done| *done >= target)
+            .await
+            .map(|_| ())
+            .map_err(|_| ApiError::storage())
+    }
+    async fn submit(&self, request: Request, bytes: usize, trace: Option<String>) -> Result<Value, ApiError> {
+        let bytes = bytes.max(1);
+        let op = request.op.as_str();
         if bytes > 4 * 1024 * 1024 {
             return Err(ApiError::new(
                 "payload_too_large",
@@ -552,25 +822,40 @@ impl StoreHandle {
             .await
             .map_err(|_| ApiError::storage())?;
         let (reply, rx) = oneshot::channel();
+        // `operation` stays on the writer: a retry must observe an accepted
+        // operation_start even when its first caller went away before the reply.
+        let tx = match op {
+            "output" | "output_page" => Some(&self.reads),
+            "get" | "list" | "state" | "state_json" | "notifications" | "events" => Some(&self.state_reads),
+            _ if bulk => Some(&self.bulk),
+            _ => None,
+        };
+        if tx.is_some() && !bulk {
+            // The read-only connections outlive the writer. Without it nothing can
+            // be stored, so reads fail closed exactly as they did on its queue.
+            if self.settled.has_changed().is_err() {
+                return Err(ApiError::storage());
+            }
+            // Entity reads feed read-modify-write handlers and keep FIFO ordering
+            // with accepted writes. Client polling of state, output, notifications
+            // and events carries no such expectation and does not wait.
+            if matches!(op, "get" | "list" | "state") {
+                self.settle().await?;
+            }
+        }
         let job = Job {
+            seq: 0,
             trace,
-            request: Request {
-                op: op.into(),
-                args,
-            },
+            request,
             reply,
             _credit: Some(credit),
         };
-        let tx = if op == "output" {
-            &self.reads
-        } else if bulk {
-            &self.bulk
-        } else {
-            &self.writes
-        };
         {
             let _gate = self.enqueue.read().await;
-            tx.send(job).await.map_err(|_| ApiError::storage())?;
+            match tx {
+                Some(tx) => tx.send(job).await.map_err(|_| ApiError::storage())?,
+                None => self.accept(job).await?,
+            }
         }
         rx.await.map_err(|_| ApiError::storage())?
     }
@@ -654,11 +939,18 @@ fn change(r: &Request) -> Option<Change> {
         }),
         "append" => Some(Change {
             state: false,
-            terminals: a
-                .as_array()?
-                .iter()
-                .filter_map(|r| r["terminalId"].as_str().map(String::from))
-                .collect(),
+            // One entry per terminal, however many chunks the batch carried.
+            terminals: {
+                let mut ids: Vec<String> = Vec::new();
+                let typed = r.rows.iter().map(|row| row.terminal_id.as_str());
+                let json = a.as_array().into_iter().flatten().filter_map(|row| row["terminalId"].as_str());
+                for id in typed.chain(json) {
+                    if !ids.iter().any(|known| known == id) {
+                        ids.push(id.to_owned());
+                    }
+                }
+                ids
+            },
             agent_terminals: vec![],
             browser: false,
         }),
@@ -686,20 +978,14 @@ mod cas_tests {
         let old = json!({"id":"w","title":"old"});
         handle(
             &mut db,
-            &Request {
-                op: "put".into(),
-                args: json!({"table":"workspaces","value":old}),
-            },
+            &Request::new("put", json!({"table":"workspaces","value":old})),
         )
         .unwrap();
         let args = json!({"table":"workspaces","id":"w","expected":old,"value":{"id":"w","title":"manual"}});
         assert_eq!(
             handle(
                 &mut db,
-                &Request {
-                    op: "compare_put".into(),
-                    args: args.clone()
-                }
+                &Request::new("compare_put", args.clone())
             )
             .unwrap(),
             true
@@ -708,10 +994,7 @@ mod cas_tests {
         assert_eq!(
             handle(
                 &mut db,
-                &Request {
-                    op: "compare_put".into(),
-                    args
-                }
+                &Request::new("compare_put", args)
             )
             .unwrap(),
             false
@@ -726,10 +1009,7 @@ mod cas_tests {
         );
         assert!(handle(
             &mut db,
-            &Request {
-                op: "compare_put".into(),
-                args: json!({"table":"workspaces","id":"w","expected":null,"value":{"id":"other"}})
-            }
+            &Request::new("compare_put", json!({"table":"workspaces","id":"w","expected":null,"value":{"id":"other"}}))
         )
         .is_err());
     }
@@ -907,7 +1187,7 @@ mod operation_group_tests {
     use super::*;
     fn job(op: &str, args: Value) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         let (reply, rx) = oneshot::channel();
-        (Job { trace: None, request: Request { op: op.into(), args }, reply, _credit: None }, rx)
+        (Job { seq: 0, trace: None, request: Request::new(op, args), reply, _credit: None }, rx)
     }
     fn start(id: &str) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         job("operation_start", json!({"id":id,"hash":"h"}))
@@ -916,7 +1196,7 @@ mod operation_group_tests {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch(SCHEMA).unwrap();
         // Keep the same handle API exercised by the real writer.
-        handle(&mut db, &Request { op:"barrier".into(), args:Value::Null }).unwrap();
+        handle(&mut db, &Request::new("barrier", Value::Null)).unwrap();
         db
     }
     #[test]
@@ -1060,7 +1340,7 @@ mod trace_tests {
         }
         wait_event(&dir,&a,"store.commit.begin").await;
         let reader=store.clone();let id=b.clone();
-        let queued=tokio::spawn(async move{performance::REQUEST.scope(id,reader.call("list",json!({"table":"agents"}))).await.unwrap()});
+        let queued=tokio::spawn(async move{performance::REQUEST.scope(id,reader.call("operation",json!({"id":"queued-behind-commit"}))).await.unwrap()});
         wait_event(&dir,&b,"store.queue.begin").await;
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         *TEST_COMMIT_GATE.0.lock().unwrap()=true;TEST_COMMIT_GATE.1.notify_one();
@@ -1073,5 +1353,250 @@ mod trace_tests {
         assert!(!rows.iter().any(|r|r["requestId"]==b&&r["event"]=="store.commit.begin"));
         assert!(!text.contains("injected"));assert!(!text.contains("SELECT"));
         drop(store);
+    }
+}
+
+#[cfg(test)]
+mod read_lane_tests {
+    use super::*;
+    fn fixture() -> Connection {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        for (table, value) in [
+            ("projects", json!({"id":"p","name":"引用\"符\\と改行\n","path":"/tmp/p"})),
+            ("workspaces", json!({"id":"w","projectId":"p","kind":"root"})),
+            ("workspaces", json!({"id":"w2","projectId":"p","kind":"worktree"})),
+            ("terminals", json!({"id":"t","workspaceId":"w","status":"running","cols":100,"rows":30})),
+            ("terminals", json!({"id":"bare","workspaceId":"w"})),
+        ] {
+            handle(&mut db, &Request::new("put", json!({"table":table,"value":value}))).unwrap();
+        }
+        db
+    }
+    fn page(db: &Connection, args: Value) -> Value {
+        let text = output_page(db, &args).unwrap();
+        serde_json::from_str(text.as_str().unwrap()).unwrap()
+    }
+    #[test]
+    fn encoded_state_and_output_pages_equal_the_value_forms() {
+        let mut db = fixture();
+        let args = json!({"hostName":"ホスト\"名"});
+        let expected = handle(&mut db, &Request::new("state", args.clone())).unwrap();
+        let parse = |db: &Connection| -> Value {
+            serde_json::from_str(&(state_json(db, &args).unwrap() + "}")).unwrap()
+        };
+        assert_eq!(parse(&db), expected);
+        assert_eq!(expected["terminals"].as_array().unwrap().len(), 2);
+        // With a deletion job the workspace overlay must appear exactly as before.
+        db.execute("INSERT INTO workspace_deletions(id,workspace_id,status,blocks,public,data) VALUES('j','w2','running',1,?,'{}')",[json!({"id":"j","status":"running"}).to_string()]).unwrap();
+        let overlaid = handle(&mut db, &Request::new("state", args.clone())).unwrap();
+        assert_eq!(overlaid["workspaces"][1]["deletion"]["status"], "running");
+        assert_eq!(parse(&db), overlaid);
+        // Corrupt stored rows fail closed instead of being forwarded as text.
+        db.execute("UPDATE projects SET data='{broken'", []).unwrap();
+        assert!(state_json(&db, &args).is_err());
+
+        // Typed rows, a resize marker, escapes, multi-byte text and the JSON form.
+        let rows = vec![
+            OutputRow { terminal_id: "t".into(), data: "plain\r\n\u{1b}[31m\"quoted\"\\\u{0}".into(), size: None },
+            OutputRow { terminal_id: "other".into(), data: "not mine".into(), size: None },
+            OutputRow { terminal_id: "t".into(), data: String::new(), size: Some((47, 19)) },
+            OutputRow { terminal_id: "t".into(), data: "日本語🙂".into(), size: None },
+        ];
+        let typed = Request { op: "append".into(), args: Value::Null, rows };
+        assert_eq!(change(&typed).unwrap().terminals, ["t", "other"]);
+        handle(&mut db, &typed).unwrap();
+        handle(&mut db, &Request::new("append", json!([{"terminalId":"t","data":"json"},{"terminalId":"t","data":"","cols":80,"rows":24}]))).unwrap();
+        for chunks_only in [false, true] {
+            let args = json!({"terminalId":"t","after":0,"chunksOnly":chunks_only});
+            let mut expected = output(&db, &args).unwrap();
+            expected["status"] = json!("running");
+            expected["cols"] = json!(100);
+            expected["rows"] = json!(30);
+            assert_eq!(page(&db, args), expected);
+            assert_eq!(expected["chunks"].as_array().unwrap().len(), 5);
+            assert_eq!(expected["chunks"][1]["cols"], 47);
+        }
+        // Cursor paging, a terminal without optional fields, and a missing terminal.
+        let rest = page(&db, json!({"terminalId":"t","after":4,"chunksOnly":true}));
+        assert_eq!(rest["chunks"].as_array().unwrap().len(), 2);
+        assert_eq!(rest["cursor"], 6);
+        let bare = page(&db, json!({"terminalId":"bare","after":0}));
+        assert_eq!(bare, json!({"data":"","chunks":[],"cursor":0,"more":false,"status":null,"cols":null,"rows":null}));
+        assert_eq!(output_page(&db, &json!({"terminalId":"missing","after":0})).unwrap(), Value::Null);
+        // The same byte and row limits decide `more` in both forms.
+        let big = "x".repeat(100 * 1024);
+        for _ in 0..4 {
+            handle(&mut db, &Request { op: "append".into(), args: Value::Null, rows: vec![OutputRow { terminal_id: "bare".into(), data: big.clone(), size: None }] }).unwrap();
+        }
+        let args = json!({"terminalId":"bare","after":0,"chunksOnly":true});
+        let limited = page(&db, args.clone());
+        assert_eq!(limited["more"], true);
+        assert_eq!(limited["chunks"].as_array().unwrap().len(), 3);
+        assert_eq!(limited["chunks"], output(&db, &args).unwrap()["chunks"]);
+    }
+    type Pending<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+    /// Parks the writer and returns once it is parked. Nothing here depends on
+    /// which thread runs first: the job is enqueued by one poll and the test then
+    /// blocks until the writer reports that it is inside the hold.
+    async fn hold(store: &StoreHandle) -> (String, Pending<'_, Result<Value, ApiError>>) {
+        let key = uuid::Uuid::new_v4().to_string();
+        let mut held: Pending<'_, _> = Box::pin(store.call("test_hold", json!({"key":key})));
+        assert!(futures_util::poll!(&mut held).is_pending());
+        let parked = key.clone();
+        tokio::task::spawn_blocking(move || {
+            let (lock, wake) = &TEST_HOLDS;
+            let mut holds = lock.lock().unwrap();
+            while !holds.contains_key(&parked) {
+                holds = wake.wait(holds).unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        (key, held)
+    }
+    fn release(key: &str) {
+        let (lock, wake) = &TEST_HOLDS;
+        *lock.lock().unwrap().get_mut(key).unwrap() = true;
+        wake.notify_all();
+    }
+    /// One poll moves a store call into its queue (credits and queue space are
+    /// free in these tests). While the writer is parked it cannot have a reply.
+    fn enqueue<'a, T>(call: impl std::future::Future<Output = T> + 'a) -> Pending<'a, T> {
+        let mut call: Pending<'a, T> = Box::pin(call);
+        assert!(
+            futures_util::FutureExt::now_or_never(&mut call).is_none(),
+            "a call behind a parked writer cannot complete"
+        );
+        call
+    }
+    #[tokio::test]
+    async fn client_reads_do_not_wait_for_a_busy_writer_and_entity_reads_stay_ordered() {
+        let dir = std::env::temp_dir().join(format!("neura-store-read-lane-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
+        store.put("terminals", json!({"id":"t","status":"running","cols":80,"rows":24}), None).await.unwrap();
+        store.append(vec![OutputRow { terminal_id: "t".into(), data: "before".into(), size: None }]).await.unwrap();
+        // FULL/WAL durability is unchanged; only the idle WAL file size is bounded.
+        let pragma = |sql: &'static str| { let store = store.clone(); async move { store.call("query", json!({"sql":sql,"args":[]})).await.unwrap()[0].clone() } };
+        assert_eq!(pragma("PRAGMA synchronous").await["synchronous"], 2);
+        assert_eq!(pragma("PRAGMA journal_mode").await["journal_mode"], "wal");
+        assert_eq!(pragma("PRAGMA journal_size_limit").await["journal_size_limit"], 64 * 1024 * 1024);
+        // The writer is parked; a second write is accepted behind it.
+        let (key, held) = hold(&store).await;
+        let queued = enqueue(store.put("projects", json!({"id":"p"}), None));
+        // Client reads are served without the writer. No deadline is needed: if
+        // they waited for it, this test would hang rather than pass.
+        let state = store.call("state_json", json!({"hostName":"h"})).await.unwrap();
+        let state: Value = serde_json::from_str(&(state.as_str().unwrap().to_owned() + "}")).unwrap();
+        assert_eq!(state["terminals"][0]["id"], "t");
+        assert_eq!(state["projects"], json!([]));
+        assert_eq!(store.call("events", json!({"after":0})).await.unwrap().as_array().unwrap().len(), 1);
+        assert_eq!(store.call("notifications", json!({"after":0})).await.unwrap()["events"], json!([]));
+        let page = store.call("output_page", json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();
+        let page: Value = serde_json::from_str(page.as_str().unwrap()).unwrap();
+        assert_eq!(page["chunks"][0]["data"], "before");
+        assert_eq!(page["status"], "running");
+        // Entity reads keep their place behind the accepted put, as on the old FIFO.
+        let ordered = enqueue(store.get("projects", "p"));
+        let listed = enqueue(store.list("projects"));
+        let snapshot = enqueue(store.call("state", json!({"hostName":"h"})));
+        release(&key);
+        assert_eq!(ordered.await.unwrap().unwrap()["id"], "p");
+        assert_eq!(listed.await.unwrap()[0]["id"], "p");
+        assert_eq!(snapshot.await.unwrap()["projects"][0]["id"], "p");
+        held.await.unwrap();
+        queued.await.unwrap();
+        assert_eq!(store.get("terminals", "t").await.unwrap().unwrap()["cols"], 80);
+        assert_eq!(store.list("terminals").await.unwrap().len(), 1);
+        // A write whose reply has been received is visible to the very next read.
+        for round in 0..50 {
+            store.put("projects", json!({"id":"p","round":round}), None).await.unwrap();
+            assert_eq!(store.get("projects", "p").await.unwrap().unwrap()["round"], round);
+            store.append(vec![OutputRow { terminal_id: "t".into(), data: round.to_string(), size: None }]).await.unwrap();
+            let page = store.call("output_page", json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();
+            let page: Value = serde_json::from_str(page.as_str().unwrap()).unwrap();
+            assert_eq!(page["chunks"].as_array().unwrap().last().unwrap()["data"], round.to_string());
+        }
+        store.update("projects", "p", |p| p["round"] = json!("cas")).await.unwrap();
+        assert_eq!(store.get("projects", "p").await.unwrap().unwrap()["round"], "cas");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    /// A handler can enqueue a write and lose its caller before the reply. A read
+    /// issued after that write was accepted must observe it. Both interleavings
+    /// are forced rather than hoped for: the write is abandoned while the writer
+    /// is provably parked in front of it, and the read is issued either while the
+    /// write is still queued or after the writer has moved on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn entity_reads_observe_accepted_writes_whose_caller_went_away() {
+        let dir = std::env::temp_dir().join(format!("neura-store-accepted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
+        store.put("projects", json!({"id":"p","count":0}), None).await.unwrap();
+        let (mut stale, mut lost) = (0, 0);
+        for round in 1..=200 {
+            let (key, held) = hold(&store).await;
+            // Accepted into the queue behind the parked writer, then abandoned.
+            drop(enqueue(store.put("projects", json!({"id":"p","count":round,"abandoned":true}), None)));
+            let mut current = if round % 2 == 0 {
+                // Read issued while the abandoned write is still queued.
+                let read = enqueue(store.get("projects", "p"));
+                release(&key);
+                read.await.unwrap().unwrap()
+            } else {
+                // Read issued after the writer was released; it may or may not
+                // have reached the abandoned write yet.
+                release(&key);
+                store.get("projects", "p").await.unwrap().unwrap()
+            };
+            held.await.unwrap();
+            if current["count"] != round { stale += 1; }
+            assert_eq!(store.list("projects").await.unwrap()[0], current);
+            assert_eq!(store.call("state", json!({})).await.unwrap()["projects"][0], current);
+            current["touched"] = json!(round);
+            store.put("projects", current, None).await.unwrap();
+            let after = store.get("projects", "p").await.unwrap().unwrap();
+            if after["count"] != round || after["abandoned"] != true || after["touched"] != round { lost += 1; }
+        }
+        assert_eq!((stale, lost), (0, 0), "stale reads / lost updates out of 200");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[tokio::test]
+    async fn reader_served_requests_fail_closed_once_the_writer_is_gone() {
+        let dir = std::env::temp_dir().join(format!("neura-store-writer-gone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
+        store.put("terminals", json!({"id":"t","status":"running"}), None).await.unwrap();
+        store.append(vec![OutputRow { terminal_id: "t".into(), data: "kept".into(), size: None }]).await.unwrap();
+        let page = json!({"terminalId":"t","after":0,"chunksOnly":true});
+        assert!(store.call("output_page", page.clone()).await.unwrap().is_string());
+        // The writer cannot restore autocommit and closes its queues.
+        store.call("test_abandon_transaction", json!({})).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.get("terminals", "t").await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reads kept succeeding without a writer");
+        for (op, args) in [
+            ("state_json", json!({"hostName":"h"})),
+            ("state", json!({})),
+            ("list", json!({"table":"terminals"})),
+            ("events", json!({"after":0})),
+            ("notifications", json!({"after":0})),
+            ("output_page", page.clone()),
+            ("output", page),
+        ] {
+            assert!(store.call(op, args).await.is_err(), "{op} served without a writer");
+        }
+        assert!(store.put("projects", json!({"id":"p"}), None).await.is_err());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

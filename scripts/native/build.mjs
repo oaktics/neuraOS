@@ -36,7 +36,8 @@ for(const file of await readdir(resourceRoot))if(file.endsWith('.bundle'))await 
 await mkdir(join(output,'Contents/Resources/Licenses'),{recursive:true});
 // SwiftPM's checkout files can be read-only; replace the previous copied license.
 for(const [name,source] of [
-  ['SwiftTerm','SwiftTerm/LICENSE'],
+  // SwiftTerm is vendored in the repository, not a SwiftPM checkout.
+  ['SwiftTerm',join(native,'Vendor/SwiftTerm/LICENSE')],
   ['MarkdownUI','swift-markdown-ui/LICENSE'],
   ['HighlighterSwift','HighlighterSwift/LICENCE.md'],
   ['NetworkImage','NetworkImage/LICENSE'],
@@ -44,7 +45,7 @@ for(const [name,source] of [
 ]) {
   const destination=join(output,'Contents/Resources/Licenses',`${name}.txt`);
   await rm(destination,{force:true});
-  await copyFile(join(native,'.build/checkouts',source),destination);
+  await copyFile(resolve(join(native,'.build/checkouts'),source),destination);
 }
 await bundleRustLicenses(root,output);
 await packageNativeRuntime(output,join(root,'crates/native-core/target/release/neura-native-core'),join(native,'.build/release/NeuraUpdater'));

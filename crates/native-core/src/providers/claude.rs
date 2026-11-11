@@ -229,15 +229,17 @@ impl CompletionMonitor {
                 let entries = worker.entries.lock().unwrap().clone();
                 readers.retain(|k, _| entries.contains_key(k));
                 for (terminal, path) in entries {
-                    if !sweep
-                        && !dirty.iter().any(|changed| {
-                            path.starts_with(changed)
-                                || std::fs::canonicalize(&path)
-                                    .unwrap_or_else(|_| path.clone())
-                                    .starts_with(changed)
-                        })
-                    {
-                        continue;
+                    // Resolve the transcript once per wake, and only when no event names
+                    // it directly, rather than once per changed path: sessions sharing a
+                    // project directory otherwise cost terminals x events resolutions.
+                    if !sweep && !dirty.iter().any(|changed| path.starts_with(changed)) {
+                        let resolved =
+                            std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                        if resolved == path
+                            || !dirty.iter().any(|changed| resolved.starts_with(changed))
+                        {
+                            continue;
+                        }
                     }
                     let boundary = match agents.completion_boundary(&terminal).await {
                         Some(boundary) => boundary,

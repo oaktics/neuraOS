@@ -10,7 +10,8 @@ let package = Package(
                .executable(name: "NeuraUpdater", targets: ["NeuraUpdater"])],
     dependencies: [
         .package(url: "https://github.com/smittytone/HighlighterSwift.git", exact: "3.1.0"),
-        .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.20.0"),
+        // SwiftTerm v1.20.0 with local renderer fixes; see Vendor/SwiftTerm/VENDORED.md.
+        .package(path: "Vendor/SwiftTerm"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
         .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0"),
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")
