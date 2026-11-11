@@ -289,6 +289,7 @@ extension TerminalView {
     {
         self.attributes = [:]
         self.urlAttributes = [:]
+        self.metalAttributeEpoch &+= 1
         self.colors = Array(repeating: nil, count: 256)
         self.trueColors = [:]
     }
@@ -567,6 +568,7 @@ extension TerminalView {
     {
         urlAttributes = [:]
         attributes = [:]
+        metalAttributeEpoch &+= 1
         clearCGColorCache()
 
 #if os(macOS)
@@ -2393,6 +2395,22 @@ extension TerminalView {
         }
 #if canImport(MetalKit)
         if metalView != nil {
+            // neuraOS: a range the renderer has not consumed yet (coalesced
+            // or hidden frames) is merged instead of replaced, and it stays
+            // forced if any part of it was.
+            let pendingRange = metalDirtyRange
+            let pendingIsContentOnly = metalDirtyIsContentOnly
+            let externalRequest = terminal.takeExternalUpdateRequest()
+            defer {
+                if let pendingRange {
+                    if let current = metalDirtyRange {
+                        metalDirtyRange = min(pendingRange.lowerBound, current.lowerBound)...max(pendingRange.upperBound, current.upperBound)
+                    } else {
+                        metalDirtyRange = pendingRange
+                    }
+                }
+                metalDirtyIsContentOnly = !externalRequest && (pendingRange == nil || pendingIsContentOnly)
+            }
             let buffer = displayBuffer
             if buffer.lines.count == 0 {
                 metalDirtyRange = nil

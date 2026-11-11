@@ -5,6 +5,20 @@ import CoreText
 final class CoreTextGlyphRasterizer {
     var fontSmoothing: Bool = true
 
+    /// neuraOS: true when the glyph has no ink (for example a space).
+    /// `rasterize` returns nil for these every time, so callers can remember
+    /// the answer instead of asking CoreText again for each such cell.
+    func isEmpty(font: CTFont, glyph: CGGlyph) -> Bool {
+        var glyphVar = glyph
+        let rect = CTFontGetBoundingRectsForGlyphs(font, .default, &glyphVar, nil, 1)
+        if rect.width <= 0 || rect.height <= 0 {
+            return true
+        }
+        let width = Int(ceil(rect.origin.x + rect.size.width) - floor(rect.origin.x))
+        let height = Int(ceil(rect.origin.y + rect.size.height) - floor(rect.origin.y))
+        return width <= 0 || height <= 0
+    }
+
     func rasterize(font: CTFont, glyph: CGGlyph) -> GlyphBitmap? {
         var glyphVar = glyph
         let rect = CTFontGetBoundingRectsForGlyphs(font, .default, &glyphVar, nil, 1)

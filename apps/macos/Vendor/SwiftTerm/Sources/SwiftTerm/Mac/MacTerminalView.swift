@@ -247,7 +247,26 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// last frame. When `viewDidMoveToWindow` fires with a different window,
     /// we rebuild the MTKView so a fresh CAMetalLayer binds to it.
     private weak var metalBoundWindow: NSWindow?
-    var metalDirtyRange: ClosedRange<Int>?
+    // neuraOS: any assignment forces the rows to be rebuilt; only
+    // `updateDisplay` may afterwards mark a parser-only range as content-only.
+    var metalDirtyRange: ClosedRange<Int>? {
+        didSet { metalDirtyIsContentOnly = false }
+    }
+    /// True when every row in `metalDirtyRange` was reported by the parser, so
+    /// an unchanged `BufferLine.generation` proves the row still draws the same.
+    var metalDirtyIsContentOnly = false
+    /// Bumped whenever the attribute caches are dropped (colors, fonts).
+    var metalAttributeEpoch: UInt64 = 0
+    /// neuraOS: lets the Metal renderer keep rows whose line did not change,
+    /// including rows that only moved because the screen scrolled. Set the
+    /// user default `SwiftTermDisableMetalRowReuse` to restore upstream
+    /// v1.20.0 behaviour (every row in the reported range is rebuilt).
+    public static var metalRowReuseEnabled: Bool = !UserDefaults.standard.bool(forKey: "SwiftTermDisableMetalRowReuse")
+    /// Test hook: rebuild every reused row and count differences in
+    /// `metalRenderStatistics.reuseMismatches`.
+    public static var metalVerifiesRowReuse = false
+    /// Work counters of the Metal renderer, or nil when Metal is not in use.
+    public var metalRenderStatistics: MetalRenderStatistics? { metalRenderer?.statistics }
     var pendingMetalDisplay: Bool = false
     /// The cursor position last submitted to the Metal renderer. Used to
     /// detect pure cursor-only moves (no rows dirty) such as the

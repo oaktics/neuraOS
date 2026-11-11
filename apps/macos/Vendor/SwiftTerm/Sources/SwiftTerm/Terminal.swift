@@ -516,6 +516,20 @@ open class Terminal {
     
     var refreshStart = Int.max
     var refreshEnd = -1
+    // neuraOS: redraw requests made outside `parse` come from the host view
+    // (selection, link hover, blink, option changes). They can change how a
+    // row is drawn without changing its `BufferLine.generation`, so renderers
+    // that reuse rows by generation must treat them as forced.
+    private var parseDepth = 0
+    private var externalUpdatePending = false
+
+    /// Returns whether a redraw was requested outside the parser since the
+    /// last call, and clears that state.
+    func takeExternalUpdateRequest () -> Bool
+    {
+        defer { externalUpdatePending = false }
+        return externalUpdatePending
+    }
     var scrollInvariantRefreshStart = Int.max
     var scrollInvariantRefreshEnd = -1
     var userScrolling = false
@@ -6204,6 +6218,8 @@ open class Terminal {
      */
     public func parse (buffer: ArraySlice<UInt8>)
     {
+        parseDepth += 1
+        defer { parseDepth -= 1 }
         parser.parse(data: buffer)
     }
      
@@ -6219,6 +6235,7 @@ open class Terminal {
      */
     func updateRange (_ y: Int, scrolling: Bool = false)
     {        
+        if parseDepth == 0 { externalUpdatePending = true }
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
@@ -6243,6 +6260,7 @@ open class Terminal {
 
     func updateRange (borrowing buffer: borrowing Buffer, _ y: Int, scrolling: Bool = false)
     {
+        if parseDepth == 0 { externalUpdatePending = true }
         if !scrolling {
             let effectiveY = buffer._yDisp + y
             if effectiveY >= 0 {
@@ -6273,6 +6291,7 @@ open class Terminal {
     
     public func updateFullScreen ()
     {
+        if parseDepth == 0 { externalUpdatePending = true }
         refreshStart = 0
         refreshEnd = rows
         
