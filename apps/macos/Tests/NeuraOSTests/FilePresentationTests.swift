@@ -94,4 +94,39 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertTrue(editor.isHorizontallyResizable)
         XCTAssertTrue(scroll.hasHorizontalScroller)
     }
+
+    // Colouring used to run one text-storage editing pass per changed line. Each
+    // pass invalidates layout to the end of the document, so a 10,000-line diff
+    // spent seconds on the main thread. The whole diff is now one pass.
+    @MainActor func testDiffColoringIsOneEditingPassForTenThousandLines() {
+        let lines = (0..<10_000).map {index in
+            index % 10 == 0 ? "@@ -\(index),7 +\(index),7 @@" : index % 3 == 0 ? "+追加 \(index) 🙂" : index % 3 == 1 ? "-removed \(index)" : " context \(index)"
+        }
+        let text = lines.joined(separator: "\n")
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        _ = editor.layoutManager
+        editor.string = text
+        let storage = editor.textStorage!
+        let counter = EditingPassCounter()
+        storage.delegate = counter
+        NativeTextEditor.colorDiff(storage, text: text)
+        XCTAssertEqual(counter.passes, 1)
+        XCTAssertEqual(lines.filter {$0.hasPrefix("+") || $0.hasPrefix("-") || $0.hasPrefix("@@")}.count, 7_000)
+        var offset = 0
+        for (index, line) in lines.enumerated() {
+            let expected: NSColor = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : .labelColor
+            let length = (line as NSString).length
+            if index < 40 || index > 9_960 {
+                var range = NSRange()
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: offset, effectiveRange: &range) as? NSColor, expected)
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: offset + length - 1, effectiveRange: nil) as? NSColor, expected)
+            }
+            offset += length + 1
+        }
+    }
+}
+
+private final class EditingPassCounter: NSObject, NSTextStorageDelegate {
+    var passes = 0
+    func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {passes += 1}
 }

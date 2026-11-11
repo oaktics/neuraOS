@@ -614,14 +614,19 @@ struct NativeTextEditor: NSViewRepresentable {
         let selection = editor.selectedRange(); editor.string = text
         editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
         context.coordinator.scheduleHighlight(editor)
-        if diff, let storage = editor.textStorage {
-            storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSRange(location: 0, length: storage.length))
-            var offset = 0
-            for line in text.components(separatedBy: "\n") {
-                let length = (line as NSString).length
-                let color: NSColor? = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : nil
-                if let color {storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: offset, length: length))}; offset += length + 1
-            }
+        if diff, let storage = editor.textStorage {Self.colorDiff(storage, text: text)}
+    }
+    static func colorDiff(_ storage: NSTextStorage, text: String) {
+        // One editing transaction for the whole diff. Outside it every changed
+        // line runs its own processEditing pass, which invalidates layout from
+        // that line onward: quadratic, and seconds of main-thread time by 10k lines.
+        storage.beginEditing(); defer {storage.endEditing()}
+        storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSRange(location: 0, length: storage.length))
+        var offset = 0
+        for line in text.components(separatedBy: "\n") {
+            let length = line.utf16.count
+            let color: NSColor? = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : nil
+            if let color {storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: offset, length: length))}; offset += length + 1
         }
     }
     static func configureInteraction(_ editor: NSTextView, visible: Bool, editable: Bool) {
