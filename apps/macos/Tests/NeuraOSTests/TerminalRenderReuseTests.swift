@@ -41,11 +41,17 @@ final class TerminalRenderReuseTests: XCTestCase {
             window.contentView = view
             try view.setUseMetal(true)
             metal = try XCTUnwrap(view.subviews.compactMap {$0 as? MTKView}.first)
+            disableAutomaticDraws()
         }
 
+        /// AppKit otherwise draws on its own schedule, sometimes between parsing
+        /// and SwiftTerm's display pass, which changes how work splits across
+        /// draws. This is the switch the app uses for hidden terminals; explicit
+        /// `draw()` calls still render.
+        func disableAutomaticDraws() {metal.enableSetNeedsDisplay = false}
+
         /// Feeds output, waits for SwiftTerm's display pass, then draws one frame.
-        /// Returns the renderer work done since the call started; AppKit may add
-        /// a draw of its own, which `frames` reports.
+        /// Returns the renderer work done for that frame.
         @discardableResult func frame(_ text: String = "", _ change: () -> Void = {}) async throws -> MetalRenderStatistics {
             // Let the previous frame's GPU completion release SwiftTerm's frame gate.
             try await Task.sleep(for: .milliseconds(12))
@@ -53,7 +59,6 @@ final class TerminalRenderReuseTests: XCTestCase {
             if !text.isEmpty {view.feed(text: text)}
             change()
             for _ in 0..<80 where terminal.getUpdateRange() != nil {try await Task.sleep(for: .milliseconds(5))}
-            // AppKit may already have drawn this frame from the display pass.
             // SwiftTerm refuses a draw while the previous frame is still on the
             // GPU, so retry until one is accepted.
             for _ in 0..<100 where statistics.frames == before.frames {
@@ -101,7 +106,8 @@ final class TerminalRenderReuseTests: XCTestCase {
             // The update range spans both rows and everything between them.
             let work = try await fixture.frame(fixture.at(rows - 6) + "✻ Thinking… \(index)s\(esc)[K" + fixture.at(rows) + "status \(index)\(esc)[K")
             XCTAssertEqual(work.rowsRebuilt, 2, "frame \(index)")
-            XCTAssertEqual(work.rowsRebuilt + work.rowsReused, rows * work.frames, "frame \(index)")
+            XCTAssertEqual(work.frames, 1, "frame \(index)")
+            XCTAssertEqual(work.rowsRebuilt + work.rowsReused, rows, "frame \(index)")
         }
     }
 
@@ -114,7 +120,8 @@ final class TerminalRenderReuseTests: XCTestCase {
             let work = try await fixture.frame(fixture.at(rows) + "\r\nnew line \(index) 日本語 ─")
             // The new bottom row, plus the row the cursor left.
             XCTAssertLessThanOrEqual(work.rowsRebuilt, 2, "frame \(index)")
-            XCTAssertEqual(work.rowsRebuilt + work.rowsReused, rows * work.frames, "frame \(index)")
+            XCTAssertEqual(work.frames, 1, "frame \(index)")
+            XCTAssertEqual(work.rowsRebuilt + work.rowsReused, rows, "frame \(index)")
             repositioned += work.rowsRepositioned
         }
         XCTAssertGreaterThan(repositioned, 20 * (rows - 3))
@@ -202,6 +209,7 @@ final class TerminalRenderReuseTests: XCTestCase {
         view.feed(text: at(rows) + "\r\nhidden one\r\nhidden two")
         try await Task.sleep(for: .milliseconds(60))
         view.setRenderingVisible(true)
+        fixture.disableAutomaticDraws()
         try await step()
         // Resize.
         try await step {view.setFrameSize(NSSize(width: 700, height: 500))}

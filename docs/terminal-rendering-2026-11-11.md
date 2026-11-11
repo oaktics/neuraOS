@@ -128,9 +128,11 @@ moved) or IME composition.
 The remaining tests assert the row counts above for the spinner and scrolling
 cases, upstream's counts when reuse is disabled, a full rebuild for a
 view-requested refresh, and that Metal output does not invalidate the
-terminal `NSView`. The tests that draw skip themselves if the machine cannot
-provide a Metal drawable; whether CI's virtual machines can was not known when
-this was written.
+terminal `NSView`. The tests that draw disable AppKit's automatic draws, so
+each step is exactly one draw after SwiftTerm's display pass, and skip
+themselves if the machine cannot provide a Metal drawable. On the pull
+request's first CI run (macos-15 runner, Swift 6.1) they ran rather than
+skipped.
 
 Not verified: behaviour in the running app (the built app was not launched,
 to avoid touching the installed service), and therefore paste, drag and drop,
