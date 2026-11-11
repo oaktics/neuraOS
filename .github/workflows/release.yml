@@ -207,7 +207,7 @@ jobs:
           wrangler r2 object put "$bucket/releases/neuraOS-$BUILD-darwin-arm64.zip" --remote \
             --file neuraOS-darwin-arm64.zip --content-type application/zip
           wrangler r2 object put "$bucket/appcast.xml" --remote --file appcast.xml --content-type 'application/xml; charset=utf-8'
-          while IFS= read -r key; do
+          while IFS= read -r key || [ -n "$key" ]; do
             [ -n "$key" ] && wrangler r2 object delete "$bucket/$key" --remote
           done < removed.txt
       # Builds before Sparkle (native-76 and older) update only from GitHub

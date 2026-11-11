@@ -50,6 +50,7 @@ test('appcast CLI refuses a private key that does not match the app', () => {
     '--base-url', 'https://u.example', '--out', join(dir, 'appcast.xml'), '--removed', join(dir, 'removed.txt')];
   assert.throws(() => execFileSync('node', args, {cwd: root, stdio: 'pipe', env: {...process.env, SPARKLE_ED_PRIVATE_KEY: key.seed, NEURA_SPARKLE_PUBLIC_KEY: sparkleKey().public}}));
   execFileSync('node', args, {cwd: root, stdio: 'pipe', env: {...process.env, SPARKLE_ED_PRIVATE_KEY: key.seed, NEURA_SPARKLE_PUBLIC_KEY: key.public}});
+  assert.equal(readFileSync(join(dir, 'removed.txt'), 'utf8'), '');
   const [entry] = parseItems(readFileSync(join(dir, 'appcast.xml'), 'utf8'));
   assert.equal(entry.url, 'https://u.example/releases/neuraOS-42-darwin-arm64.zip');
   const signature = /sparkle:edSignature="([^"]+)"/.exec(entry.xml)[1];
@@ -103,4 +104,25 @@ test('Worker exposes nothing but the feed and release archives', async () => {
   for (const path of ['/releases/%2e%2e%2fappcast.xml', '/releases/neuraOS-42-darwin-arm64.zip/x', '/releases/other.zip', '/secret', '/releases/neuraOS-1-darwin-arm64.zip'])
     assert.equal((await get(path)).status, 404, path);
   assert.equal((await get('/appcast.xml', {method: 'PUT', body: 'x'})).status, 405);
+});
+
+test('pruned archive list is newline-terminated so the shell loop deletes every key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'neura-prune-')), key = sparkleKey(), archive = join(dir, 'a.zip');
+  writeFileSync(archive, 'archive bytes');
+  let existing = '';
+  for (const build of [10, 11, 12]) existing = updateAppcast(existing, appcastItem({build, version: '0.2.0',
+    url: `https://u.example/releases/neuraOS-${build}-darwin-arm64.zip`, length: 1, signature: 's'}), build, 10).xml;
+  writeFileSync(join(dir, 'current.xml'), existing);
+  execFileSync('node', ['scripts/native/release/appcast.mjs', '--archive', archive, '--build', '13', '--version', '0.2.0',
+    '--base-url', 'https://u.example', '--existing', join(dir, 'current.xml'), '--keep', '2',
+    '--out', join(dir, 'appcast.xml'), '--removed', join(dir, 'removed.txt')],
+    {cwd: root, stdio: 'pipe', env: {...process.env, SPARKLE_ED_PRIVATE_KEY: key.seed, NEURA_SPARKLE_PUBLIC_KEY: key.public}});
+  assert.equal(readFileSync(join(dir, 'removed.txt'), 'utf8'), 'releases/neuraOS-11-darwin-arm64.zip\nreleases/neuraOS-10-darwin-arm64.zip\n');
+  // Same loop as .github/workflows/release.yml.
+  const seen = execFileSync('bash', ['-c', 'while IFS= read -r key || [ -n "$key" ]; do [ -n "$key" ] && echo "del $key"; done < "$1"', 'bash', join(dir, 'removed.txt')], {encoding: 'utf8'});
+  assert.equal(seen, 'del releases/neuraOS-11-darwin-arm64.zip\ndel releases/neuraOS-10-darwin-arm64.zip\n');
+  // The loop also survives a file written without the final newline.
+  writeFileSync(join(dir, 'legacy.txt'), 'releases/neuraOS-9-darwin-arm64.zip');
+  assert.equal(execFileSync('bash', ['-c', 'while IFS= read -r key || [ -n "$key" ]; do echo "del $key"; done < "$1"', 'bash', join(dir, 'legacy.txt')], {encoding: 'utf8'}),
+    'del releases/neuraOS-9-darwin-arm64.zip\n');
 });
