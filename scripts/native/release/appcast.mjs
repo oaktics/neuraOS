@@ -102,7 +102,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const {xml, removed} = updateAppcast(existing, item, build, Number(values.keep));
   writeFileSync(values.out, xml);
   // Only archives under this feed's /releases/ are ever pruned.
+  // One key per line, each newline-terminated: `while read` skips an unterminated last line.
   writeFileSync(values.removed, removed.filter(url => url.startsWith(`${base}/releases/`))
-    .map(url => url.slice(base.length + 1)).filter(key => /^releases\/neuraOS-\d+-darwin-arm64\.zip$/.test(key)).join('\n'));
+    .map(url => url.slice(base.length + 1)).filter(key => /^releases\/neuraOS-\d+-darwin-arm64\.zip$/.test(key))
+    .map(key => `${key}\n`).join(''));
   console.log(`Signed ${name} (${bytes.length} bytes); appcast keeps ${parseItems(xml).length} releases`);
 }
