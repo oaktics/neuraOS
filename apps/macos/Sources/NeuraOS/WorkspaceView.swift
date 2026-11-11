@@ -110,6 +110,11 @@ struct WorkspaceView: View {
     private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
     private var deletionBlocked: Bool {model.isWorkspaceBlocked(workspace.id)}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
+    // Each refresh makes the daemon run `git status` and `git branch`. Nobody can
+    // see the result while no window is on screen; returning restarts the task.
+    private var gitRefreshEnabled: Bool {
+        workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked && AppVisibility.shared.visible
+    }
     var body: some View {
         VStack(spacing: 0) {
             if let job = model.deletion(workspace.id) {WorkspaceDeletionStatus(workspace: workspace, job: job)}
@@ -196,8 +201,8 @@ struct WorkspaceView: View {
                 Button("キャンセル", role: .cancel) {closingTab = nil}
             }
         } message: {Text("このタブで実行中のCLIやコマンドを終了します。")}
-        .task(id: workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked) {
-            guard workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked else {return}
+        .task(id: gitRefreshEnabled) {
+            guard gitRefreshEnabled else {return}
             while !Task.isCancelled {
                 await refreshGit()
                 do {try await Task.sleep(for: .seconds(3))} catch {return}
