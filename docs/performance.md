@@ -367,11 +367,33 @@ Profiled and left unchanged:
   snapshots would widen the window in which a short-lived parent can disappear
   unobserved, so it was not changed without an ownership review.
 
+Rerun after the review fix (,  in the raw file). The
+tables above are from , before entity reads were made to wait for
+accepted control-lane writes.  performs such reads, so the 10-
+and 32-PTY bulk points were rerun in the same order twice and the paced workload
+once (two runs per binary):
+
+| | Daemon instructions, millions: before | after | Input p99 ms: before | after | State p99 ms: before | after | Completion ms: before | after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10 PTYs | 3386–3475 | 1797–1856 | 15.2–21.8 | 8.3–11.7 | 5.6–12.4 | 5.4–19.4 | 1980–2434 | 1904–2032 |
+| 32 PTYs | 10492–10700 | 5335–5450 | 61.4–134.7 | 17.1–29.6 | 44.9–248.1 | 15.6–35.6 | 3329–3986 | 2376–2829 |
+
+Instructions and disk bytes (51.7–51.9 and 183.6–185.9 MB) are the same as in
+the  rows. Input p99 still does not overlap the baseline at these two
+counts, but the candidate's ranges sit somewhat higher than the  ones
+(4.2–7.9 and 11.4–24.1 ms); with four noisy runs each that difference is not
+established either way, and it is the expected direction, since input reads
+again wait for queued control writes. The 32-PTY state p99 ranges do not overlap
+in this series; they did overlap in the first one, so the statement that no
+state-latency improvement is established stands. Paced workload: 744–747 before
+and 522–524 million instructions after, 345 change messages in every run, echo
+p50 35.5–36.1 ms before and 9.5–10.1 ms after, p90 38.5–40.7 and 13.6–15.2 ms.
+
 The branch's later commit resolves a Claude transcript path once per file-event
 wake instead of once per changed path (terminals x events `realpath` calls when
 sessions share a project directory). It has the same predicate, is not on the
-measured path, and was not benchmarked. One confirmation run of that build gave
-1,822 and 5,332 million instructions at 10 and 32 PTYs.
+measured path, and was not benchmarked separately; it is included in the rerun
+above.
 
 Not established: any effect on real Claude/Codex sessions, on the installed app,
 on battery life (the per-process billed-energy counter read zero in every
