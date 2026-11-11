@@ -238,6 +238,15 @@ struct NativeTerminal: NSViewRepresentable {
                 view.window?.makeFirstResponder(view)
             }
         }
+        private func requestFallbackDisplay(_ view: TerminalView, changed: Bool) {
+            // SwiftTerm schedules its own display pass after every feed. With the
+            // Metal renderer the terminal NSView draws nothing itself, so marking
+            // it dirty only makes AppKit rebuild an empty full-size backing store
+            // per output batch. Keep the explicit request for the CoreGraphics
+            // fallback renderer only.
+            guard visible, changed, !view.isUsingMetalRenderer else {return}
+            view.needsDisplay = true
+        }
         func apply(_ output: TerminalOutput, to view: TerminalView) {
             updateStatus(output.status)
             applying = true
@@ -251,7 +260,7 @@ struct NativeTerminal: NSViewRepresentable {
                 if running, visible, let size = desiredSize {applying = true; view.getTerminal().resize(cols: size.0, rows: size.1); applying = false; pendingSize = size}
                 focusIfVisible()
             }
-            if visible && !output.chunks.isEmpty {view.needsDisplay = true}
+            requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
         }
         // Replay can span megabytes after a busy background session. Yield between
         // bounded UTF-8 feeds so input, connection updates and painting can run.
@@ -277,7 +286,7 @@ struct NativeTerminal: NSViewRepresentable {
             // Finalize the cursor only once all chunks (including resize markers) apply.
             apply(TerminalOutput(data: "", chunks: [], cursor: output.cursor, more: output.more,
                                  status: output.status, cols: output.cols, rows: output.rows), to: view)
-            if visible && !output.chunks.isEmpty {view.needsDisplay = true}
+            requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
         }
         private func pause(milliseconds: Int) async {
             guard !Task.isCancelled else {return}
