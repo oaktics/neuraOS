@@ -110,6 +110,11 @@ struct WorkspaceView: View {
     private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
     private var deletionBlocked: Bool {model.isWorkspaceBlocked(workspace.id)}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
+    // Each refresh makes the daemon run `git status` and `git branch`. Nobody can
+    // see the result while no window is on screen; returning restarts the task.
+    private var gitRefreshEnabled: Bool {
+        workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked && AppVisibility.shared.visible
+    }
     var body: some View {
         VStack(spacing: 0) {
             if let job = model.deletion(workspace.id) {WorkspaceDeletionStatus(workspace: workspace, job: job)}
@@ -196,8 +201,8 @@ struct WorkspaceView: View {
                 Button("キャンセル", role: .cancel) {closingTab = nil}
             }
         } message: {Text("このタブで実行中のCLIやコマンドを終了します。")}
-        .task(id: workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked) {
-            guard workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked else {return}
+        .task(id: gitRefreshEnabled) {
+            guard gitRefreshEnabled else {return}
             while !Task.isCancelled {
                 await refreshGit()
                 do {try await Task.sleep(for: .seconds(3))} catch {return}
@@ -610,18 +615,24 @@ struct NativeTextEditor: NSViewRepresentable {
             editor.performFindPanelAction(item)
         }
         context.coordinator.scheduleHighlight(editor)
-        guard editor.string != text else {return}
+        guard context.coordinator.differs(editor, from: text) else {return}
         let selection = editor.selectedRange(); editor.string = text
+        context.coordinator.synced = text
         editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
         context.coordinator.scheduleHighlight(editor)
-        if diff, let storage = editor.textStorage {
-            storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSRange(location: 0, length: storage.length))
-            var offset = 0
-            for line in text.components(separatedBy: "\n") {
-                let length = (line as NSString).length
-                let color: NSColor? = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : nil
-                if let color {storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: offset, length: length))}; offset += length + 1
-            }
+        if diff, let storage = editor.textStorage {Self.colorDiff(storage, text: text)}
+    }
+    static func colorDiff(_ storage: NSTextStorage, text: String) {
+        // One editing transaction for the whole diff. Outside it every changed
+        // line runs its own processEditing pass, which invalidates layout from
+        // that line onward: quadratic, and seconds of main-thread time by 10k lines.
+        storage.beginEditing(); defer {storage.endEditing()}
+        storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: NSRange(location: 0, length: storage.length))
+        var offset = 0
+        for line in text.components(separatedBy: "\n") {
+            let length = line.utf16.count
+            let color: NSColor? = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : nil
+            if let color {storage.addAttribute(.foregroundColor, value: color, range: NSRange(location: offset, length: length))}; offset += length + 1
         }
     }
     static func configureInteraction(_ editor: NSTextView, visible: Bool, editable: Bool) {
@@ -643,23 +654,37 @@ struct NativeTextEditor: NSViewRepresentable {
         var highlightTask: Task<Void, Never>?
         var highlightedText: String?
         var highlightedDark: Bool?
+        // The editor's contents as a native Swift string, when known. `editor.string`
+        // is a bridged NSString: every comparison against it walks UTF-16, and a
+        // bridged value stored in the document made each later `dirty`/equality
+        // check on the keystroke path equally slow.
+        var synced: String?
         init(_ parent: NativeTextEditor) {self.parent = parent}
+        func differs(_ editor: NSTextView, from text: String) -> Bool {
+            if let synced {return synced != text}
+            guard editor.string != text else {synced = text; return false}
+            return true
+        }
         func textDidChange(_ notification: Notification) {
-            guard parent.editable && parent.visible else {return}
-            if let editor = notification.object as? NSTextView {parent.text = editor.string; scheduleHighlight(editor)}
+            // An unreported change leaves the cache unknown; the next update compares the editor itself.
+            guard parent.editable && parent.visible else {synced = nil; return}
+            if let editor = notification.object as? NSTextView {
+                var value = editor.string; value.makeContiguousUTF8()
+                synced = value; parent.text = value; scheduleHighlight(editor)
+            }
         }
         func scheduleHighlight(_ editor: NSTextView) {
             editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             guard let language = parent.language, !editor.hasMarkedText() else {return}
-            let source = editor.string
+            let source = synced ?? editor.string
             let dark = editor.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             guard source != highlightedText || dark != highlightedDark else {return}
             highlightedText = source; highlightedDark = dark
             highlightTask?.cancel()
-            highlightTask = Task { @MainActor [weak editor] in
+            highlightTask = Task { @MainActor [weak self, weak editor] in
                 do {try await Task.sleep(for: .milliseconds(180))} catch {return}
                 let result = await CodeHighlighter.shared.highlight(source, language: language, dark: dark)
-                guard !Task.isCancelled, let editor, editor.string == source, !editor.hasMarkedText(), let manager = editor.layoutManager else {return}
+                guard !Task.isCancelled, let self, let editor, (self.synced ?? editor.string) == source, !editor.hasMarkedText(), let manager = editor.layoutManager else {return}
                 let range = NSRange(location: 0, length: (source as NSString).length)
                 manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
                 result?.enumerateAttribute(.foregroundColor, in: range) {color, range, _ in
