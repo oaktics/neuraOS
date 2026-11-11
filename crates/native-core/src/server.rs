@@ -229,7 +229,7 @@ impl AppState {
             .store
             .call(
                 "state",
-                json!({"hostName":std::env::var("NEURA_HOST_NAME").unwrap_or("このMac".into())}),
+                json!({"hostName":host_name()}),
             )
             .await?;
         s["features"] = json!(FEATURES);
@@ -473,8 +473,31 @@ async fn auth(State(s): State<Arc<AppState>>, req: axum::extract::Request, next:
         .insert("cache-control", "no-store".parse().unwrap());
     response
 }
-async fn state_get(State(s): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(s.snapshot().await?))
+/// A JSON body the store already encoded; avoids decoding it only to encode it again.
+fn encoded(body: String) -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+async fn state_get(State(s): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    s.pty.check_healthy()?;
+    // Same members as `snapshot`, assembled from the stored rows as text.
+    let Value::String(mut body) = s
+        .store
+        .call("state_json", json!({"hostName":host_name()}))
+        .await?
+    else {
+        return Err(ApiError::storage());
+    };
+    body.push_str(",\"features\":");
+    body.push_str(&json!(FEATURES).to_string());
+    body.push_str(",\"runtime\":\"rust\",\"daemonInstanceId\":");
+    body.push_str(&json!(s.epoch).to_string());
+    body.push_str(",\"daemonBuild\":");
+    body.push_str(&json!(daemon_build()).to_string());
+    body.push('}');
+    Ok(encoded(body))
+}
+fn host_name() -> String {
+    std::env::var("NEURA_HOST_NAME").unwrap_or("このMac".into())
 }
 async fn capabilities() -> Json<Value> {
     let mut p = Vec::new();
@@ -590,19 +613,15 @@ async fn output(
     State(s): State<Arc<AppState>>,
     Path(key): Path<String>,
     Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     s.pty.check_healthy()?;
     id(&key)?;
-    let t = s
-        .store
-        .get("terminals", &key)
-        .await?
-        .ok_or_else(|| ApiError::new("terminal_missing", "ターミナルがありません。", 404))?;
-    let mut page=s.store.call("output",json!({"terminalId":key,"after":after(&q)?,"chunksOnly":q.get("chunksOnly").is_some_and(|v|v=="true")})).await?;
-    for k in ["status", "cols", "rows"] {
-        page[k] = t[k].clone();
+    // One read-only request returns the terminal's status and its output page
+    // from the same snapshot, already encoded.
+    match s.store.call("output_page",json!({"terminalId":key,"after":after(&q)?,"chunksOnly":q.get("chunksOnly").is_some_and(|v|v=="true")})).await? {
+        Value::String(body) => Ok(encoded(body)),
+        _ => Err(ApiError::new("terminal_missing", "ターミナルがありません。", 404)),
     }
-    Ok(Json(page))
 }
 async fn workspace_read(
     State(s): State<Arc<AppState>>,
@@ -762,8 +781,21 @@ async fn stream_session(socket: WebSocket, s: Arc<AppState>, native_id: Option<S
     let mut ping = tokio::time::interval(Duration::from_secs(15));
     ping.tick().await;
     let mut pong = true;
+    let mut announced = None;
     loop {
-        tokio::select! {_=closing.changed()=>break,change=changes.recv()=>{let Ok(mut c)=change else{break;};tokio::time::sleep(Duration::from_millis(16)).await;let mut ids:HashSet<String>=c.terminals.drain(..).collect();let mut agent_ids:HashSet<String>=c.agent_terminals.drain(..).collect();loop{match changes.try_recv(){Ok(v)=>{c.state|=v.state;c.browser|=v.browser;ids.extend(v.terminals);agent_ids.extend(v.agent_terminals);},Err(broadcast::error::TryRecvError::Empty)=>break,Err(_)=>return,}}let value=json!({"type":"changed","state":c.state,"terminals":ids,"agentTerminals":agent_ids,"browser":c.browser});if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Text(value.to_string().into()))).await.map_or(true,|r|r.is_err()){break;}},message=source.next()=>match message{Some(Ok(Message::Pong(_)))=>pong=true,Some(Ok(Message::Ping(v)))=>{if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Pong(v))).await.map_or(true,|r|r.is_err()){break;}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},_=ping.tick()=>{if !pong{break;}pong=false;if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Ping(vec![].into()))).await.map_or(true,|r|r.is_err()){break;}}}
+        tokio::select! {_=closing.changed()=>break,change=changes.recv()=>{
+            let Ok(mut c)=change else{break;};
+            // Output on a stream that has been quiet is announced at once, so a key
+            // echo does not wait out the gather window. State, agent and browser
+            // changes, and output while the stream is busy, are still gathered for
+            // 16 ms; that keeps the notification and refetch rate as before.
+            let prompt=!c.state&&!c.browser&&c.agent_terminals.is_empty()&&announced.map_or(true,|at:tokio::time::Instant|at.elapsed()>=Duration::from_millis(48));
+            if !prompt{tokio::time::sleep(Duration::from_millis(16)).await;}
+            let mut ids:HashSet<String>=c.terminals.drain(..).collect();let mut agent_ids:HashSet<String>=c.agent_terminals.drain(..).collect();
+            loop{match changes.try_recv(){Ok(v)=>{c.state|=v.state;c.browser|=v.browser;ids.extend(v.terminals);agent_ids.extend(v.agent_terminals);},Err(broadcast::error::TryRecvError::Empty)=>break,Err(_)=>return,}}
+            let value=json!({"type":"changed","state":c.state,"terminals":ids,"agentTerminals":agent_ids,"browser":c.browser});
+            announced=Some(tokio::time::Instant::now());
+            if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Text(value.to_string().into()))).await.map_or(true,|r|r.is_err()){break;}},message=source.next()=>match message{Some(Ok(Message::Pong(_)))=>pong=true,Some(Ok(Message::Ping(v)))=>{if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Pong(v))).await.map_or(true,|r|r.is_err()){break;}},Some(Ok(Message::Close(_)))|None|Some(Err(_))=>break,_=>{}},_=ping.tick()=>{if !pong{break;}pong=false;if tokio::time::timeout(Duration::from_secs(2),sink.send(Message::Ping(vec![].into()))).await.map_or(true,|r|r.is_err()){break;}}}
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), sink.close()).await;
 }
@@ -940,11 +972,16 @@ async fn execute(s: Arc<AppState>, c: &Value, op: &str) -> Result<Value, ApiErro
     ]
     .contains(&kind);
     let exclusive = ["project.remove", "project.attach"].contains(&kind);
+    // Keystrokes and resizes touch only their own PTY session, which has its own
+    // lock and ordering. They keep the project guard and the deletion admission
+    // below, but do not queue behind a slow mutation of the same workspace such
+    // as a terminal stop grace period or a remote Git operation.
+    let serialized = !["terminal.input", "terminal.resize"].contains(&kind);
     let _scope = s
         .mutation
         .enter(
             project.as_deref(),
-            workspace.as_deref(),
+            workspace.as_deref().filter(|_| serialized),
             exclusive,
             catalogue,
         )

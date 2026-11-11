@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import AppKit
 @testable import NeuraOS
 
@@ -94,4 +95,70 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertTrue(editor.isHorizontallyResizable)
         XCTAssertTrue(scroll.hasHorizontalScroller)
     }
+
+    // `NSTextView.string` is a bridged NSString. Stored in the document it made
+    // every dirty/equality check per keystroke walk UTF-16; the editor now hands
+    // SwiftUI a native string once and compares against that cached copy.
+    @MainActor func testEditorPublishesNativeTextAndComparesWithoutBridging() {
+        _ = NSApplication.shared
+        final class Box {var text = "初期 text\n"}
+        let box = Box()
+        let view = NativeTextEditor(text: Binding(get: {box.text}, set: {box.text = $0}), editable: true, diff: false)
+        let coordinator = view.makeCoordinator()
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        editor.delegate = coordinator
+        XCTAssertTrue(coordinator.differs(editor, from: box.text))
+        editor.string = box.text; coordinator.synced = box.text
+        XCTAssertFalse(editor.string.isContiguousUTF8, "fixture no longer exercises a bridged string")
+        editor.insertText("追加🙂", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(box.text, "追加🙂初期 text\n")
+        XCTAssertTrue(box.text.isContiguousUTF8)
+        XCTAssertEqual(coordinator.synced, editor.string)
+        XCTAssertFalse(coordinator.differs(editor, from: box.text))
+        XCTAssertTrue(coordinator.differs(editor, from: "replaced elsewhere"))
+        // A change that is not published must not leave a stale cache behind.
+        coordinator.parent = NativeTextEditor(text: Binding(get: {box.text}, set: {box.text = $0}), editable: false, diff: false)
+        editor.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertNil(coordinator.synced)
+        XCTAssertEqual(box.text, "追加🙂初期 text\n")
+        XCTAssertTrue(coordinator.differs(editor, from: box.text))
+        editor.string = box.text
+        XCTAssertFalse(coordinator.differs(editor, from: box.text))
+        XCTAssertEqual(coordinator.synced, box.text)
+    }
+
+    // Colouring used to run one text-storage editing pass per changed line. Each
+    // pass invalidates layout to the end of the document, so a 10,000-line diff
+    // spent seconds on the main thread. The whole diff is now one pass.
+    @MainActor func testDiffColoringIsOneEditingPassForTenThousandLines() {
+        let lines = (0..<10_000).map {index in
+            index % 10 == 0 ? "@@ -\(index),7 +\(index),7 @@" : index % 3 == 0 ? "+追加 \(index) 🙂" : index % 3 == 1 ? "-removed \(index)" : " context \(index)"
+        }
+        let text = lines.joined(separator: "\n")
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        _ = editor.layoutManager
+        editor.string = text
+        let storage = editor.textStorage!
+        let counter = EditingPassCounter()
+        storage.delegate = counter
+        NativeTextEditor.colorDiff(storage, text: text)
+        XCTAssertEqual(counter.passes, 1)
+        XCTAssertEqual(lines.filter {$0.hasPrefix("+") || $0.hasPrefix("-") || $0.hasPrefix("@@")}.count, 7_000)
+        var offset = 0
+        for (index, line) in lines.enumerated() {
+            let expected: NSColor = line.hasPrefix("+") ? .systemGreen : line.hasPrefix("-") ? .systemRed : line.hasPrefix("@@") ? .secondaryLabelColor : .labelColor
+            let length = (line as NSString).length
+            if index < 40 || index > 9_960 {
+                var range = NSRange()
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: offset, effectiveRange: &range) as? NSColor, expected)
+                XCTAssertEqual(storage.attribute(.foregroundColor, at: offset + length - 1, effectiveRange: nil) as? NSColor, expected)
+            }
+            offset += length + 1
+        }
+    }
+}
+
+private final class EditingPassCounter: NSObject, NSTextStorageDelegate {
+    var passes = 0
+    func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {passes += 1}
 }

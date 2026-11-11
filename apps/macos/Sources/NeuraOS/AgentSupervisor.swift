@@ -99,6 +99,8 @@ struct AgentSupervisor: View {
         return agents.filter {$0.isVisible(runningTerminalIDs: running, includeStopped: includeStopped)}
     }
     private var current: ManagedAgent? {visibleAgents.first {$0.id == selected}}
+    // The agent list and conversation are refetched every 3 s; skip that while no window is on screen.
+    private var refreshEnabled: Bool {visible && AppVisibility.shared.visible}
     var body: some View {
         HSplitView {
             VStack(alignment: .leading, spacing: 0) {
@@ -179,7 +181,7 @@ struct AgentSupervisor: View {
                 if let error {Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)}
             }.padding().frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .task(id: visible) {guard visible else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
+        .task(id: refreshEnabled) {guard refreshEnabled else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
         .onChange(of: visibleAgents.map(\.id)) {_, _ in reconcileSelection()}
         .task(id: selected) {history = AgentHistoryWindow(); lastReadStamp = nil; steer = false; text = ""; answers = [:]; await read()}
     }
