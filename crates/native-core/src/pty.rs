@@ -17,7 +17,9 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 type NativeChild = Box<dyn portable_pty::Child + Send + Sync>;
-/// Upper bound for one read turn and for one stored output row.
+/// Bytes read from one PTY per reactor turn, and the size up to which a batch
+/// merges a terminal's chunks. A decoded chunk can exceed it (carried partial
+/// UTF-8, U+FFFD expansion), so stored rows are about, not at most, this size.
 const ROW_BYTES: usize = 32768;
 static CANCEL_REAPER: std::sync::OnceLock<Result<std::sync::mpsc::Sender<NativeChild>, String>> =
     std::sync::OnceLock::new();
@@ -292,7 +294,7 @@ impl PtyRuntime {
                     }
                     bytes += row.data.len();
                     // Chunks of one terminal inside a batch form one stored row up to
-                    // the read-buffer size. Per-terminal byte order is unchanged, and
+                    // about the read-buffer size. Per-terminal byte order is unchanged, and
                     // a resize marker always ends the batch, so nothing crosses it.
                     match rows.iter_mut().rev().find(|r| r.terminal_id == row.terminal_id) {
                         Some(last) if last.data.len() + row.data.len() <= ROW_BYTES => {

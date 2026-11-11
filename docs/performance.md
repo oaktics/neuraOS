@@ -27,11 +27,16 @@ release checks remain separate.
   predecessor committed at least 8 ms earlier also closes after 2 ms without new
   bytes, so isolated output is not held for the whole window. Queued reads of one
   PTY are gathered per reactor turn, and a terminal's chunks inside one batch are
-  stored as one row of at most 32 KiB. SQLite uses WAL and `synchronous=FULL`,
+  merged into rows of about 32 KiB (decoding a carried partial sequence or
+  invalid bytes can make a row larger). SQLite uses WAL and `synchronous=FULL`,
   one writer, a read-only connection for output pages and a second read-only
   connection for state, entity, notification and event reads. Each read request
-  uses one WAL snapshot; operation lookups and deletion gates stay on the writer
-  FIFO. See [the 2026-11-11 measurements](#read-lanes-row-gathering-and-interactive-echo-2026-11-11). Control and
+  uses one WAL snapshot. Entity reads (`get`, `list`, `state`) first wait for every
+  control-lane write already accepted, so they keep the ordering of the writer
+  FIFO even when a write's caller has gone away; client polling of `/v1/state`,
+  output, notifications and events does not wait. Every reader-served request
+  fails closed once the writer thread is gone. Operation lookups and deletion
+  gates stay on the writer FIFO. See [the 2026-11-11 measurements](#read-lanes-row-gathering-and-interactive-echo-2026-11-11). Control and
   bulk queues have separate byte credits/FIFO ordering; barriers await accepted
   writes in both lanes. Ready operation-start/finish records share a FULL/WAL
   transaction in groups of at most eight, without a batching timer. Replies
@@ -254,9 +259,14 @@ do not join them with these rows.
 What changed in the daemon:
 
 - `get`, `list`, `state`, notification and event reads use a read-only connection
-  on its own thread instead of the writer queue. Replies still follow commit, so
-  a caller observes every write whose reply it has received; a read issued while
-  another caller's write is still queued may not see that write.
+  on its own thread instead of the writer queue. Replies still follow commit.
+  Entity reads used by handlers (`get`, `list`, `state`) wait until the writer has
+  finished every control-lane write accepted before the read, exactly the order
+  they had on the writer FIFO; with nothing queued that is one comparison. This
+  was added after review: without it a write whose caller disconnected before the
+  reply could be invisible to the next handler's read-modify-write. The client
+  polling paths (`/v1/state`, output pages, notifications, events) do not wait.
+  All reader-served requests return a storage error once the writer has exited.
 - `/v1/terminals/{id}/output` is one read-only request that returns the terminal
   status and the page from the same snapshot, encoded directly from SQLite text.
   `/v1/state` is assembled from the stored rows as validated text. Members, member
@@ -264,8 +274,10 @@ What changed in the daemon:
 - PTY output reaches the writer as typed rows. It was previously copied into a
   JSON tree, cloned, and serialized once more only to count queue credits.
 - A macOS PTY returns at most 1 KiB per read. The reactor now gathers what is
-  queued (up to 32 KiB) in one turn and the batch stores one row per terminal up
-  to 32 KiB, instead of one stored, indexed and re-encoded row per KiB.
+  queued (up to 32 KiB) in one turn and the batch merges a terminal's chunks up
+  to 32 KiB, instead of one stored, indexed and re-encoded row per KiB. A row is
+  not capped exactly: a full read plus a carried partial UTF-8 sequence decodes
+  to a few bytes more, and invalid bytes expand to U+FFFD.
 - The event stream announces terminal output at once when it has sent nothing
   for 48 ms. State, agent and browser changes, and output on a busy stream, keep
   the 16 ms gather, so the notification rate under load is unchanged.
@@ -317,12 +329,18 @@ Deterministic checks, independent of timing:
 
 - The 32-PTY fixture stores 8,490,304 bytes as 332 to 371 rows (three runs). One
   row per read could not use fewer than 8,292. The test asserts a mean row above
-  2 KiB and the 32 KiB bound.
-- `reads_do_not_wait_for_a_writer_inside_a_commit_and_observe_replied_writes`
-  holds the writer inside a commit behind the test gate and requires state,
-  entity, list, event, notification and output reads to complete. Routing those
-  reads back to the writer makes it fail with a timeout. It also checks 50
-  write-then-read rounds and a compare-and-swap update.
+  2 KiB.
+- `client_reads_do_not_wait_for_a_writer_inside_a_commit_and_entity_reads_stay_ordered`
+  holds the writer inside a commit behind the test gate with a second write
+  queued. The encoded state, event, notification and output reads must complete;
+  an entity read must stay pending until the queued write commits and then see
+  it. It also checks 50 write-then-read rounds and a compare-and-swap update.
+- `entity_reads_observe_accepted_writes_whose_caller_went_away` enqueues a put,
+  drops its future, then reads, modifies and writes, 200 times: zero stale reads
+  and zero lost updates. With the ordering wait removed it fails.
+- `reader_served_requests_fail_closed_once_the_writer_is_gone` stops the writer
+  and requires state, entity, list, event, notification and output reads to
+  return an error. With the liveness check removed they keep succeeding.
 - `encoded_state_and_output_pages_equal_the_value_forms` compares the directly
   encoded state and output bodies with the previous value-tree forms, including a
   deletion overlay, escapes, a resize marker, paging limits, a missing terminal

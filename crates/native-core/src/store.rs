@@ -355,6 +355,12 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
             Ok(Value::Null)
         },
         "barrier" => Ok(json!({})),
+        #[cfg(test)]
+        "test_abandon_transaction" => {
+            // Leaves the writer inside a transaction, which makes it close its queues.
+            db.execute_batch("BEGIN IMMEDIATE").map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
         "put" => {
             let tx = db.transaction().map_err(|e| e.to_string())?;
             put(&tx, table(a)?, &a["value"], a.get("notification"))?;
@@ -537,6 +543,8 @@ fn handle(db: &mut Connection, r: &Request) -> Result<Value, String> {
 }
 
 struct Job {
+    /// Position in the control lane's FIFO; 0 for other lanes.
+    seq: u64,
     trace: Option<String>,
     request: Request,
     reply: oneshot::Sender<Result<Value, ApiError>>,
@@ -617,7 +625,8 @@ fn serve_reads(mut rx: mpsc::Receiver<Job>, db: Connection) {
         let _scope = performance::StoreScope::enter(job.trace.iter().cloned().collect());
         // One deferred transaction pins a single committed snapshot for every
         // statement of the request. Replies follow commit, so a caller always
-        // observes the writes whose replies it has already received.
+        // observes the writes whose replies it has already received. Entity reads
+        // additionally wait for accepted control writes before they get here.
         let result = db
             .unchecked_transaction()
             .map_err(|e| e.to_string())
@@ -639,6 +648,12 @@ pub struct StoreHandle {
     credit: Arc<Semaphore>,
     bulk_credit: Arc<Semaphore>,
     enqueue: Arc<tokio::sync::RwLock<()>>,
+    /// Sequence of the last job accepted into the control lane. The lock also
+    /// makes the sequence order equal the channel order.
+    accepted: Arc<std::sync::Mutex<u64>>,
+    /// Sequence of the last control job the writer finished. Its sender lives on
+    /// the writer thread, so a closed channel means the writer is gone.
+    settled: tokio::sync::watch::Receiver<u64>,
 }
 impl StoreHandle {
     pub async fn open(path: &Path, events: broadcast::Sender<Change>) -> Result<Self, ApiError> {
@@ -648,6 +663,7 @@ impl StoreHandle {
         let (reads, read_rx) = mpsc::channel::<Job>(16);
         let (state_reads, state_rx) = mpsc::channel::<Job>(16);
         let (ready, ready_rx) = oneshot::channel();
+        let (settle, settled) = tokio::sync::watch::channel(0u64);
         let changes=events.clone();
         std::thread::Builder::new().name("native-store".into()).spawn(move||{
    let init=(||->Result<(Connection,Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}writer.set_prepared_statement_cache_capacity(64);
@@ -677,7 +693,10 @@ impl StoreHandle {
      let Some((job,control))=next else{continue;};
      let jobs=if control {ready_group(job,&mut rx,&mut pending,CONTROL_QUANTUM-control_run)}else{vec![job]};
      control_run=if control{control_run+jobs.len()}else{0};
-     if !execute_group(&mut writer,jobs,&changes){break;}
+     let top=jobs.iter().map(|j|j.seq).max().unwrap_or(0);
+     let healthy=execute_group(&mut writer,jobs,&changes);
+     if top>0 {settle.send_replace(top);}
+     if !healthy {break;}
     }
    });
   }).map_err(|_|ApiError::storage())?;
@@ -693,6 +712,8 @@ impl StoreHandle {
             credit: Arc::new(Semaphore::new(4 * 1024 * 1024)),
             bulk_credit: Arc::new(Semaphore::new(12 * 1024 * 1024)),
             enqueue: Arc::new(tokio::sync::RwLock::new(())),
+            accepted: Arc::new(std::sync::Mutex::new(0)),
+            settled,
         };
         store.call("recover", json!({})).await?;
         Ok(store)
@@ -705,16 +726,20 @@ impl StoreHandle {
             // Exclude new enqueues while FIFO fences pass through both lanes. Jobs already
             // awaiting credits are not accepted yet and therefore fall after this barrier.
             let _gate = self.enqueue.write().await;
-            for tx in [&self.bulk, &self.writes] {
+            for control in [false, true] {
                 let (reply, rx) = oneshot::channel();
-                tx.send(Job {
+                let job = Job {
+                    seq: 0,
                     trace: trace.clone(),
                     request: Request::new("barrier", Value::Null),
                     reply,
                     _credit: None,
-                })
-                .await
-                .map_err(|_| ApiError::storage())?;
+                };
+                if control {
+                    self.accept(job).await?;
+                } else {
+                    self.bulk.send(job).await.map_err(|_| ApiError::storage())?;
+                }
                 rx.await.map_err(|_| ApiError::storage())??;
             }
             return Ok(json!({}));
@@ -729,6 +754,32 @@ impl StoreHandle {
         if let Some(id)=&trace { performance::event(id,"store.queue.begin"); }
         let bytes = rows.iter().map(|r| r.terminal_id.len() + r.data.len() + 16).sum();
         self.submit(Request { op: "append".into(), args: Value::Null, rows }, bytes, trace).await.map(|_| ())
+    }
+    /// Enqueues a control-lane job. Reserving first means the sequence is assigned
+    /// only when the job is certain to enter the queue, with no await in between.
+    async fn accept(&self, mut job: Job) -> Result<(), ApiError> {
+        let slot = self.writes.reserve().await.map_err(|_| ApiError::storage())?;
+        let mut accepted = self.accepted.lock().unwrap();
+        *accepted += 1;
+        job.seq = *accepted;
+        slot.send(job);
+        Ok(())
+    }
+    /// Waits until the writer has finished every control job accepted so far.
+    /// This is the ordering reads had while they shared the writer's FIFO: a
+    /// read observes each accepted write, including one whose caller went away
+    /// before its reply. It returns at once when nothing is queued.
+    async fn settle(&self) -> Result<(), ApiError> {
+        let target = *self.accepted.lock().unwrap();
+        if *self.settled.borrow() >= target {
+            return Ok(());
+        }
+        let mut settled = self.settled.clone();
+        settled
+            .wait_for(|done| *done >= target)
+            .await
+            .map(|_| ())
+            .map_err(|_| ApiError::storage())
     }
     async fn submit(&self, request: Request, bytes: usize, trace: Option<String>) -> Result<Value, ApiError> {
         let bytes = bytes.max(1);
@@ -755,12 +806,26 @@ impl StoreHandle {
         // `operation` stays on the writer: a retry must observe an accepted
         // operation_start even when its first caller went away before the reply.
         let tx = match op {
-            "output" | "output_page" => &self.reads,
-            "get" | "list" | "state" | "state_json" | "notifications" | "events" => &self.state_reads,
-            _ if bulk => &self.bulk,
-            _ => &self.writes,
+            "output" | "output_page" => Some(&self.reads),
+            "get" | "list" | "state" | "state_json" | "notifications" | "events" => Some(&self.state_reads),
+            _ if bulk => Some(&self.bulk),
+            _ => None,
         };
+        if tx.is_some() && !bulk {
+            // The read-only connections outlive the writer. Without it nothing can
+            // be stored, so reads fail closed exactly as they did on its queue.
+            if self.settled.has_changed().is_err() {
+                return Err(ApiError::storage());
+            }
+            // Entity reads feed read-modify-write handlers and keep FIFO ordering
+            // with accepted writes. Client polling of state, output, notifications
+            // and events carries no such expectation and does not wait.
+            if matches!(op, "get" | "list" | "state") {
+                self.settle().await?;
+            }
+        }
         let job = Job {
+            seq: 0,
             trace,
             request,
             reply,
@@ -768,7 +833,10 @@ impl StoreHandle {
         };
         {
             let _gate = self.enqueue.read().await;
-            tx.send(job).await.map_err(|_| ApiError::storage())?;
+            match tx {
+                Some(tx) => tx.send(job).await.map_err(|_| ApiError::storage())?,
+                None => self.accept(job).await?,
+            }
         }
         rx.await.map_err(|_| ApiError::storage())?
     }
@@ -1100,7 +1168,7 @@ mod operation_group_tests {
     use super::*;
     fn job(op: &str, args: Value) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         let (reply, rx) = oneshot::channel();
-        (Job { trace: None, request: Request::new(op, args), reply, _credit: None }, rx)
+        (Job { seq: 0, trace: None, request: Request::new(op, args), reply, _credit: None }, rx)
     }
     fn start(id: &str) -> (Job, oneshot::Receiver<Result<Value, ApiError>>) {
         job("operation_start", json!({"id":id,"hash":"h"}))
@@ -1349,7 +1417,7 @@ mod read_lane_tests {
         assert_eq!(limited["chunks"], output(&db, &args).unwrap()["chunks"]);
     }
     #[tokio::test]
-    async fn reads_do_not_wait_for_a_writer_inside_a_commit_and_observe_replied_writes() {
+    async fn client_reads_do_not_wait_for_a_writer_inside_a_commit_and_entity_reads_stay_ordered() {
         let dir = std::env::temp_dir().join(format!("neura-store-read-lane-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         let (events, _) = broadcast::channel(8);
@@ -1372,9 +1440,6 @@ mod read_lane_tests {
             let state: Value = serde_json::from_str(&(state.as_str().unwrap().to_owned() + "}")).unwrap();
             assert_eq!(state["terminals"][0]["id"], "t");
             assert_eq!(state["projects"], json!([]));
-            assert_eq!(store.call("state", json!({"hostName":"h"})).await.unwrap(), state);
-            assert_eq!(store.get("terminals", "t").await.unwrap().unwrap()["cols"], 80);
-            assert_eq!(store.list("terminals").await.unwrap().len(), 1);
             assert_eq!(store.call("events", json!({"after":0})).await.unwrap().as_array().unwrap().len(), 1);
             assert_eq!(store.call("notifications", json!({"after":0})).await.unwrap()["events"], json!([]));
             let page = store.call("output_page", json!({"terminalId":"t","after":0,"chunksOnly":true})).await.unwrap();
@@ -1383,11 +1448,19 @@ mod read_lane_tests {
             assert_eq!(page["status"], "running");
         };
         tokio::time::timeout(std::time::Duration::from_secs(5), reads).await.expect("reads waited for the writer");
-        assert!(!slow.is_finished() && !queued.is_finished());
+        // An entity read keeps its place behind the accepted put, as on the old FIFO.
+        let reader = store.clone();
+        let ordered = tokio::spawn(async move { reader.get("projects", "p").await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!slow.is_finished() && !queued.is_finished() && !ordered.is_finished());
         *TEST_COMMIT_GATE.0.lock().unwrap() = true;
         TEST_COMMIT_GATE.1.notify_all();
         slow.await.unwrap().unwrap();
         queued.await.unwrap().unwrap();
+        assert_eq!(ordered.await.unwrap().unwrap().unwrap()["id"], "p");
+        assert_eq!(store.call("state", json!({"hostName":"h"})).await.unwrap()["projects"][0]["id"], "p");
+        assert_eq!(store.get("terminals", "t").await.unwrap().unwrap()["cols"], 80);
+        assert_eq!(store.list("terminals").await.unwrap().len(), 1);
         // A write whose reply has been received is visible to the very next read.
         for round in 0..50 {
             store.put("projects", json!({"id":"p","round":round}), None).await.unwrap();
@@ -1399,6 +1472,69 @@ mod read_lane_tests {
         }
         store.update("projects", "p", |p| p["round"] = json!("cas")).await.unwrap();
         assert_eq!(store.get("projects", "p").await.unwrap().unwrap()["round"], "cas");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    /// A handler can enqueue a write and lose its caller before the reply. The
+    /// next handler's read must still observe that accepted write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn entity_reads_observe_accepted_writes_whose_caller_went_away() {
+        let dir = std::env::temp_dir().join(format!("neura-store-accepted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
+        store.put("projects", json!({"id":"p","count":0}), None).await.unwrap();
+        let (mut stale, mut lost) = (0, 0);
+        for round in 1..=200 {
+            {
+                // Polled once: the write is in the writer's queue. Then abandoned.
+                let mut abandoned = Box::pin(store.put("projects", json!({"id":"p","count":round,"abandoned":true}), None));
+                assert!(futures_util::poll!(&mut abandoned).is_pending());
+            }
+            let mut current = store.get("projects", "p").await.unwrap().unwrap();
+            if current["count"] != round { stale += 1; }
+            assert_eq!(store.list("projects").await.unwrap()[0], current);
+            assert_eq!(store.call("state", json!({})).await.unwrap()["projects"][0], current);
+            current["touched"] = json!(round);
+            store.put("projects", current, None).await.unwrap();
+            let after = store.get("projects", "p").await.unwrap().unwrap();
+            if after["count"] != round || after["abandoned"] != true || after["touched"] != round { lost += 1; }
+        }
+        assert_eq!((stale, lost), (0, 0), "stale reads / lost updates out of 200");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[tokio::test]
+    async fn reader_served_requests_fail_closed_once_the_writer_is_gone() {
+        let dir = std::env::temp_dir().join(format!("neura-store-writer-gone-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let (events, _) = broadcast::channel(8);
+        let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
+        store.put("terminals", json!({"id":"t","status":"running"}), None).await.unwrap();
+        store.append(vec![OutputRow { terminal_id: "t".into(), data: "kept".into(), size: None }]).await.unwrap();
+        let page = json!({"terminalId":"t","after":0,"chunksOnly":true});
+        assert!(store.call("output_page", page.clone()).await.unwrap().is_string());
+        // The writer cannot restore autocommit and closes its queues.
+        store.call("test_abandon_transaction", json!({})).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.get("terminals", "t").await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reads kept succeeding without a writer");
+        for (op, args) in [
+            ("state_json", json!({"hostName":"h"})),
+            ("state", json!({})),
+            ("list", json!({"table":"terminals"})),
+            ("events", json!({"after":0})),
+            ("notifications", json!({"after":0})),
+            ("output_page", page.clone()),
+            ("output", page),
+        ] {
+            assert!(store.call(op, args).await.is_err(), "{op} served without a writer");
+        }
+        assert!(store.put("projects", json!({"id":"p"}), None).await.is_err());
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -75,7 +75,7 @@ async fn concurrent_native_ptys_drain_utf8_and_replay_after_shutdown() {
     );
     // Work count, not timing: a macOS PTY returns at most 1 KiB per read, so one
     // stored row per read could never average above 1024 bytes. Queued reads are
-    // gathered and merged per terminal up to the 32 KiB row bound.
+    // gathered and merged per terminal up to about 32 KiB.
     let stored = store
         .call("query", json!({"sql":"SELECT COUNT(*) AS n,SUM(LENGTH(CAST(data AS BLOB))) AS bytes,MAX(LENGTH(CAST(data AS BLOB))) AS largest FROM output","args":[]}))
         .await
@@ -86,7 +86,10 @@ async fn concurrent_native_ptys_drain_utf8_and_replay_after_shutdown() {
         stored[0]["largest"].as_i64().unwrap(),
     );
     eprintln!("pty rows: {n} rows for {bytes} bytes (mean {}, largest {largest})", bytes / n);
-    assert!(largest <= 32768, "row bound exceeded: {largest}");
+    // 32 KiB bounds the bytes read per turn and the merge. Decoding can add a
+    // carried partial sequence or expand invalid bytes to U+FFFD, so a stored row
+    // may be larger; nothing depends on an exact row size.
+    assert!(largest <= 3 * 32768 + 3, "row far beyond the read bound: {largest}");
     assert!(bytes / n >= 2048, "output stored as {n} rows for {bytes} bytes");
     drop(pty);
     drop(store);
