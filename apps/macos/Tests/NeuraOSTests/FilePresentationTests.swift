@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import AppKit
 @testable import NeuraOS
 
@@ -93,6 +94,37 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertFalse(editor.textContainer!.widthTracksTextView)
         XCTAssertTrue(editor.isHorizontallyResizable)
         XCTAssertTrue(scroll.hasHorizontalScroller)
+    }
+
+    // `NSTextView.string` is a bridged NSString. Stored in the document it made
+    // every dirty/equality check per keystroke walk UTF-16; the editor now hands
+    // SwiftUI a native string once and compares against that cached copy.
+    @MainActor func testEditorPublishesNativeTextAndComparesWithoutBridging() {
+        _ = NSApplication.shared
+        final class Box {var text = "初期 text\n"}
+        let box = Box()
+        let view = NativeTextEditor(text: Binding(get: {box.text}, set: {box.text = $0}), editable: true, diff: false)
+        let coordinator = view.makeCoordinator()
+        let editor = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        editor.delegate = coordinator
+        XCTAssertTrue(coordinator.differs(editor, from: box.text))
+        editor.string = box.text; coordinator.synced = box.text
+        XCTAssertFalse(editor.string.isContiguousUTF8, "fixture no longer exercises a bridged string")
+        editor.insertText("追加🙂", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(box.text, "追加🙂初期 text\n")
+        XCTAssertTrue(box.text.isContiguousUTF8)
+        XCTAssertEqual(coordinator.synced, editor.string)
+        XCTAssertFalse(coordinator.differs(editor, from: box.text))
+        XCTAssertTrue(coordinator.differs(editor, from: "replaced elsewhere"))
+        // A change that is not published must not leave a stale cache behind.
+        coordinator.parent = NativeTextEditor(text: Binding(get: {box.text}, set: {box.text = $0}), editable: false, diff: false)
+        editor.insertText("x", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertNil(coordinator.synced)
+        XCTAssertEqual(box.text, "追加🙂初期 text\n")
+        XCTAssertTrue(coordinator.differs(editor, from: box.text))
+        editor.string = box.text
+        XCTAssertFalse(coordinator.differs(editor, from: box.text))
+        XCTAssertEqual(coordinator.synced, box.text)
     }
 
     // Colouring used to run one text-storage editing pass per changed line. Each

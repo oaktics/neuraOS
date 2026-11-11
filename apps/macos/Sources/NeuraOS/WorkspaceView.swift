@@ -610,8 +610,9 @@ struct NativeTextEditor: NSViewRepresentable {
             editor.performFindPanelAction(item)
         }
         context.coordinator.scheduleHighlight(editor)
-        guard editor.string != text else {return}
+        guard context.coordinator.differs(editor, from: text) else {return}
         let selection = editor.selectedRange(); editor.string = text
+        context.coordinator.synced = text
         editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
         context.coordinator.scheduleHighlight(editor)
         if diff, let storage = editor.textStorage {Self.colorDiff(storage, text: text)}
@@ -648,23 +649,37 @@ struct NativeTextEditor: NSViewRepresentable {
         var highlightTask: Task<Void, Never>?
         var highlightedText: String?
         var highlightedDark: Bool?
+        // The editor's contents as a native Swift string, when known. `editor.string`
+        // is a bridged NSString: every comparison against it walks UTF-16, and a
+        // bridged value stored in the document made each later `dirty`/equality
+        // check on the keystroke path equally slow.
+        var synced: String?
         init(_ parent: NativeTextEditor) {self.parent = parent}
+        func differs(_ editor: NSTextView, from text: String) -> Bool {
+            if let synced {return synced != text}
+            guard editor.string != text else {synced = text; return false}
+            return true
+        }
         func textDidChange(_ notification: Notification) {
-            guard parent.editable && parent.visible else {return}
-            if let editor = notification.object as? NSTextView {parent.text = editor.string; scheduleHighlight(editor)}
+            // An unreported change leaves the cache unknown; the next update compares the editor itself.
+            guard parent.editable && parent.visible else {synced = nil; return}
+            if let editor = notification.object as? NSTextView {
+                var value = editor.string; value.makeContiguousUTF8()
+                synced = value; parent.text = value; scheduleHighlight(editor)
+            }
         }
         func scheduleHighlight(_ editor: NSTextView) {
             editor.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             guard let language = parent.language, !editor.hasMarkedText() else {return}
-            let source = editor.string
+            let source = synced ?? editor.string
             let dark = editor.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             guard source != highlightedText || dark != highlightedDark else {return}
             highlightedText = source; highlightedDark = dark
             highlightTask?.cancel()
-            highlightTask = Task { @MainActor [weak editor] in
+            highlightTask = Task { @MainActor [weak self, weak editor] in
                 do {try await Task.sleep(for: .milliseconds(180))} catch {return}
                 let result = await CodeHighlighter.shared.highlight(source, language: language, dark: dark)
-                guard !Task.isCancelled, let editor, editor.string == source, !editor.hasMarkedText(), let manager = editor.layoutManager else {return}
+                guard !Task.isCancelled, let self, let editor, (self.synced ?? editor.string) == source, !editor.hasMarkedText(), let manager = editor.layoutManager else {return}
                 let range = NSRange(location: 0, length: (source as NSString).length)
                 manager.removeTemporaryAttribute(.foregroundColor, forCharacterRange: range)
                 result?.enumerateAttribute(.foregroundColor, in: range) {color, range, _ in
