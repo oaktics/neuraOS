@@ -23,8 +23,15 @@ release checks remain separate.
   reconnect/replay recovers missed notifications. Input has a separate path from
   output fetch. A changed signal is not itself terminal data or task completion.
 - A shared mio reactor reads PTYs. The current native output batch target is
-  8 ms or 256 KiB; scheduling pressure can extend elapsed time. SQLite uses WAL
-  and `synchronous=FULL`, one writer and a separate output reader. Control and
+  8 ms or 256 KiB; scheduling pressure can extend elapsed time. A batch whose
+  predecessor committed at least 8 ms earlier also closes after 2 ms without new
+  bytes, so isolated output is not held for the whole window. Queued reads of one
+  PTY are gathered per reactor turn, and a terminal's chunks inside one batch are
+  stored as one row of at most 32 KiB. SQLite uses WAL and `synchronous=FULL`,
+  one writer, a read-only connection for output pages and a second read-only
+  connection for state, entity, notification and event reads. Each read request
+  uses one WAL snapshot; operation lookups and deletion gates stay on the writer
+  FIFO. See [the 2026-11-11 measurements](#read-lanes-row-gathering-and-interactive-echo-2026-11-11). Control and
   bulk queues have separate byte credits/FIFO ordering; barriers await accepted
   writes in both lanes. Ready operation-start/finish records share a FULL/WAL
   transaction in groups of at most eight, without a batching timer. Replies
@@ -231,3 +238,143 @@ and reconnect window requires exactly zero HTTP growth over 1.6 seconds; targete
 changes require exactly one HTTP request, unrelated state changes require zero,
 and consumed instructions must not be delivered again. Delay variation is a
 fixture perturbation, not an increased grace sleep or relaxed HTTP allowance.
+
+## Read lanes, row gathering and interactive echo (2026-11-11)
+
+[Raw runs](architecture-evidence/daemon-read-lanes-row-gather-2026-11-11.json)
+compare `eb8d0ce` (staging) with `d219a2c` on the same Apple M1 / 8 CPU / 16 GiB
+Mac. Two other agents were compiling Swift and Rust during every run (1-minute
+load average 3.7 to 9.4 when each run ended), so elapsed and CPU times are noisy and are reported only
+as ranges. Each workload ran eight times in baseline, candidate, candidate,
+baseline order, twice, untraced (`NEURA_BENCH_TRACE=0`). Values are min–max over
+the four runs per binary, not confidence intervals. The 2026-10-29 tables above
+are unchanged historical evidence from a different checkout and a quieter host;
+do not join them with these rows.
+
+What changed in the daemon:
+
+- `get`, `list`, `state`, notification and event reads use a read-only connection
+  on its own thread instead of the writer queue. Replies still follow commit, so
+  a caller observes every write whose reply it has received; a read issued while
+  another caller's write is still queued may not see that write.
+- `/v1/terminals/{id}/output` is one read-only request that returns the terminal
+  status and the page from the same snapshot, encoded directly from SQLite text.
+  `/v1/state` is assembled from the stored rows as validated text. Members, member
+  order and paging limits are the same as before.
+- PTY output reaches the writer as typed rows. It was previously copied into a
+  JSON tree, cloned, and serialized once more only to count queue credits.
+- A macOS PTY returns at most 1 KiB per read. The reactor now gathers what is
+  queued (up to 32 KiB) in one turn and the batch stores one row per terminal up
+  to 32 KiB, instead of one stored, indexed and re-encoded row per KiB.
+- The event stream announces terminal output at once when it has sent nothing
+  for 48 ms. State, agent and browser changes, and output on a busy stream, keep
+  the 16 ms gather, so the notification rate under load is unchanged.
+- `terminal.input` and `terminal.resize` keep the project guard and the deletion
+  admission but no longer take the per-workspace mutation mutex.
+- The WAL file is truncated to 64 MiB after a checkpoint resets it
+  (`journal_size_limit`). FULL/WAL durability and checkpointing are unchanged.
+
+Bulk workload (1,024 rows of 2,048 bytes per PTY, the published workload, with a
+state request every 50 ms):
+
+| PTYs | Daemon instructions, millions: before | after | Daemon disk writes MB: before | after | Completion ms: before | after | Input p99 ms: before | after | State p99 ms: before | after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 422–467 | 275–298 | 8.4–8.7 | 4.5–4.7 | 1559–2844 | 1925–2790 | 1.8–12.3 | 2.6–5.8 | 3.5–27.8 | 4.3–35.7 |
+| 5 | 1767–1826 | 1001–1111 | 39.2–40.0 | 26.3–27.4 | 1919–2018 | 1910–2235 | 3.8–15.9 | 3.5–5.8 | 2.6–12.9 | 2.0–6.8 |
+| 10 | 3385–3412 | 1807–1882 | 80.2–81.0 | 51.8–52.7 | 2072–2192 | 2026–2187 | 10.5–29.1 | 4.2–7.9 | 7.3–16.1 | 3.9–24.6 |
+| 20 | 6475–6574 | 3414–3449 | 175.2–178.8 | 108.1–109.0 | 2473–2917 | 2137–2406 | 28.5–45.8 | 12.4–33.0 | 9.0–34.5 | 7.0–29.1 |
+| 32 | 10497–10772 | 5295–5468 | 320.9–325.1 | 184.7–185.4 | 3187–4064 | 2263–3138 | 81.3–109.8 | 11.4–24.1 | 17.6–108.4 | 16.7–40.5 |
+
+Retired instructions and disk bytes of the daemon process do not overlap between
+the binaries at any count (35% to 49% fewer instructions, 32% to 46% fewer bytes
+written). They are counters from `proc_pid_rusage` and depend little on host
+load; the same run's CPU time varied by up to a factor of two with the core type
+and contention, which is why it is not tabulated. Completion time separates only
+at 20 and 32 PTYs, input p99 only at 10 and 32 PTYs. **State p99 overlaps at
+every count: no state-latency improvement is established by this workload**, even
+though state reads no longer queue behind commits. Each input percentile still
+has only N samples. The idle tree footprint after one second was 8.5–8.8 MiB
+before and 8.8–9.1 MiB after at one PTY (one more connection and thread) and
+within 0.3 MiB at the other counts.
+
+Paced workload (one PTY, 300 chunks of about 100 bytes, one roughly every 140 ms
+on this host, a state request every 50 ms, then 40 single-character echo trials
+on the idle shell):
+
+| | Daemon instructions, millions | Change messages | Echo p50 ms | Echo p90 ms |
+| --- | ---: | ---: | ---: | ---: |
+| before | 687–692 | 341–345 | 32.3–36.2 | 38.2–40.3 |
+| after | 469–484 | 345 | 5.8–9.7 | 8.7–20.9 |
+
+Echo is the time from sending one `terminal.input` until the event-driven reader
+has fetched the resulting output. It includes the harness and loopback HTTP, and
+excludes SwiftTerm rendering. The earlier value is mostly the fixed 8 ms batch
+window plus the 16 ms stream gather; the new path waits 2 ms for the PTY to
+settle and announces at once on a quiet stream. The number of change messages
+did not increase.
+
+Deterministic checks, independent of timing:
+
+- The 32-PTY fixture stores 8,490,304 bytes as 332 to 371 rows (three runs). One
+  row per read could not use fewer than 8,292. The test asserts a mean row above
+  2 KiB and the 32 KiB bound.
+- `reads_do_not_wait_for_a_writer_inside_a_commit_and_observe_replied_writes`
+  holds the writer inside a commit behind the test gate and requires state,
+  entity, list, event, notification and output reads to complete. Routing those
+  reads back to the writer makes it fail with a timeout. It also checks 50
+  write-then-read rounds and a compare-and-swap update.
+- `encoded_state_and_output_pages_equal_the_value_forms` compares the directly
+  encoded state and output bodies with the previous value-tree forms, including a
+  deletion overlay, escapes, a resize marker, paging limits, a missing terminal
+  and a corrupt stored row (which must fail closed).
+- The protocol suite types into one shell while another shell of the same
+  workspace, which ignores TERM, is being stopped. On `eb8d0ce` that input waited
+  1,557 ms for the stop; it must now complete while the stop is still pending.
+
+Profiled and left unchanged:
+
+- The published idle footprint growth of about 2.2 MiB per PTY is the fixture's
+  login shell (2.15 MiB each at 20 PTYs). The daemon and supervisor together
+  measured 8.5 MiB with 20 idle PTYs.
+- Each output commit writes about 13.5 KiB of WAL for a small chunk (table leaf,
+  `output_terminal` index leaf and the `AUTOINCREMENT` sequence page). Removing
+  the index or `AUTOINCREMENT` would change the schema shared with older
+  daemons and was not attempted. In a 1 ms sample of the paced workload SQLite
+  commit I/O (`pwrite`, `fsync`) was the largest single item, about a fifth of
+  daemon CPU; the rest was spread over HTTP, the stream and the runtime.
+- The process supervisor takes a full process-table snapshot (one `proc_pidinfo`
+  per process, about 1,600 on this host) for every fork, exec and exit event in
+  an owned tree. On the installed daemon it had used 30 s of CPU in 23 minutes
+  of agent builds, more than the daemon itself (11 s). Coalescing those
+  snapshots would widen the window in which a short-lived parent can disappear
+  unobserved, so it was not changed without an ownership review.
+
+The branch's later commit resolves a Claude transcript path once per file-event
+wake instead of once per changed path (terminals x events `realpath` calls when
+sessions share a project directory). It has the same predicate, is not on the
+measured path, and was not benchmarked. One confirmation run of that build gave
+1,822 and 5,332 million instructions at 10 and 32 PTYs.
+
+Not established: any effect on real Claude/Codex sessions, on the installed app,
+on battery life (the per-process billed-energy counter read zero in every
+sample), or on the unreproduced 2026-10-29 outlier.
+
+The harness additions are opt-in and leave the default workload unchanged:
+`NEURA_BENCH_TRACE=0` (no `NEURA_PERF_TRACE_DIR`), `NEURA_BENCH_PAYLOAD`,
+`NEURA_BENCH_ROW_SLEEP_MS`, `NEURA_BENCH_ECHO` (number of echo trials) and
+`NEURA_BENCH_STATE_POLL_MS`. With `NEURA_BENCH_METRICS` each result also carries
+`workloadMetrics` for the active window. To reproduce one pair:
+
+```sh
+cc -O2 -Wall -Wextra -Werror tests/native/fixtures/process-metrics.c -o /tmp/neura-process-metrics
+NEURA_BENCH_TRACE=0 NEURA_BENCH_METRICS=/tmp/neura-process-metrics NEURA_BENCH_IDLE_MS=1000 \
+NEURA_BENCH_COUNTS=1,5,10,20,32 NEURA_BENCH_ROWS=1024 node scripts/native/benchmark-native-daemon.mjs
+NEURA_BENCH_TRACE=0 NEURA_BENCH_METRICS=/tmp/neura-process-metrics NEURA_BENCH_IDLE_MS=1000 \
+NEURA_BENCH_COUNTS=1 NEURA_BENCH_ROWS=300 NEURA_BENCH_PAYLOAD=64 NEURA_BENCH_ROW_SLEEP_MS=30 \
+NEURA_BENCH_ECHO=40 node scripts/native/benchmark-native-daemon.mjs
+```
+
+Set `NEURA_BENCH_COMMAND` to a JSON argv array to select the other binary, and
+`NEURA_BENCH_EVIDENCE` to keep only the small evidence directory; without it the
+whole disposable fixture, including its database, is retained under the system
+temporary directory.

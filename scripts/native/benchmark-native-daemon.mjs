@@ -91,7 +91,9 @@ for(const children of counts){
    }
    await execute({type:'terminal.input',terminalId:r.id,clientId:r.clientId,data:'\u0015'});await sleep(300);
   }
-  stateTask=(async()=>{while(!stopping){const r=await request('/v1/state');latencies.push(r.elapsed);await sleep(50);}})();
+  // NEURA_BENCH_STATE_POLL_MS=0 removes the concurrent state reader so per-chunk cost can be isolated.
+  const statePollMs=Number(process.env.NEURA_BENCH_STATE_POLL_MS??50);
+  stateTask=(async()=>{while(!stopping&&statePollMs>0){const r=await request('/v1/state');latencies.push(r.elapsed);await sleep(statePollMs);}})();
   pressureTask=(async()=>{while(!stopping){
    const time=new Date().toISOString(),sampleStart=performance.now();
    const processes=process.env.NEURA_BENCH_METRICS?JSON.parse((await exec(process.env.NEURA_BENCH_METRICS,[String(child.pid)],{timeout:5000})).stdout):null;
@@ -125,7 +127,7 @@ for(const children of counts){
   await stop();await launch();
   for(const r of records.values()){r.cursor=0;r.text='';await drain(r);if(r.text!==saved.get(r.id))throw Error('Durable cursor replay differs after restart');}
   await stop();child=undefined;
-  results.push({children,traced,idleMetrics,workloadMetrics,echo:echoLatencies&&{trials:echoLatencies.length,p50Ms:percentile(echoLatencies,.5),p90Ms:percentile(echoLatencies,.9),maxMs:Math.max(...echoLatencies)},rowsPerTerminal:rows,bytesPerRow:payloadSize,rowSleepMs,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
+  results.push({children,traced,statePollMs,idleMetrics,workloadMetrics,echo:echoLatencies&&{trials:echoLatencies.length,p50Ms:percentile(echoLatencies,.5),p90Ms:percentile(echoLatencies,.9),maxMs:Math.max(...echoLatencies)},rowsPerTerminal:rows,bytesPerRow:payloadSize,rowSleepMs,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
   await writeFile(join(evidence,'result.json'),JSON.stringify(results.at(-1),null,2),{mode:0o600});
  }catch(e){failed=true;await writeFile(join(evidence,'failure.json'),JSON.stringify({status:'failed',time:new Date().toISOString(),children}),{mode:0o600});throw e;}finally{
   stopping=true;await stateTask?.catch(()=>{});await pressureTask?.catch(()=>{});socket?.terminate();if(child&&child.exitCode===null){await Promise.allSettled([...records.keys()].map(terminalId=>execute({type:'terminal.stop',terminalId})));try{await stop();}catch{try{process.kill(-child.pid,'SIGKILL');}catch{}await exitPromise;}}
