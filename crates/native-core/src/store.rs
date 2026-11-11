@@ -653,6 +653,9 @@ impl StoreHandle {
    let init=(||->Result<(Connection,Connection,Connection),String>{let writer=Connection::open(&path).map_err(|e|e.to_string())?;writer.execute_batch(SCHEMA).map_err(|e|e.to_string())?;let columns:Vec<String>=writer.prepare("PRAGMA table_info(output)").map_err(|e|e.to_string())?.query_map([],|r|r.get(1)).map_err(|e|e.to_string())?.collect::<rusqlite::Result<_>>().map_err(|e|e.to_string())?;if !columns.iter().any(|c|c=="cols"){writer.execute_batch("ALTER TABLE output ADD COLUMN cols INTEGER; ALTER TABLE output ADD COLUMN rows INTEGER;").map_err(|e|e.to_string())?;}writer.set_prepared_statement_cache_capacity(64);
     // Terminal output and state snapshots each have a read-only connection, so
     // neither waits behind the writer's commits or behind the other's pages.
+    // A large transaction such as a history purge otherwise leaves the WAL file at
+    // its high-water mark indefinitely. Durability and checkpointing are unchanged.
+    writer.execute_batch("PRAGMA journal_size_limit=67108864;").map_err(|e|e.to_string())?;
     let reader=|| -> Result<Connection,String> {let reader=Connection::open(&path).map_err(|e|e.to_string())?;reader.execute_batch("PRAGMA query_only=ON;PRAGMA busy_timeout=5000;").map_err(|e|e.to_string())?;reader.set_prepared_statement_cache_capacity(32);Ok(reader)};
     Ok((writer,reader()?,reader()?))})();
    let Ok((mut writer,reader,state_reader))=init else {let _=ready.send(false);return;};
@@ -1353,6 +1356,11 @@ mod read_lane_tests {
         let store = StoreHandle::open(&dir.join("test.sqlite"), events).await.unwrap();
         store.put("terminals", json!({"id":"t","status":"running","cols":80,"rows":24}), None).await.unwrap();
         store.append(vec![OutputRow { terminal_id: "t".into(), data: "before".into(), size: None }]).await.unwrap();
+        // FULL/WAL durability is unchanged; only the idle WAL file size is bounded.
+        let pragma = |sql: &'static str| { let store = store.clone(); async move { store.call("query", json!({"sql":sql,"args":[]})).await.unwrap()[0].clone() } };
+        assert_eq!(pragma("PRAGMA synchronous").await["synchronous"], 2);
+        assert_eq!(pragma("PRAGMA journal_mode").await["journal_mode"], "wal");
+        assert_eq!(pragma("PRAGMA journal_size_limit").await["journal_size_limit"], 64 * 1024 * 1024);
         // The writer enters an explicit commit and stays there; a second write queues behind it.
         let writer = store.clone();
         let slow = tokio::spawn(async move { writer.call("test_slow_commit", json!({})).await });

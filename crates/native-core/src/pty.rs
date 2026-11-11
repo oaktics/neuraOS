@@ -17,6 +17,8 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 type NativeChild = Box<dyn portable_pty::Child + Send + Sync>;
+/// Upper bound for one read turn and for one stored output row.
+const ROW_BYTES: usize = 32768;
 static CANCEL_REAPER: std::sync::OnceLock<Result<std::sync::mpsc::Sender<NativeChild>, String>> =
     std::sync::OnceLock::new();
 fn cancel_reaper() -> Result<std::sync::mpsc::Sender<NativeChild>, ApiError> {
@@ -249,7 +251,8 @@ impl PtyRuntime {
         tokio::spawn(async move {
             const BATCH: std::time::Duration = std::time::Duration::from_millis(8);
             const SETTLE: std::time::Duration = std::time::Duration::from_millis(2);
-            let mut last_commit = tokio::time::Instant::now() - BATCH;
+            let mut last_commit = tokio::time::Instant::now();
+            last_commit = last_commit.checked_sub(BATCH).unwrap_or(last_commit);
             while let Some(first) = rx.recv().await {
                 #[cfg(test)]
                 {
@@ -288,11 +291,19 @@ impl PtyRuntime {
                         break;
                     }
                     bytes += row.data.len();
-                    rows.push(OutputRow {
-                        terminal_id: row.terminal_id,
-                        data: row.data,
-                        size: None,
-                    });
+                    // Chunks of one terminal inside a batch form one stored row up to
+                    // the read-buffer size. Per-terminal byte order is unchanged, and
+                    // a resize marker always ends the batch, so nothing crosses it.
+                    match rows.iter_mut().rev().find(|r| r.terminal_id == row.terminal_id) {
+                        Some(last) if last.data.len() + row.data.len() <= ROW_BYTES => {
+                            last.data.push_str(&row.data)
+                        }
+                        _ => rows.push(OutputRow {
+                            terminal_id: row.terminal_id,
+                            data: row.data,
+                            size: None,
+                        }),
+                    }
                     if bytes >= 256 * 1024 {
                         break;
                     }
@@ -464,11 +475,31 @@ impl PtyRuntime {
                             }
                         }
                         if s.pending.is_none() && !s.eof && !s.resizing {
-                            let mut bytes = [0u8; 32768];
-                            let n =
-                                unsafe { libc::read(s.fd, bytes.as_mut_ptr().cast(), bytes.len()) };
-                            if n > 0 {
-                                let data = decode(s, &bytes[..n as usize], false);
+                            // A macOS PTY hands over at most 1 KiB per read. Gather what
+                            // is already queued, bounded by this buffer, into one chunk
+                            // instead of one channel entry and one stored row per KiB.
+                            let mut bytes = [0u8; ROW_BYTES];
+                            let mut filled = 0;
+                            let mut ended = false;
+                            while filled < bytes.len() {
+                                let n = unsafe {
+                                    libc::read(
+                                        s.fd,
+                                        bytes[filled..].as_mut_ptr().cast(),
+                                        bytes.len() - filled,
+                                    )
+                                };
+                                if n > 0 {
+                                    filled += n as usize;
+                                    continue;
+                                }
+                                ended = n == 0
+                                    || io::Error::last_os_error().kind()
+                                        != io::ErrorKind::WouldBlock;
+                                break;
+                            }
+                            if filled > 0 {
+                                let data = decode(s, &bytes[..filled], false);
                                 if !data.is_empty() {
                                     if let Err(e) = tx.try_send(Output {
                                         terminal_id: id.clone(),
@@ -480,18 +511,25 @@ impl PtyRuntime {
                                         io.pressured.lock().unwrap().insert(id.clone());
                                     }
                                 }
-                                if s.pending.is_none() && scheduled.insert(token.0) {
+                                // Only a full buffer can leave bytes queued without a new
+                                // readiness edge; would-block re-arms the edge itself.
+                                if filled == bytes.len()
+                                    && s.pending.is_none()
+                                    && scheduled.insert(token.0)
+                                {
                                     ready.push_back(token);
                                 }
-                            } else if n == 0
-                                || (n < 0
-                                    && io::Error::last_os_error().kind()
-                                        != io::ErrorKind::WouldBlock)
-                            {
+                            }
+                            if ended {
                                 s.eof = true;
                                 let tail = decode(s, &[], true);
                                 if !tail.is_empty() {
-                                    s.pending = Some(tail);
+                                    // Bytes read in this same turn may still be waiting
+                                    // for queue space; the carried tail follows them.
+                                    match &mut s.pending {
+                                        Some(pending) => pending.push_str(&tail),
+                                        None => s.pending = Some(tail),
+                                    }
                                     io.pressured.lock().unwrap().insert(id.clone());
                                 }
                             }

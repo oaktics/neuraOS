@@ -73,6 +73,21 @@ async fn concurrent_native_ptys_drain_utf8_and_replay_after_shutdown() {
         ids.iter().filter(|id| pty.pid(id).is_some()).count(),
         count
     );
+    // Work count, not timing: a macOS PTY returns at most 1 KiB per read, so one
+    // stored row per read could never average above 1024 bytes. Queued reads are
+    // gathered and merged per terminal up to the 32 KiB row bound.
+    let stored = store
+        .call("query", json!({"sql":"SELECT COUNT(*) AS n,SUM(LENGTH(CAST(data AS BLOB))) AS bytes,MAX(LENGTH(CAST(data AS BLOB))) AS largest FROM output","args":[]}))
+        .await
+        .unwrap();
+    let (n, bytes, largest) = (
+        stored[0]["n"].as_i64().unwrap(),
+        stored[0]["bytes"].as_i64().unwrap(),
+        stored[0]["largest"].as_i64().unwrap(),
+    );
+    eprintln!("pty rows: {n} rows for {bytes} bytes (mean {}, largest {largest})", bytes / n);
+    assert!(largest <= 32768, "row bound exceeded: {largest}");
+    assert!(bytes / n >= 2048, "output stored as {n} rows for {bytes} bytes");
     drop(pty);
     drop(store);
     let reopened = StoreHandle::open(&database, events).await.unwrap();

@@ -112,7 +112,7 @@ for(const children of counts){
    const after=await workloadSample(),daemon=p=>p.pid===child.pid;
    const stable=after.map(p=>({end:p,start:workloadBefore.find(q=>q.pid===p.pid&&q.start===p.start)})).filter(p=>p.start);
    const delta=(rows,key)=>rows.reduce((sum,p)=>sum+Math.max(0,p.end[key]-p.start[key]),0);
-   workloadMetrics={stableProcesses:stable.length,cpuMs:delta(stable,'cpuNs')/1e6,daemonCpuMs:delta(stable.filter(p=>daemon(p.end)),'cpuNs')/1e6,daemonDiskWriteBytes:delta(stable.filter(p=>daemon(p.end)),'diskWriteBytes'),inputP50Ms:percentile(inputLatencies,.5),stateP50Ms:percentile(latencies,.5),stateSamples:latencies.length,includesSamplerShutdown:true};
+   workloadMetrics={stableProcesses:stable.length,cpuMs:delta(stable,'cpuNs')/1e6,daemonCpuMs:delta(stable.filter(p=>daemon(p.end)),'cpuNs')/1e6,daemonDiskWriteBytes:delta(stable.filter(p=>daemon(p.end)),'diskWriteBytes'),daemonInstructions:delta(stable.filter(p=>daemon(p.end)),'instructions'),daemonCycles:delta(stable.filter(p=>daemon(p.end)),'cycles'),daemonBilledEnergyNj:delta(stable.filter(p=>daemon(p.end)),'billedEnergyNj'),inputP50Ms:percentile(inputLatencies,.5),stateP50Ms:percentile(latencies,.5),stateSamples:latencies.length,includesSamplerShutdown:true};
   }
   for(const r of records.values()){
    const matches=[...r.text.matchAll(/NEURA_ROW:(\d+):(\d+):(x+):日本語:END/g)];

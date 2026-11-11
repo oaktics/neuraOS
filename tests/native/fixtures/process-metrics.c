@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < used; i++) if (rows[i].selected) {
         struct rusage_info_v4 info = {0};
         if (proc_pid_rusage(rows[i].pid, RUSAGE_INFO_V4, (rusage_info_t *)&info)) continue;
-        printf("%s{\"pid\":%d,\"start\":\"%llu\",\"cpuNs\":%llu,\"idleWakeups\":%llu,\"interruptWakeups\":%llu,\"footprintBytes\":%llu,\"diskReadBytes\":%llu,\"diskWriteBytes\":%llu,\"runnableNs\":%llu}",
+        printf("%s{\"pid\":%d,\"start\":\"%llu\",\"cpuNs\":%llu,\"idleWakeups\":%llu,\"interruptWakeups\":%llu,\"footprintBytes\":%llu,\"diskReadBytes\":%llu,\"diskWriteBytes\":%llu,\"runnableNs\":%llu,\"instructions\":%llu,\"cycles\":%llu,\"billedEnergyNj\":%llu}",
             printed++ ? "," : "", rows[i].pid,
             (unsigned long long)info.ri_proc_start_abstime,
             // rusage CPU counters are Mach absolute-time ticks, not ns.
@@ -54,7 +54,12 @@ int main(int argc, char **argv) {
             (unsigned long long)info.ri_phys_footprint,
             (unsigned long long)info.ri_diskio_bytesread,
             (unsigned long long)info.ri_diskio_byteswritten,
-            (unsigned long long)(((__uint128_t)info.ri_runnable_time * timebase.numer) / timebase.denom));
+            (unsigned long long)(((__uint128_t)info.ri_runnable_time * timebase.numer) / timebase.denom),
+            // Retired instructions do not depend on which core type ran the thread or
+            // on waiting for a core, unlike CPU time on a contended host.
+            (unsigned long long)info.ri_instructions,
+            (unsigned long long)info.ri_cycles,
+            (unsigned long long)info.ri_billed_energy);
     }
     printf("]\n");
     free(rows); free(pids);
