@@ -13,9 +13,14 @@ import {performance} from 'node:perf_hooks';
 import WebSocket from 'ws';
 import {finishWorkload} from './benchmark-timing.mjs';
 const counts=(process.env.NEURA_BENCH_COUNTS??'1,5,10,20,32').split(',').map(Number);
-const rows=Number(process.env.NEURA_BENCH_ROWS??256),payloadSize=2048;
+// Defaults reproduce the published bulk workload. NEURA_BENCH_PAYLOAD and
+// NEURA_BENCH_ROW_SLEEP_MS (sleep after every row) model a paced interactive
+// stream of small redraws instead of a throughput burst.
+const rows=Number(process.env.NEURA_BENCH_ROWS??256),payloadSize=Number(process.env.NEURA_BENCH_PAYLOAD??2048),rowSleepMs=Number(process.env.NEURA_BENCH_ROW_SLEEP_MS??0);
 const command=process.env.NEURA_BENCH_COMMAND?JSON.parse(process.env.NEURA_BENCH_COMMAND):[resolve('crates/native-core/target/release/neura-native-core')];
 const legacy=process.argv.includes('--legacy');
+// NEURA_BENCH_TRACE=0 runs the native daemon without NEURA_PERF_TRACE_DIR, for untraced timing or profiling.
+const traced=!legacy&&process.env.NEURA_BENCH_TRACE!=='0';
 const percentile=(values,p)=>[...values].sort((a,b)=>a-b)[Math.min(values.length-1,Math.floor(values.length*p))]??0;
 const freePort=async()=>{const s=createServer();await new Promise((r,j)=>{s.once('error',j);s.listen(0,'127.0.0.1',r)});const port=s.address().port;await new Promise(r=>s.close(r));return port;};
 class Pulse {pending=false;wake;signal(){this.pending=true;this.wake?.();}async wait(){if(this.pending){this.pending=false;return;}await new Promise(r=>this.wake=r);this.wake=undefined;this.pending=false;}}
@@ -25,7 +30,7 @@ for(const children of counts){
  const evidence=process.env.NEURA_BENCH_EVIDENCE?resolve(process.env.NEURA_BENCH_EVIDENCE,String(children)):join(directory,'evidence');await mkdir(evidence,{recursive:true,mode:0o700});
  const projectPath=join(directory,'project');await import('node:fs/promises').then(fs=>fs.mkdir(projectPath));const project=await realpath(projectPath);
  const producer=join(project,'producer.py');
- await writeFile(producer,`import sys,time\nidentity=sys.argv[1]\nfor row in range(${rows}):\n sys.stdout.write('NEURA_ROW:'+identity+':'+str(row)+':'+'x'*${payloadSize}+':日本語:END\\n')\n sys.stdout.flush()\n if row%16==0: time.sleep(0.005)\n`);
+ await writeFile(producer,`import sys,time\nidentity=sys.argv[1]\nfor row in range(${rows}):\n sys.stdout.write('NEURA_ROW:'+identity+':'+str(row)+':'+'x'*${payloadSize}+':日本語:END\\n')\n sys.stdout.flush()\n${rowSleepMs>0?` time.sleep(${rowSleepMs/1000})`:' if row%16==0: time.sleep(0.005)'}\n`);
  let child,token,socket,exitPromise,output='',failed=false,stateTask,pressureTask;let changes=0,ready=0,stopping=false;const records=new Map(),latencies=[],inputLatencies=[];let httpErrors=0;const headers=()=>({authorization:`Bearer ${token}`,'content-type':'application/json'});
  const request=async(path,body,timeout=15000)=>{
   const requestId=randomUUID(),start=performance.now(),time=new Date().toISOString();let status='timeout-or-transport';
@@ -34,7 +39,7 @@ for(const children of counts){
  };
  const execute=async(c)=>request('/v1/commands',{operationId:randomUUID(),command:c});
  const launch=async()=>{
-  output='';child=spawn(command[0],command.slice(1),{cwd:process.cwd(),env:{...process.env,NEURA_DEV_DATA_DIR:directory,NEURA_DEV_PORT:String(port),...(!legacy?{NEURA_PERF_TRACE_DIR:join(directory,'performance')}: {})},stdio:['ignore','pipe','pipe'],detached:true});
+  output='';child=spawn(command[0],command.slice(1),{cwd:process.cwd(),env:{...process.env,NEURA_DEV_DATA_DIR:directory,NEURA_DEV_PORT:String(port),...(traced?{NEURA_PERF_TRACE_DIR:join(directory,'performance')}: {})},stdio:['ignore','pipe','pipe'],detached:true});
   child.stdout.on('data',b=>output=(output+b).slice(-16000));child.stderr.on('data',b=>output=(output+b).slice(-16000));
   exitPromise=new Promise(r=>child.once('exit',(code,signal)=>r({code,signal})));child.once('error',()=>{});
   for(let i=0;i<200;i++){try{token=(await readFile(join(directory,'daemon-token'),'utf8')).trim();const state=(await request('/v1/state',undefined,1000)).value;if(state.protocolVersion===1)return state;}catch{}if(child.exitCode!==null)throw Error(`Daemon exited: ${output}`);await sleep(50);}throw Error(`Daemon startup timed out: ${output}`);
@@ -44,7 +49,7 @@ for(const children of counts){
   socket=new WebSocket(url.replace('http:','ws:')+'/v1/stream',{headers:headers()});
   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No stream ready')),5000);socket.on('error',reject);socket.on('message',bytes=>{const change=JSON.parse(bytes);if(change.type==='ready'){ready++;for(const r of records.values())r.pulse.signal();clearTimeout(timer);resolve();}else if(change.type==='changed'){changes++;for(const id of change.terminals??[])records.get(id)?.pulse.signal();}});});
  };
- const drain=async record=>{for(;;){const {value}=await request(`/v1/terminals/${record.id}/output?after=${record.cursor}&chunksOnly=true`);record.text+=(value.chunks??[]).map(c=>c.data).join('');record.cursor=value.cursor;record.status=value.status;if(!value.more)return;}};
+ const drain=async record=>{for(;;){const {value}=await request(`/v1/terminals/${record.id}/output?after=${record.cursor}&chunksOnly=true`);record.text+=(value.chunks??[]).map(c=>c.data).join('');if(value.chunks?.length)record.onOutput?.();record.cursor=value.cursor;record.status=value.status;if(!value.more)return;}};
  try{
   const initial=await launch();if(!legacy&&!initial.features?.includes('state.stream'))throw Error('Native daemon does not advertise state.stream');
   if(!legacy)await stream();
@@ -71,6 +76,21 @@ for(const children of counts){
    const delta=key=>stable.reduce((sum,p)=>sum+Math.max(0,p.end[key]-p.start[key]),0);
    idleMetrics={elapsedMs,stableProcesses:stable.length,endProcesses:after.length,cpuMs:delta('cpuNs')/1e6,idleWakeups:delta('idleWakeups'),interruptWakeups:delta('interruptWakeups'),endFootprintBytes:after.reduce((sum,p)=>sum+p.footprintBytes,0),transientChildCostsIncluded:false,legacyUIReadCadence:legacy?'state 1000ms; visible output 60ms; other output 500ms':'event driven'};
   }
+  // Optional interactive echo: one typed character on an idle terminal, timed from
+  // sending the input command until the event-driven reader has fetched the
+  // resulting output. NEURA_BENCH_ECHO is the number of spaced trials.
+  let echoLatencies;
+  if(!legacy&&Number(process.env.NEURA_BENCH_ECHO??0)>0){
+   echoLatencies=[];const r=[...records.values()][0];
+   await sleep(1500); // Shell start-up output has settled.
+   for(let i=0;i<Number(process.env.NEURA_BENCH_ECHO);i++){
+    await sleep(120+Math.random()*40);
+    const seen=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('No echo output')),5000);r.onOutput=()=>{clearTimeout(timer);resolve(performance.now());};});
+    const sent=performance.now(),command=execute({type:'terminal.input',terminalId:r.id,clientId:r.clientId??=randomUUID(),data:' '});
+    echoLatencies.push(await seen-sent);r.onOutput=undefined;await command;
+   }
+   await execute({type:'terminal.input',terminalId:r.id,clientId:r.clientId,data:'\u0015'});await sleep(300);
+  }
   stateTask=(async()=>{while(!stopping){const r=await request('/v1/state');latencies.push(r.elapsed);await sleep(50);}})();
   pressureTask=(async()=>{while(!stopping){
    const time=new Date().toISOString(),sampleStart=performance.now();
@@ -78,11 +98,22 @@ for(const children of counts){
    await appendFile(join(evidence,'pressure.jsonl'),JSON.stringify({time,sampleDurationMs:performance.now()-sampleStart,hostLoadAverage:loadavg(),hostCpuTimes:cpus().map(c=>c.times),processes,ioAvailable:processes!==null})+'\n',{mode:0o600});
    await sleep(250);
   }})();pressureTask.catch(()=>{});
+  // Daemon-tree CPU across the active workload. CPU time is less sensitive to host
+  // contention than elapsed time; short-lived children are still excluded.
+  const workloadSample=async()=>process.env.NEURA_BENCH_METRICS?JSON.parse((await exec(process.env.NEURA_BENCH_METRICS,[String(child.pid)],{timeout:5000})).stdout):null;
+  const workloadBefore=await workloadSample();
   const start=performance.now();
-  await Promise.all([...records.values()].map(async r=>{const response=await execute({type:'terminal.input',terminalId:r.id,clientId:randomUUID(),data:`/usr/bin/python3 '${producer}' ${r.index}; exit\n`});inputLatencies.push(response.elapsed);}));
+  await Promise.all([...records.values()].map(async r=>{const response=await execute({type:'terminal.input',terminalId:r.id,clientId:r.clientId??randomUUID(),data:`/usr/bin/python3 '${producer}' ${r.index}; exit\n`});inputLatencies.push(response.elapsed);}));
   const duration=await finishWorkload(readers,start,async()=>{
    stopping=true;await stateTask;stateTask=undefined;await pressureTask;pressureTask=undefined;
   });
+  let workloadMetrics;
+  if(workloadBefore){
+   const after=await workloadSample(),daemon=p=>p.pid===child.pid;
+   const stable=after.map(p=>({end:p,start:workloadBefore.find(q=>q.pid===p.pid&&q.start===p.start)})).filter(p=>p.start);
+   const delta=(rows,key)=>rows.reduce((sum,p)=>sum+Math.max(0,p.end[key]-p.start[key]),0);
+   workloadMetrics={stableProcesses:stable.length,cpuMs:delta(stable,'cpuNs')/1e6,daemonCpuMs:delta(stable.filter(p=>daemon(p.end)),'cpuNs')/1e6,daemonDiskWriteBytes:delta(stable.filter(p=>daemon(p.end)),'diskWriteBytes'),inputP50Ms:percentile(inputLatencies,.5),stateP50Ms:percentile(latencies,.5),stateSamples:latencies.length,includesSamplerShutdown:true};
+  }
   for(const r of records.values()){
    const matches=[...r.text.matchAll(/NEURA_ROW:(\d+):(\d+):(x+):日本語:END/g)];
    if(matches.length!==rows||matches.some((m,i)=>Number(m[1])!==r.index||Number(m[2])!==i||m[3].length!==payloadSize))throw Error(`PTY loss/order/UTF8 corruption terminal ${r.index}: ${matches.length}/${rows}`);
@@ -94,12 +125,12 @@ for(const children of counts){
   await stop();await launch();
   for(const r of records.values()){r.cursor=0;r.text='';await drain(r);if(r.text!==saved.get(r.id))throw Error('Durable cursor replay differs after restart');}
   await stop();child=undefined;
-  results.push({children,idleMetrics,rowsPerTerminal:rows,bytesPerRow:payloadSize,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
+  results.push({children,traced,idleMetrics,workloadMetrics,echo:echoLatencies&&{trials:echoLatencies.length,p50Ms:percentile(echoLatencies,.5),p90Ms:percentile(echoLatencies,.9),maxMs:Math.max(...echoLatencies)},rowsPerTerminal:rows,bytesPerRow:payloadSize,rowSleepMs,durationMs:duration,httpStateP95Ms:percentile(latencies,.95),httpStateP99Ms:percentile(latencies,.99),inputP99Ms:percentile(inputLatencies,.99),httpErrors,changeMessages:changes,streamReady:ready,idleChanges,loss:0,duplicates:0,unicodeIntact:true,restartReplay:true});
   await writeFile(join(evidence,'result.json'),JSON.stringify(results.at(-1),null,2),{mode:0o600});
  }catch(e){failed=true;await writeFile(join(evidence,'failure.json'),JSON.stringify({status:'failed',time:new Date().toISOString(),children}),{mode:0o600});throw e;}finally{
   stopping=true;await stateTask?.catch(()=>{});await pressureTask?.catch(()=>{});socket?.terminate();if(child&&child.exitCode===null){await Promise.allSettled([...records.keys()].map(terminalId=>execute({type:'terminal.stop',terminalId})));try{await stop();}catch{try{process.kill(-child.pid,'SIGKILL');}catch{}await exitPromise;}}
   // Preserve failing isolated evidence; never touch installed app data.
-  if(!legacy){try{await cp(join(directory,'performance'),join(evidence,'runtime'),{recursive:true});}catch{console.error(`Trace export failed; fixture retained: ${directory}`);throw Error('Native trace export unavailable');}}
+  if(traced){try{await cp(join(directory,'performance'),join(evidence,'runtime'),{recursive:true});}catch{console.error(`Trace export failed; fixture retained: ${directory}`);throw Error('Native trace export unavailable');}}
   if(failed||!process.env.NEURA_BENCH_EVIDENCE)console.error(`Benchmark evidence retained: ${directory}`);else await rm(directory,{recursive:true,force:true});
  }
 }

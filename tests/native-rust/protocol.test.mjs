@@ -96,6 +96,40 @@ test('native stream wakes on durable state, reconnects, and closes during daemon
 });
 
 
+test('terminal input is not queued behind a slow mutation of the same workspace, and output pages stay consistent',{timeout:60000},async()=>{
+ const f=await fixture();let failure;
+ try{
+  const project=await success(f.command({type:'project.add',path:f.repo}));
+  const workspace=(await success(f.request('/v1/state'))).workspaces.find(w=>w.projectId===project.id);
+  const open=()=>success(f.command({type:'terminal.open',workspaceId:workspace.id,provider:'shell'}));
+  const slow=await open(),typed=await open(),clientId=randomUUID();
+  const text=async id=>{let cursor=0,data='',page;do{page=await success(f.request(`/v1/terminals/${id}/output?after=${cursor}&chunksOnly=true`));data+=page.chunks.map(c=>c.data).join('');cursor=page.cursor;}while(page.more);return {data,page};};
+  // The first shell ignores TERM/HUP, so stopping it holds the workspace mutation for the kill grace period.
+  await success(f.command({type:'terminal.input',terminalId:slow.id,clientId,data:"trap '' TERM HUP; printf 'trap-%s\\n' ready\n"}));
+  await eventually(async()=>/trap-ready/.test((await text(slow.id)).data));
+  let stopped=false;const started=Date.now(),stop=f.command({type:'terminal.stop',terminalId:slow.id}).then(r=>{stopped=true;return r;});
+  await sleep(150);
+  const input=await success(f.command({type:'terminal.input',terminalId:typed.id,clientId,data:"printf 'typed-%s\\n' during-stop\n"}));
+  assert.deepEqual(input,{ok:true});
+  await eventually(async()=>/typed-during-stop/.test((await text(typed.id)).data));
+  assert.equal(stopped,false,`input and its output must not wait for the ${Date.now()-started} ms stop`);
+  assert.equal((await stop).status,200);assert.ok(Date.now()-started>=1000,'fixture stop must outlast the input');
+  // Both encodings of one page agree, carry the terminal fields, and a missing terminal is still 404.
+  const joined=await success(f.request(`/v1/terminals/${typed.id}/output?after=0`)),compact=await success(f.request(`/v1/terminals/${typed.id}/output?after=0&chunksOnly=true`));
+  assert.equal(compact.data,'');assert.equal(joined.data,joined.chunks.map(c=>c.data).join(''));assert.deepEqual(compact.chunks,joined.chunks);
+  assert.deepEqual(Object.keys(joined),['data','chunks','cursor','more','status','cols','rows']);
+  assert.equal(joined.status,'running');assert.equal(joined.cols,100);assert.equal(joined.rows,30);assert.equal(joined.cursor,joined.chunks.at(-1).sequence);
+  for(const chunk of joined.chunks)assert.deepEqual(Object.keys(chunk),['sequence','data','cols','rows']);
+  const empty=await success(f.request(`/v1/terminals/${typed.id}/output?after=${joined.cursor}&chunksOnly=true`));
+  assert.deepEqual({data:empty.data,chunks:empty.chunks,cursor:empty.cursor,more:empty.more},{data:'',chunks:[],cursor:joined.cursor,more:false});
+  const missing=await f.request(`/v1/terminals/${randomUUID()}/output?after=0`);assert.equal(missing.status,404);assert.equal(missing.value.error,'terminal_missing');
+  const exited=await text(slow.id);await eventually(async()=>(await text(slow.id)).page.status!=='running');assert.match(exited.data,/trap-ready/);
+  // The state body is assembled from stored text; it must still be one JSON object with every member.
+  const state=await f.request('/v1/state');assert.equal(state.status,200);assert.match(state.headers.get('content-type'),/^application\/json/);assert.equal(state.headers.get('cache-control'),'no-store');
+  assert.deepEqual(Object.keys(state.value),['protocolVersion','hostName','revision','projects','workspaces','terminals','features','runtime','daemonInstanceId','daemonBuild']);
+  assert.equal(state.value.terminals.length,2);assert.ok(state.value.revision>0);assert.equal(state.value.runtime,'rust');
+ }catch(e){failure=e;throw e;}finally{await f.close(failure);}
+});
 test('durable workspace deletion survives disconnected HTTP and daemon restart', {timeout:60000}, async t => {
  const f=await fixture();let failure;
  try {
