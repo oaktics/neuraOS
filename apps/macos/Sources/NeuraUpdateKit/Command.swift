@@ -15,7 +15,7 @@ public typealias CommandRunner = (String, [String], TimeInterval) throws -> Comm
 
 public enum NativeCommand {
     // Every command owns a new process group. On timeout kill and reap the whole
-    // group before returning, including launchctl/gh descendants that ignore TERM.
+    // group before returning, including launchctl descendants that ignore TERM.
     private static func spawn(_ executable: String, _ arguments: [String], output: String) throws -> pid_t {
         var actions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
@@ -61,8 +61,5 @@ public enum NativeCommand {
         let bytes = try file.read(upToCount: 65536) ?? Data()
         let code = (status & 0x7f) == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
         return CommandResult(status: code, output: String(decoding: bytes.suffix(65536), as: UTF8.self))
-    }
-    public static func launch(_ executable: String, _ arguments: [String]) throws {
-        _ = try spawn(executable, arguments, output: "/dev/null")
     }
 }

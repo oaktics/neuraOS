@@ -64,7 +64,9 @@ struct NeuraOSApp: App {
                 Button("今おかしかった：診断情報を保存…") {DiagnosticReport.save()}
             }
             CommandGroup(after: .appInfo) {
-                Button("アップデートを確認…") {updater.check()}.disabled(updater.busy || daemonRestart.busy)
+                Button("アップデートを確認…") {updater.checkForUpdates()}
+                    .disabled(updater.updatesEnabled && !updater.canCheckForUpdates || updater.busy || daemonRestart.busy)
+                if updater.updatesEnabled {Toggle("アップデートを自動で確認", isOn: $updater.automaticallyChecks)}
                 Button(daemonRestart.busy ? "Daemonを再起動中…" : "Daemonを再起動…") {openWindow(id: "main"); daemonRestart.request(model: model)}
                     .disabled(daemonRestart.busy || updater.busy)
             }

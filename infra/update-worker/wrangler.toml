@@ -1,0 +1,12 @@
+# Deployed by .github/workflows/update-worker.yml. See docs/updates.md.
+# The URL is embedded in every release (SUFeedURL). Keep serving it forever.
+name = "neuraos-updates"
+main = "src/index.mjs"
+account_id = "992d812f2e80c8534fe771ebc398af07"
+compatibility_date = "2026-10-01"
+workers_dev = false
+routes = [{ pattern = "neuraos.kiichi.dev", custom_domain = true }]
+
+[[r2_buckets]]
+binding = "UPDATES"
+bucket_name = "neuraos-updates"

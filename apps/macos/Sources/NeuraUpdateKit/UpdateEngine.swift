@@ -4,7 +4,10 @@ import Darwin
 public struct DaemonIdentity: Decodable {
     public let runtime: String?
     public let daemonInstanceId: String?
-    public init(runtime: String?, daemonInstanceId: String?) {self.runtime = runtime; self.daemonInstanceId = daemonInstanceId}
+    public let daemonBuild: Int?
+    public init(runtime: String?, daemonInstanceId: String?, daemonBuild: Int? = nil) {
+        self.runtime = runtime; self.daemonInstanceId = daemonInstanceId; self.daemonBuild = daemonBuild
+    }
     public var instance: UUID? {daemonInstanceId.flatMap(UUID.init(uuidString:))}
     public func isNewNative(after previous: DaemonIdentity?) -> Bool {
         runtime == "rust" && instance != nil && instance != previous?.instance
@@ -16,13 +19,10 @@ public struct UpdateEngine {
     public var helper: URL
     public var run: CommandRunner = NativeCommand.run
     public var pause: (TimeInterval) -> Void = {Thread.sleep(forTimeInterval: $0)}
-    public var parentExists: (Int32) -> Bool = {kill($0, 0) == 0 || errno != ESRCH}
-    public var launch: (String, [String]) throws -> Void = NativeCommand.launch
     public var daemonState: (() async -> DaemonIdentity?)?
     private let fm = FileManager.default
     public init(home: URL = URL(fileURLWithPath: NSHomeDirectory()), helper: URL) {self.home = home; self.helper = helper}
     public var updates: URL {home.appendingPathComponent("Library/Application Support/neuraOS/Updates")}
-    public var target: URL {home.appendingPathComponent("Applications/neuraOS.app")}
     public var data: URL {home.appendingPathComponent("Library/Application Support/neuraOS/Developer")}
     public var plist: URL {home.appendingPathComponent("Library/LaunchAgents/app.neuraos.daemon.plist")}
     public var domain: String {"gui/\(getuid())"}
@@ -82,49 +82,16 @@ public struct UpdateEngine {
         default: throw UpdateFailure("Unknown service action")
         }
     }
-    public func bootstrap(daemon requestedDaemon: URL? = nil) throws {
-        let daemon = requestedDaemon ?? helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")
-        // Opening a second/relocated app must never stop an existing daemon or
-        // its terminals. Only explicit install/apply may replace a live service.
-        if let status = try? service("status", daemon: daemon),
-           status.range(of: #"(?m)^\s*pid\s*=\s*[1-9][0-9]*\s*$"#, options: .regularExpression) != nil {return}
-        try installService(daemon: daemon)
+    private func isRunning(daemon: URL) -> Bool {
+        guard let status = try? service("status", daemon: daemon) else {return false}
+        return status.range(of: #"(?m)^\s*pid\s*=\s*[1-9][0-9]*\s*$"#, options: .regularExpression) != nil
     }
-    public func prepare(tag: String, parentPID: Int32, latest: () async throws -> NativeRelease,
-                        download: (URL, URL) async throws -> Void) async throws {
-        guard parentPID > 1 else {throw UpdateFailure("Invalid application PID")}
-        let release = try await latest()
-        guard release.tag == tag else {throw UpdateFailure("新しいリリースが公開されました。もう一度確認してください。")}
-        try directory(updates)
-        let lock = updates.appendingPathComponent("install.lock")
-        do {try fm.createDirectory(at: lock, withIntermediateDirectories: false)} catch {throw UpdateFailure("更新処理が既に実行中です。")}
-        let stage = updates.appendingPathComponent("stage-\(UUID().uuidString)")
-        do {
-            try directory(stage)
-            let archive = stage.appendingPathComponent(release.name)
-            if release.authenticated {
-                _ = try execute("gh", ["release", "download", release.tag, "--repo", NativeRelease.repository, "--pattern", release.name, "--dir", stage.path], 600)
-            } else {try await download(URL(string: release.url)!, archive)}
-            try release.verify(file: archive)
-            _ = try execute("/usr/bin/ditto", ["-x", "-k", archive.path, stage.path], 120)
-            let app = stage.appendingPathComponent("neuraOS.app")
-            _ = try execute("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path], 120)
-            // Release artifacts must retain Developer ID / Gatekeeper acceptance.
-            _ = try execute("/usr/sbin/spctl", ["--assess", "--type", "execute", app.path], 120)
-            let info = app.appendingPathComponent("Contents/Info.plist")
-            let identity = try execute("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleIdentifier", info.path]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let build = try execute("/usr/libexec/PlistBuddy", ["-c", "Print :CFBundleVersion", info.path]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard identity == "app.neuraos.native", build == String(release.build) else {throw UpdateFailure("アプリのバージョン情報が一致しません。")}
-            for name in ["neura-native-core", "neura-updater"] {
-                guard fm.isExecutableFile(atPath: app.appendingPathComponent("Contents/Resources/Runtime/bin/\(name)").path) else {throw UpdateFailure("native runtimeがありません。")}
-            }
-            let installer = stage.appendingPathComponent("neura-updater")
-            try fm.copyItem(at: helper, to: installer)
-            try launch(installer.path, ["apply", stage.path, String(parentPID)])
-        } catch {
-            try? remove(stage); try? remove(lock)
-            throw error
-        }
+    public func bootstrap(daemon requestedDaemon: URL? = nil) throws {
+        let daemon = requestedDaemon ?? bundledDaemon
+        // Opening a second/relocated app must never stop an existing daemon or
+        // its terminals. Only explicit install/reconcile may replace a live service.
+        if isRunning(daemon: daemon) {return}
+        try installService(daemon: daemon)
     }
     private func readDaemonState() async -> DaemonIdentity? {
         if let daemonState {return await daemonState()}
@@ -135,47 +102,74 @@ public struct UpdateEngine {
               (response as? HTTPURLResponse)?.statusCode == 200 else {return nil}
         return try? JSONDecoder().decode(DaemonIdentity.self, from: bytes)
     }
-    public func apply(stage: URL, parentPID: Int32) async throws {
-        guard parentPID > 1, stage.deletingLastPathComponent().resolvingSymlinksInPath() == updates.resolvingSymlinksInPath(),
-              stage.lastPathComponent.hasPrefix("stage-") else {throw UpdateFailure("Invalid update stage")}
-        let backup = URL(fileURLWithPath: target.path + ".previous")
-        var oldPlist: Data?, moved = false, installed = false, serviceChanged = false
-        defer {try? remove(updates.appendingPathComponent("install.lock")); try? remove(stage)}
+    /// Bundled daemon next to this helper inside the app.
+    public var bundledDaemon: URL {helper.deletingLastPathComponent().appendingPathComponent("neura-native-core")}
+    /// Written by the app right before Sparkle relaunches it after the user
+    /// explicitly chose "Install and Relaunch".
+    public var relaunchApproval: URL {updates.appendingPathComponent("relaunch-approved")}
+    public var lastError: URL {updates.appendingPathComponent("last-error.txt")}
+    public var now: () -> Date = Date.init
+
+    private func configuredDaemon() -> String? {
+        guard let bytes = try? Data(contentsOf: plist),
+              let value = try? PropertyListSerialization.propertyList(from: bytes, format: nil) as? [String: Any],
+              let arguments = value["ProgramArguments"] as? [String], arguments.count == 1 else {return nil}
+        return arguments[0]
+    }
+    private func samePath(_ a: String, _ b: URL) -> Bool {
+        URL(fileURLWithPath: a).resolvingSymlinksInPath().standardizedFileURL.path == b.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+    /// Consumes the approval marker. Only a recent marker counts, so an old
+    /// leftover can never silently restart the daemon on a later launch.
+    private func consumeApproval() -> Bool {
+        guard let attributes = try? fm.attributesOfItem(atPath: relaunchApproval.path),
+              let written = attributes[.modificationDate] as? Date else {return false}
+        try? remove(relaunchApproval)
+        return now().timeIntervalSince(written) < 15 * 60
+    }
+
+    /// Brings the LaunchAgent in line with the app that was just launched.
+    /// Sparkle replaces the app bundle in place, so the LaunchAgent keeps
+    /// pointing at the same path while the old daemon process keeps running
+    /// the replaced executable. Restarting it stops PTYs, so it only happens
+    /// after an explicit approval (the relaunch marker or `approved`).
+    public func reconcile(build: Int, approved requested: Bool) async throws -> ReconcileState {
+        guard build > 0 else {throw UpdateFailure("Invalid build number")}
+        let daemon = bundledDaemon
+        let approved = consumeApproval() || requested
+        guard isRunning(daemon: daemon) else {try installService(daemon: daemon); return .installed}
+        // A different app copy (or a legacy runtime) owns the service: never touch it.
+        guard let configured = configuredDaemon(), samePath(configured, daemon) else {return .foreign}
+        let previous = await readDaemonState()
+        if previous?.daemonBuild == build {return .current}
+        guard approved else {return .needsRestart}
         do {
-            var exited = false
-            for _ in 0..<120 {if !parentExists(parentPID) {exited = true; break}; pause(0.5)}
-            guard exited else {throw UpdateFailure("アプリが終了しなかったため更新を中止しました。")}
-            if fm.fileExists(atPath: plist.path) {
-                oldPlist = try Data(contentsOf: plist)
-                let savedPlist = updates.appendingPathComponent("previous-launch-agent.plist")
-                try oldPlist!.write(to: savedPlist, options: .atomic)
-                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: savedPlist.path)
-            }
-            let previousDaemon = await readDaemonState()
-            try directory(target.deletingLastPathComponent())
-            try remove(backup)
-            if fm.fileExists(atPath: target.path) {try fm.moveItem(at: target, to: backup); moved = true}
-            try fm.moveItem(at: stage.appendingPathComponent("neuraOS.app"), to: target); installed = true
-            serviceChanged = true
-            try installService(daemon: target.appendingPathComponent("Contents/Resources/Runtime/bin/neura-native-core"))
+            try installService(daemon: daemon)
             var ready = false
-            for _ in 0..<30 {if await readDaemonState()?.isNewNative(after: previousDaemon) == true {ready = true; break}; pause(0.5)}
+            for _ in 0..<30 {
+                if let state = await readDaemonState(), state.isNewNative(after: previous), state.daemonBuild == build {ready = true; break}
+                pause(0.5)
+            }
             guard ready else {throw UpdateFailure("更新後のDaemonが起動しませんでした。")}
-            try remove(updates.appendingPathComponent("last-error.txt"))
-            _ = try execute("/usr/bin/open", [target.path])
+            try remove(lastError)
+            return .migrated
         } catch {
-            if serviceChanged {_ = try? run("/bin/launchctl", ["bootout", "\(domain)/\(Self.serviceID)"], 5)}
-            // Do not erase the backup if restoration itself fails: preserve data.
-            if installed {try remove(target)}
-            if moved {try fm.moveItem(at: backup, to: target)}
-            if serviceChanged, let oldPlist {
-                try oldPlist.write(to: plist, options: .atomic); try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: plist.path)
-                _ = try? run("/bin/launchctl", ["bootstrap", domain, plist.path], 5)
-            } else if serviceChanged {try remove(plist)}
-            try directory(updates)
-            try Data(error.localizedDescription.utf8).write(to: updates.appendingPathComponent("last-error.txt"), options: .atomic)
-            if moved {_ = try? run("/usr/bin/open", [target.path], 30)}
+            try? directory(updates)
+            try? Data(error.localizedDescription.utf8).write(to: lastError, options: .atomic)
             throw error
         }
     }
+}
+
+public enum ReconcileState: String, Codable {
+    /// The service was stopped or missing and now runs the bundled daemon.
+    case installed
+    /// The running daemon already matches this app.
+    case current
+    /// The bundled daemon replaced a stale one.
+    case migrated
+    /// The running daemon is stale; restarting it needs the user's approval.
+    case needsRestart
+    /// The service belongs to another app copy or runtime and is preserved.
+    case foreign
 }
