@@ -1,5 +1,8 @@
 //! One readiness reactor for all PTYs. Bytes go directly to native storage.
-use crate::{error::ApiError, store::StoreHandle};
+use crate::{
+    error::ApiError,
+    store::{OutputRow, StoreHandle},
+};
 use mio::{unix::SourceFd, Events, Interest, Poll, Token, Waker};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde_json::json;
@@ -14,6 +17,10 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc};
 type NativeChild = Box<dyn portable_pty::Child + Send + Sync>;
+/// Bytes read from one PTY per reactor turn, and the size up to which a batch
+/// merges a terminal's chunks. A decoded chunk can exceed it (carried partial
+/// UTF-8, U+FFFD expansion), so stored rows are about, not at most, this size.
+const ROW_BYTES: usize = 32768;
 static CANCEL_REAPER: std::sync::OnceLock<Result<std::sync::mpsc::Sender<NativeChild>, String>> =
     std::sync::OnceLock::new();
 fn cancel_reaper() -> Result<std::sync::mpsc::Sender<NativeChild>, ApiError> {
@@ -164,6 +171,12 @@ fn register(inner: &Inner, s: &mut Session) {
     }
 }
 fn decode(s: &mut Session, bytes: &[u8], finish: bool) -> String {
+    // Common case: no carried partial sequence and a complete chunk. One copy.
+    if s.utf8.is_empty() {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return text.to_owned();
+        }
+    }
     s.utf8.extend_from_slice(bytes);
     let mut text = String::new();
     loop {
@@ -238,6 +251,10 @@ impl PtyRuntime {
         let (tx, mut rx) = mpsc::channel::<Output>(capacity);
         let io = inner.clone();
         tokio::spawn(async move {
+            const BATCH: std::time::Duration = std::time::Duration::from_millis(8);
+            const SETTLE: std::time::Duration = std::time::Duration::from_millis(2);
+            let mut last_commit = tokio::time::Instant::now();
+            last_commit = last_commit.checked_sub(BATCH).unwrap_or(last_commit);
             while let Some(first) = rx.recv().await {
                 #[cfg(test)]
                 {
@@ -247,11 +264,19 @@ impl PtyRuntime {
                         let _ = release.await;
                     }
                 }
-                let mut rows = Vec::new();
+                let mut rows: Vec<OutputRow> = Vec::new();
                 let mut exits = Vec::new();
                 let mut resize = None;
                 let mut bytes = 0;
-                let until = tokio::time::Instant::now() + std::time::Duration::from_millis(8);
+                // A batch still closes at most BATCH after its first byte and
+                // commits start at most once per BATCH. When the previous commit
+                // is at least that old, the batch also closes once the PTY has
+                // been quiet for SETTLE, so isolated output such as a key echo
+                // is not held for the full window while a redraw that arrives
+                // in several reads still lands in one commit.
+                let start = tokio::time::Instant::now();
+                let hard = start + BATCH;
+                let pace = last_commit + BATCH;
                 let mut next = Some(first);
                 while let Some(row) = next.take() {
                     if let Some(code) = row.exit_code {
@@ -259,21 +284,45 @@ impl PtyRuntime {
                         break;
                     }
                     if let Some(request) = row.resize {
-                        rows.push(json!({"terminalId":row.terminal_id,"data":"","cols":request.cols,"rows":request.rows}));
+                        rows.push(OutputRow {
+                            terminal_id: row.terminal_id.clone(),
+                            data: String::new(),
+                            size: Some((request.cols, request.rows)),
+                        });
                         resize = Some((row.terminal_id, request));
                         break;
                     }
                     bytes += row.data.len();
-                    rows.push(json!({"terminalId":row.terminal_id,"data":row.data}));
+                    // Chunks of one terminal inside a batch form one stored row up to
+                    // about the read-buffer size. Per-terminal byte order is unchanged, and
+                    // a resize marker always ends the batch, so nothing crosses it.
+                    match rows.iter_mut().rev().find(|r| r.terminal_id == row.terminal_id) {
+                        Some(last) if last.data.len() + row.data.len() <= ROW_BYTES => {
+                            last.data.push_str(&row.data)
+                        }
+                        _ => rows.push(OutputRow {
+                            terminal_id: row.terminal_id,
+                            data: row.data,
+                            size: None,
+                        }),
+                    }
                     if bytes >= 256 * 1024 {
                         break;
                     }
+                    let until = hard.min(pace.max(tokio::time::Instant::now() + SETTLE));
                     next = tokio::time::timeout_at(until, rx.recv())
                         .await
                         .ok()
                         .flatten();
                 }
-                if !rows.is_empty() && store.call("append", json!(rows)).await.is_err() {
+                let stored = if rows.is_empty() {
+                    Ok(())
+                } else {
+                    let result = store.append(rows).await;
+                    last_commit = tokio::time::Instant::now();
+                    result
+                };
+                if stored.is_err() {
                     fail(&io);
                     io.closed.store(true, Ordering::Release);
                     let _ = io.waker.wake();
@@ -428,11 +477,31 @@ impl PtyRuntime {
                             }
                         }
                         if s.pending.is_none() && !s.eof && !s.resizing {
-                            let mut bytes = [0u8; 32768];
-                            let n =
-                                unsafe { libc::read(s.fd, bytes.as_mut_ptr().cast(), bytes.len()) };
-                            if n > 0 {
-                                let data = decode(s, &bytes[..n as usize], false);
+                            // A macOS PTY hands over at most 1 KiB per read. Gather what
+                            // is already queued, bounded by this buffer, into one chunk
+                            // instead of one channel entry and one stored row per KiB.
+                            let mut bytes = [0u8; ROW_BYTES];
+                            let mut filled = 0;
+                            let mut ended = false;
+                            while filled < bytes.len() {
+                                let n = unsafe {
+                                    libc::read(
+                                        s.fd,
+                                        bytes[filled..].as_mut_ptr().cast(),
+                                        bytes.len() - filled,
+                                    )
+                                };
+                                if n > 0 {
+                                    filled += n as usize;
+                                    continue;
+                                }
+                                ended = n == 0
+                                    || io::Error::last_os_error().kind()
+                                        != io::ErrorKind::WouldBlock;
+                                break;
+                            }
+                            if filled > 0 {
+                                let data = decode(s, &bytes[..filled], false);
                                 if !data.is_empty() {
                                     if let Err(e) = tx.try_send(Output {
                                         terminal_id: id.clone(),
@@ -444,18 +513,25 @@ impl PtyRuntime {
                                         io.pressured.lock().unwrap().insert(id.clone());
                                     }
                                 }
-                                if s.pending.is_none() && scheduled.insert(token.0) {
+                                // Only a full buffer can leave bytes queued without a new
+                                // readiness edge; would-block re-arms the edge itself.
+                                if filled == bytes.len()
+                                    && s.pending.is_none()
+                                    && scheduled.insert(token.0)
+                                {
                                     ready.push_back(token);
                                 }
-                            } else if n == 0
-                                || (n < 0
-                                    && io::Error::last_os_error().kind()
-                                        != io::ErrorKind::WouldBlock)
-                            {
+                            }
+                            if ended {
                                 s.eof = true;
                                 let tail = decode(s, &[], true);
                                 if !tail.is_empty() {
-                                    s.pending = Some(tail);
+                                    // Bytes read in this same turn may still be waiting
+                                    // for queue space; the carried tail follows them.
+                                    match &mut s.pending {
+                                        Some(pending) => pending.push_str(&tail),
+                                        None => s.pending = Some(tail),
+                                    }
                                     io.pressured.lock().unwrap().insert(id.clone());
                                 }
                             }
