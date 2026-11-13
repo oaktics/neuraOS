@@ -1,13 +1,6 @@
 import SwiftUI
 import ChromiumBridge
 
-enum BrowserCommand: Equatable {
-    case reload, hardReload, back, forward, stop
-    case find, findNext, findPrevious
-    case zoomIn, zoomOut, zoomReset
-    case copyURL, togglePin, devTools, openExternally
-}
-
 @MainActor final class BrowserModel: ObservableObject {
     private final class Weak {weak var model: BrowserModel?; init(_ model: BrowserModel) {self.model = model}}
     private static var registry: [String: Weak] = [:]
@@ -34,7 +27,8 @@ enum BrowserCommand: Equatable {
     let workspaceId: String
     let projectId: String
     var tabId: String {String(storageId.split(separator: ".").last ?? "")}
-    var browserVisible = true { didSet { if browserVisible != oldValue { BrowserAutomation.shared.changed() } } }
+    // False until the pane reports otherwise: a restored tab that was never shown is not on screen.
+    var browserVisible = false { didSet { if browserVisible != oldValue { BrowserAutomation.shared.changed() } } }
     @Published var automationEnabled = true {
         didSet {UserDefaults.standard.set(!automationEnabled, forKey: "browser.mcpDisabled." + storageId)}
     }
@@ -68,17 +62,19 @@ enum BrowserCommand: Equatable {
             DispatchQueue.main.async {if let self {BrowserAutomation.shared.stop(self, reason: reason)}}
         }
         self.view.onProgress = { [weak self] value in DispatchQueue.main.async {self?.progress = value} }
-        self.view.onFavicon = { [weak self] png in
-            DispatchQueue.main.async {
-                guard let self, !self.observedURL.isEmpty else {return}
-                FaviconStore.shared.store(png, for: self.observedURL)
-            }
+        self.view.onFavicon = {png, page in
+            // Stored under the page that asked for it, even if the tab has moved on since.
+            DispatchQueue.main.async {FaviconStore.shared.store(png, for: page)}
         }
         self.view.onFind = { [weak self] ordinal, count in
             DispatchQueue.main.async {self?.findOrdinal = ordinal; self?.findCount = count}
         }
         // A popup already owns a Chromium navigation/opener. Do not reload it.
-        if view == nil {navigate()}
+        // A saved address is loaded only if it is still a valid one; it is never turned into a search.
+        if view == nil {
+            if let url = Self.navigationURL(address) {address = url.absoluteString; self.view.loadURL(address)}
+            else {message = "保存されていたアドレスは開けません。アドレスを入力し直してください。"}
+        }
         Self.registry[storageId] = Weak(self)
         BrowserAutomation.shared.register(self)
     }
@@ -195,13 +191,14 @@ struct BrowserPane: View {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .onAppear {if visible {browser.loaded = true}; publish()}
-        .onChange(of: visible) {_, value in if value {browser.loaded = true}}
+        .onAppear {if visible {browser.loaded = true}; browser.browserVisible = visible; url = browser.address}
+        .onChange(of: visible) {_, value in if value {browser.loaded = true}; browser.browserVisible = value}
         .onChange(of: browser.title) {_, _ in publish()}
         .onChange(of: browser.address) {_, _ in publish()}
     }
     private func publish() {
-        title = browser.title.isEmpty ? nil : browser.title
+        // An unloaded tab has no title yet; keep the one saved with it.
+        if !browser.title.isEmpty || browser.view.hasBrowser {title = browser.title.isEmpty ? nil : browser.title}
         url = browser.address
     }
     private func toolbar(compact: Bool) -> some View {

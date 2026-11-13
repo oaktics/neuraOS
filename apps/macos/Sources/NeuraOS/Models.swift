@@ -3,6 +3,23 @@ import SwiftUI
 import Combine
 import Observation
 
+/// Where a newly opened page goes relative to the tab that asked for it.
+enum BrowserPlacement: Equatable {
+    /// A new selected tab.
+    case tab
+    /// A new tab that does not take focus.
+    case background
+    /// Beside the current tab, which stays visible.
+    case split
+}
+
+enum BrowserCommand: Equatable {
+    case reload, hardReload, back, forward, stop
+    case find, findNext, findPrevious
+    case zoomIn, zoomOut, zoomReset
+    case copyURL, togglePin, devTools, openExternally
+}
+
 enum WorkspaceAction: Equatable {
     case add(String), close, move(Int), select(Int), inspector(String)
     /// Open a page from the command bar or a link.
@@ -279,7 +296,6 @@ final class DaemonClient {
     var requestedTab: (workspaceId: String, tabId: String)?
     /// Kind of the tab that has focus in the selected workspace; menus enable browser commands from it.
     var activeTabKind: String?
-    var commandBarVisible: Bool {CommandBarPanel.shared.isVisible}
     var splitAgentLinks = UserDefaults.standard.object(forKey: "browser.splitAgentLinks") as? Bool ?? true {
         didSet {UserDefaults.standard.set(splitAgentLinks, forKey: "browser.splitAgentLinks")}
     }

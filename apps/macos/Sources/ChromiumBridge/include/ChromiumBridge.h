@@ -16,8 +16,8 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 @property(nonatomic, copy, nullable) void (^onAutomationInvalidated)(NSString *reason);
 // Overall page load progress, 0...1.
 @property(nonatomic, copy, nullable) void (^onProgress)(double progress);
-// PNG bytes of the page icon, or nil when the page has none.
-@property(nonatomic, copy, nullable) void (^onFavicon)(NSData * _Nullable png);
+// PNG bytes of the icon of `pageURL`, or nil when that page has none.
+@property(nonatomic, copy, nullable) void (^onFavicon)(NSData * _Nullable png, NSString *pageURL);
 // Result of the active find session: current match (1-based) and total.
 @property(nonatomic, copy, nullable) void (^onFind)(NSInteger ordinal, NSInteger count);
 // A user gesture asked for another tab without a popup (for example cmd-click).

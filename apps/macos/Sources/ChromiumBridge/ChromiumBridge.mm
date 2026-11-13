@@ -22,6 +22,8 @@ static NSString *chromiumProfile;
 static bool pumping = false;
 static std::map<int, cef_browser_t *> browsers;
 static void (^shutdownCompletion)(void);
+// Page address for each favicon download in flight. CEF UI thread (the AppKit main thread) only.
+static NSMutableDictionary<NSValue *, NSString *> *faviconPages;
 
 @interface NCApplication : NSApplication <CefAppProtocol>
 @property(nonatomic) BOOL handlingSendEvent;
@@ -213,6 +215,27 @@ NSString *NCChromiumProfileDirectory(void) {return chromiumProfile;}
 
 #include "BrowserExtensions.inc"
 
+// The enabled main-menu item bound to a key, searching submenus. `key` is the
+// unshifted, lower-case character; an upper-case key equivalent implies Shift.
+static NSMenuItem *MenuItemForKey(NSMenu *menu, NSString *key, NSEventModifierFlags flags) {
+    if (!menu || !key.length) return nil;
+    [menu update];
+    const NSEventModifierFlags mask = NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagControl;
+    for (NSMenuItem *item in menu.itemArray) {
+        if (item.hasSubmenu) {
+            NSMenuItem *found = MenuItemForKey(item.submenu, key, flags);
+            if (found) return found;
+            continue;
+        }
+        NSString *equivalent = item.keyEquivalent;
+        if (!equivalent.length || !item.enabled || item.hidden || !item.action) continue;
+        NSEventModifierFlags wanted = item.keyEquivalentModifierMask & mask;
+        if (![equivalent isEqualToString:equivalent.lowercaseString]) wanted |= NSEventModifierFlagShift;
+        if (wanted == flags && [equivalent.lowercaseString isEqualToString:key]) return item;
+    }
+    return nil;
+}
+
 static cef_client_t *MakeClient(NCChromiumView *view);
 static cef_window_info_t WindowInfo(NCChromiumView *view) {
     cef_window_info_t info = {}; info.size = sizeof(info);
@@ -248,30 +271,31 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             cef_string_t first = {};
             NSString *url = urls && p_cef_string_list_size(urls) > 0 && p_cef_string_list_value(urls, 0, &first) ? String(&first) : @"";
             if (first.dtor) first.dtor(first.str);
-            if ([url isEqualToString:v->_faviconURL ?: @""]) return;
+            NSString *page = [v->_url copy] ?: @"";
             v->_faviconURL = url;
-            if (!url.length) {if (v.onFavicon) v.onFavicon(nil); return;}
+            if (!url.length) {if (v.onFavicon) v.onFavicon(nil, page); return;}
+            // The page is remembered with the request: the tab may navigate before the icon arrives.
             auto done = new Handler<cef_download_image_callback_t>(v);
-            done->api.on_download_image_finished = [](cef_download_image_callback_t *self, const cef_string_t *imageURL, int, cef_image_t *image) {
+            if (!faviconPages) faviconPages = [NSMutableDictionary dictionary];
+            faviconPages[[NSValue valueWithPointer:&done->api]] = page;
+            done->api.on_download_image_finished = [](cef_download_image_callback_t *self, const cef_string_t *, int, cef_image_t *image) {
                 CallbackRef imageRef(image);
                 NCChromiumView *view = View(self);
-                // A later page may already have replaced this icon.
-                if (!view || ![String(imageURL) isEqualToString:view->_faviconURL ?: @""]) return;
-                NSData *png;
-                if (image) {
-                    int width = 0, height = 0;
-                    auto value = image->get_as_png(image, 2, 1, &width, &height);
-                    if (value) {
-                        NSMutableData *data = [NSMutableData dataWithLength:value->get_size(value)];
-                        if (data.length && value->get_data(value, data.mutableBytes, data.length, 0) == data.length) png = data;
-                        Release(value);
-                    }
-                }
-                if (view.onFavicon) view.onFavicon(png);
+                NSValue *key = [NSValue valueWithPointer:self];
+                NSString *page = faviconPages[key];
+                [faviconPages removeObjectForKey:key];
+                if (!view || !image || !page) return;
+                int width = 0, height = 0;
+                auto value = image->get_as_png(image, 2, 1, &width, &height);
+                if (!value) return;
+                NSMutableData *data = [NSMutableData dataWithLength:value->get_size(value)];
+                BOOL complete = data.length && value->get_data(value, data.mutableBytes, data.length, 0) == data.length;
+                Release(value);
+                if (complete && view.onFavicon) view.onFavicon(data, page);
             };
             auto host = browser->get_host(browser);
-            // is_favicon: no cookies are sent or stored for this request.
             NCString address(url);
+            // is_favicon: no cookies are sent or stored for this request.
             host->download_image(host, &address.value, 1, 32, 0, &done->api);
             Release(host);
         };
@@ -324,16 +348,27 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     };
     c->api.get_keyboard_handler = [](cef_client_t *self) -> cef_keyboard_handler_t * {
         auto h = new Handler<cef_keyboard_handler_t>(View(self));
-        // Application shortcuts win over the page, as in any browser. Text editing
-        // keys are left to the page; everything else is offered to the main menu first.
+        // neuraOS routes its own shortcuts before a page sees them (KeyboardRouter). What
+        // reaches here is offered to the remaining enabled menu items, such as Quit, Hide and
+        // Settings; text editing keys and everything else are left to the page.
         h->api.on_pre_key_event = [](cef_keyboard_handler_t *, cef_browser_t *browser, const cef_key_event_t *event, cef_event_handle_t osEvent, int *) -> int {
             CallbackRef browserRef(browser);
             NSEvent *native = (__bridge NSEvent *)osEvent;
             if (event->type != KEYEVENT_RAWKEYDOWN || !(event->modifiers & EVENTFLAG_COMMAND_DOWN) || native.type != NSEventTypeKeyDown) return 0;
-            NSString *key = native.charactersIgnoringModifiers.lowercaseString ?: @"";
-            BOOL plain = !(event->modifiers & (EVENTFLAG_SHIFT_DOWN | EVENTFLAG_ALT_DOWN | EVENTFLAG_CONTROL_DOWN));
-            if ((plain && [@[@"c", @"v", @"x", @"a", @"z"] containsObject:key]) || ((event->modifiers & EVENTFLAG_SHIFT_DOWN) && [key isEqualToString:@"z"])) return 0;
-            return [NSApp.mainMenu performKeyEquivalent:native] ? 1 : 0;
+            NSEventModifierFlags flags = native.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagControl);
+            NSString *key = ([native charactersByApplyingModifiers:0] ?: native.charactersIgnoringModifiers ?: @"").lowercaseString;
+            if ((flags == NSEventModifierFlagCommand && [@[@"c", @"v", @"x", @"a", @"z"] containsObject:key]) ||
+                (flags == (NSEventModifierFlagCommand | NSEventModifierFlagShift) && [key isEqualToString:@"z"])) return 0;
+            NSMenuItem *item = MenuItemForKey(NSApp.mainMenu, key, flags);
+            if (!item) return 0;
+            // AppKit is still dispatching this event through the view hierarchy, and Chromium is
+            // inside its own key handling. Run the menu action once both have unwound.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSMenu *menu = item.menu;
+                NSInteger index = menu ? [menu indexOfItem:item] : -1;
+                if (index >= 0 && item.enabled) [menu performActionForItemAtIndex:index];
+            });
+            return 1;
         };
         return &h->api;
     };

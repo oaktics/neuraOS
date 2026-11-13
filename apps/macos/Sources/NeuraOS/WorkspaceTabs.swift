@@ -28,16 +28,6 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
 
-/// Where a newly opened page goes relative to the tab that asked for it.
-enum BrowserPlacement: Equatable {
-    /// A new selected tab.
-    case tab
-    /// A new tab that does not take focus.
-    case background
-    /// Beside the current tab, which stays visible.
-    case split
-}
-
 struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
@@ -105,7 +95,8 @@ struct WorkspaceTabState: Codable {
 
     /// Show a tab beside the selected one, or return it to the strip.
     mutating func toggleSplit(_ id: String) {
-        guard tabs.contains(where: {$0.id == id}) else {return}
+        // The diff surface is drawn in the left pane only.
+        guard let tab = tabs.first(where: {$0.id == id}), tab.kind != "diff" else {return}
         if splitId == id {splitId = nil; splitFocused = nil; return}
         if selectedId == id {
             // Keep the current tab on screen: it moves right and the previous one returns to the left.
@@ -127,7 +118,9 @@ struct WorkspaceTabState: Codable {
         return index
     }
 
-    mutating func insert(_ tab: WorkspaceTab, placement: BrowserPlacement = .tab) {
+    /// `focusSplit` false shows the page on the right but leaves commands with the current tab,
+    /// which is where the keyboard still is when a link is opened from a conversation.
+    mutating func insert(_ tab: WorkspaceTab, placement: BrowserPlacement = .tab, focusSplit: Bool = true) {
         tabs.insert(tab, at: min(tabs.count, insertionIndex(after: tab.openerId, background: placement == .background)))
         switch placement {
         case .tab: focus(tab.id)
@@ -139,14 +132,18 @@ struct WorkspaceTabState: Codable {
         case .split:
             splitId = tab.id
             if selectedId == tab.id {selectedId = nil}
-            splitFocused = true
-            touch(tab.id)
+            splitFocused = focusSplit
+            if focusSplit {touch(tab.id)} else {
+                var order = recent ?? []
+                order.insert(tab.id, at: min(1, order.count))
+                recent = order
+            }
         }
     }
 
     @discardableResult
     @MainActor mutating func openBrowser(_ url: URL, workspaceId: String, defaults: UserDefaults = .standard,
-                                         opener: String? = nil, placement: BrowserPlacement = .tab) -> Bool {
+                                         opener: String? = nil, placement: BrowserPlacement = .tab, focusSplit: Bool = true) -> Bool {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               BrowserModel.navigationURL(url.absoluteString) != nil else {return false}
         var tab = WorkspaceTab(kind: "browser", number: (tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
@@ -154,7 +151,7 @@ struct WorkspaceTabState: Codable {
         tab.browserURL = url.absoluteString
         // Seed the URL before SwiftUI constructs the browser and starts navigation.
         defaults.set(url.absoluteString, forKey: "browser.\(workspaceId).\(tab.id)")
-        insert(tab, placement: placement)
+        insert(tab, placement: placement, focusSplit: focusSplit)
         return true
     }
 
@@ -248,6 +245,7 @@ extension Binding where Value == WorkspaceTabState {
 struct RecentTabCycle {
     private(set) var order: [String] = []
     private(set) var index = 0
+    private var started = false
     var active: Bool {!order.isEmpty}
 
     mutating func step(_ offset: Int, in state: WorkspaceTabState) -> String? {
@@ -257,10 +255,13 @@ struct RecentTabCycle {
             if let current = state.activeId, let position = order.firstIndex(of: current) {order.remove(at: position); order.insert(current, at: 0)}
             index = 0
         }
-        guard order.count > 1 else {order = []; return nil}
+        // From the home surface the most recent tab is itself the first step.
+        if state.activeId == nil, index == 0, !started {started = true; return order.first}
+        started = true
+        guard order.count > 1 else {order = []; started = false; return nil}
         index = ((index + offset) % order.count + order.count) % order.count
         return order[index]
     }
 
-    mutating func finish() {order = []; index = 0}
+    mutating func finish() {order = []; index = 0; started = false}
 }

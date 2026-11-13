@@ -148,9 +148,20 @@ struct BrowserAutomationError: Error {let code: String}
             defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = "";pulse.signal()}
             do {
                 // A restored tab has no page until it is first shown; an agent request loads it.
-                if !model.loaded {model.loaded = true}
+                let deferred = !model.loaded
+                if deferred {model.loaded = true}
                 while !model.view.hasBrowser, Date().timeIntervalSince1970 * 1000 < deadline {
                     try await Task.sleep(for: .milliseconds(50))
+                }
+                if deferred, action != "navigate" {
+                    // The page object exists before its saved address has loaded. Wait for that
+                    // first load so a read does not describe the empty initial document.
+                    var started = false
+                    let limit = min(deadline, Date().timeIntervalSince1970 * 1000 + 10_000)
+                    while Date().timeIntervalSince1970 * 1000 < limit {
+                        if model.isLoading {started = true} else if started {break}
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
                 }
                 let result = try await Self.execute(c, view: model.view, deadline: deadline, allowed: {model.automationEnabled})
                 results.append(["id":id,"result":result])

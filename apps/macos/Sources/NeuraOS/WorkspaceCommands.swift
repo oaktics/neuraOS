@@ -1,7 +1,10 @@
 import SwiftUI
 import AppKit
+import ChromiumBridge
 
 extension AppModel {
+    var commandBarVisible: Bool {CommandBarPanel.shared.isVisible}
+
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
         guard let workspace = selected, !showNewSpace, !showNewWorkspace, !showNewProject,
@@ -37,8 +40,118 @@ enum WorkspaceCommandContext {
     }
 }
 
-/// Keys that must work whichever view has focus, including a web page or a terminal:
-/// ⌘W closes the current tab, and ⌃Tab walks recently used tabs until Control is released.
+/// What a shortcut does when it is routed directly instead of through the menu bar.
+enum AppShortcut: Equatable {
+    case workspace(WorkspaceAction)
+    case conversation
+    case newWork, newSpace, newProject, openFolder
+    case space(Int)
+    case toggleSidebar, toggleInspector
+
+    /// The shortcut for a key press. `key` is the unshifted, lower-case character.
+    /// These mirror the key equivalents shown in the menu bar.
+    static func match(key: String, keyCode: UInt16, flags: NSEvent.ModifierFlags) -> AppShortcut? {
+        let modifiers = flags.intersection([.command, .shift, .option, .control])
+        guard modifiers.contains(.command) else {return nil}
+        let split = key == "\\" || key == "¥"
+        switch modifiers {
+        case .command:
+            if let number = Int(key), (1...9).contains(number) {return .workspace(.select(number))}
+            if split {return .workspace(.toggleSplit)}
+            switch key {
+            case "t": return .workspace(.commandBar(edit: false))
+            case "l": return .workspace(.commandBar(edit: true))
+            case "r": return .workspace(.browser(.reload))
+            case ".": return .workspace(.browser(.stop))
+            case "[": return .workspace(.browser(.back))
+            case "]": return .workspace(.browser(.forward))
+            case "f": return .workspace(.browser(.find))
+            case "g": return .workspace(.browser(.findNext))
+            case "=", "+", ";": return .workspace(.browser(.zoomIn))
+            case "-": return .workspace(.browser(.zoomOut))
+            case "0": return .workspace(.browser(.zoomReset))
+            case "d": return .workspace(.browser(.togglePin))
+            case "n": return .newWork
+            case "o": return .openFolder
+            default: return nil
+            }
+        case [.command, .shift]:
+            switch key {
+            case "t": return .conversation
+            case "b": return .workspace(.add("browser"))
+            case "[": return .workspace(.move(-1))
+            case "]": return .workspace(.move(1))
+            case "r": return .workspace(.browser(.hardReload))
+            case "c": return .workspace(.browser(.copyURL))
+            case "e": return .workspace(.inspector("files"))
+            case "g": return .workspace(.inspector("git"))
+            case "n": return .newSpace
+            default: return nil
+            }
+        case [.command, .option]:
+            if split {return .toggleInspector}
+            if keyCode == 123 {return .space(-1)}
+            if keyCode == 124 {return .space(1)}
+            switch key {
+            case "t": return .workspace(.add("claude"))
+            case "i": return .workspace(.browser(.devTools))
+            case "g": return .workspace(.inspector("github"))
+            case "n": return .newProject
+            default: return nil
+            }
+        case [.command, .control]:
+            switch key {
+            case "t": return .workspace(.add("shell"))
+            case "s": return .toggleSidebar
+            default: return nil
+            }
+        default: return nil
+        }
+    }
+}
+
+extension AppModel {
+    /// Runs a shortcut under the same conditions as its menu item. False leaves the key to the page.
+    func perform(_ shortcut: AppShortcut) -> Bool {
+        let dialog = showNewSpace || showNewWorkspace || showNewProject
+        switch shortcut {
+        case .workspace(let action):
+            guard let workspace = selected, !dialog else {return false}
+            switch action {
+            case .browser: guard activeTabKind == "browser" else {return false}
+            case .toggleSplit: guard activeTabKind != nil else {return false}
+            case .inspector(let pane): guard pane == "files" ? workspace.hasFolder : workspace.supportsGit else {return false}
+            default: break
+            }
+            sendWorkspaceCommand(action)
+        case .conversation:
+            guard let workspace = selected, !dialog else {return false}
+            sendWorkspaceCommand(.add(conversationProvider(for: workspace)))
+        case .newWork:
+            guard !gitProjects.isEmpty else {return false}
+            showNewWorkspace = true
+        case .newSpace: showNewSpace = true
+        case .newProject:
+            guard connected, supportsFolderless else {return false}
+            showNewProject = true
+        case .openFolder: addProject()
+        case .space(let offset):
+            guard let id = sidebarSpaces.adjacent(offset) else {return false}
+            switchSpace(id)
+        case .toggleSidebar: showSidebar.toggle()
+        case .toggleInspector:
+            guard selected != nil else {return false}
+            showInspector.toggle()
+        }
+        return true
+    }
+}
+
+/// Keys that must work whichever view has focus.
+///
+/// ⌘W closes the current tab and ⌃Tab walks recently used tabs until Control is released.
+/// While a web page has keyboard focus SwiftUI leaves its menu commands without an action,
+/// so every application shortcut is matched and run here instead of through the menu bar.
 @MainActor enum KeyboardRouter {
     private static var monitor: Any?
 
@@ -54,28 +167,41 @@ enum WorkspaceCommandContext {
         return nil
     }
 
+    /// True when the key window's first responder is inside a Chromium page.
+    static func pageHasFocus(in window: NSWindow?) -> Bool {
+        var view = window?.firstResponder as? NSView
+        while let current = view {
+            if current is NCChromiumView {return true}
+            view = current.superview
+        }
+        return false
+    }
+
     static func install(_ model: AppModel) {
         guard monitor == nil else {return}
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) {event in
             let type = event.type, keyCode = event.keyCode, flags = event.modifierFlags
             let characters = type == .keyDown ? event.charactersIgnoringModifiers : nil
+            let plain = type == .keyDown ? (event.characters(byApplyingModifiers: []) ?? characters ?? "").lowercased() : ""
             let window = event.window
             let handled = MainActor.assumeIsolated {() -> Bool in
                 let route = route(type: type, keyCode: keyCode, characters: characters, flags: flags, hasActiveTab: model.activeTabKind != nil)
-                guard let route, let workspaceId = model.selectedId else {return false}
                 if route == .finishRecent {
-                    model.workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspaceId, action: .finishRecent))
+                    if let workspaceId = model.selectedId {
+                        model.workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspaceId, action: .finishRecent))
+                    }
                     return false
                 }
                 // Only the main window owns tabs; extension, DevTools and settings windows keep their own keys.
-                guard window?.identifier?.rawValue.hasPrefix("main") == true,
+                guard type == .keyDown, window?.identifier?.rawValue.hasPrefix("main") == true,
                       WorkspaceCommandContext.allowsCommands(in: window), !model.commandBarVisible else {return false}
                 switch route {
-                case .close: model.sendWorkspaceCommand(.close)
-                case .recent(let offset): model.sendWorkspaceCommand(.recent(offset))
-                case .finishRecent: break
+                case .close: model.sendWorkspaceCommand(.close); return true
+                case .recent(let offset): model.sendWorkspaceCommand(.recent(offset)); return true
+                case .finishRecent, nil: break
                 }
-                return true
+                guard pageHasFocus(in: window), let shortcut = AppShortcut.match(key: plain, keyCode: keyCode, flags: flags) else {return false}
+                return model.perform(shortcut)
             }
             return handled ? nil : event
         }

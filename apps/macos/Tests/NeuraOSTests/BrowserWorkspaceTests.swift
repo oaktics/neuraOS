@@ -94,6 +94,19 @@ final class BrowserWorkspaceTests: XCTestCase {
         layout.toggleSplit(page)
         XCTAssertNil(layout.split)
         XCTAssertEqual(layout.selectedId, "claude0")
+        // A link opened from a conversation shows on the right but leaves commands with the conversation.
+        layout.toggleSplit(page); layout.focus("claude0")
+        XCTAssertTrue(layout.openBrowser(URL(string: "https://docs.example/")!, workspaceId: "w", defaults: defaults, opener: "claude0", placement: .split, focusSplit: false))
+        XCTAssertEqual(layout.activeId, "claude0")
+        XCTAssertEqual(layout.split?.browserURL, "https://docs.example/")
+        XCTAssertEqual(layout.recentOrder.prefix(2).last, layout.split?.id)
+        layout.close(layout.split!.id)
+        // The diff surface cannot be moved to the right pane.
+        layout.tabs.append(WorkspaceTab(id: "diff", kind: "diff")); layout.focus("diff")
+        layout.toggleSplit("diff")
+        XCTAssertNil(layout.split)
+        layout.close("diff")
+        layout.focus("claude0")
         // Closing the right pane never changes the left one.
         layout.toggleSplit(page)
         layout.close(page)
@@ -132,8 +145,16 @@ final class BrowserWorkspaceTests: XCTestCase {
         var next = RecentTabCycle()
         XCTAssertEqual(next.step(1, in: layout), "browser2")
         var single = RecentTabCycle()
-        XCTAssertNil(single.step(1, in: state(["shell"])))
+        var one = state(["shell"]); one.focus("shell0")
+        XCTAssertNil(single.step(1, in: one))
         XCTAssertFalse(single.active)
+        // From the home surface the first step is the tab used last, even if it is the only one.
+        var home = RecentTabCycle()
+        layout.focus(nil)
+        XCTAssertEqual(home.step(1, in: layout), "shell1")
+        XCTAssertEqual(home.step(1, in: layout), "browser2")
+        var onlyTab = RecentTabCycle()
+        XCTAssertEqual(onlyTab.step(1, in: state(["shell"])), "shell0")
     }
 
     func testPinnedPagesLeaveTheStripAndNumberKeysSkipThem() {
@@ -231,5 +252,61 @@ final class BrowserWorkspaceTests: XCTestCase {
         XCTAssertNil(route(.flagsChanged, 59, nil, .control))
         // Caps lock and function flags do not change the meaning of a key.
         XCTAssertEqual(route(.keyDown, 13, "W", [.command, .capsLock, .function]), .close)
+    }
+}
+
+final class AppShortcutTests: XCTestCase {
+    private func match(_ key: String, _ flags: NSEvent.ModifierFlags, code: UInt16 = 0) -> AppShortcut? {
+        AppShortcut.match(key: key, keyCode: code, flags: flags)
+    }
+
+    func testShortcutsRoutedWhileAPageHasFocusMirrorTheMenuBar() {
+        XCTAssertEqual(match("t", .command), .workspace(.commandBar(edit: false)))
+        XCTAssertEqual(match("l", .command), .workspace(.commandBar(edit: true)))
+        XCTAssertEqual(match("t", [.command, .control]), .workspace(.add("shell")))
+        XCTAssertEqual(match("t", [.command, .shift]), .conversation)
+        XCTAssertEqual(match("t", [.command, .option]), .workspace(.add("claude")))
+        XCTAssertEqual(match("3", .command), .workspace(.select(3)))
+        XCTAssertEqual(match("r", .command), .workspace(.browser(.reload)))
+        XCTAssertEqual(match("r", [.command, .shift]), .workspace(.browser(.hardReload)))
+        XCTAssertEqual(match("[", .command), .workspace(.browser(.back)))
+        XCTAssertEqual(match("[", [.command, .shift]), .workspace(.move(-1)))
+        XCTAssertEqual(match("f", .command), .workspace(.browser(.find)))
+        XCTAssertEqual(match("c", [.command, .shift]), .workspace(.browser(.copyURL)))
+        XCTAssertEqual(match("i", [.command, .option]), .workspace(.browser(.devTools)))
+        XCTAssertEqual(match("g", [.command, .shift]), .workspace(.inspector("git")))
+        XCTAssertEqual(match("g", [.command, .option]), .workspace(.inspector("github")))
+        // US and JIS keyboards name these keys differently.
+        for key in ["\\", "¥"] {
+            XCTAssertEqual(match(key, .command), .workspace(.toggleSplit), key)
+            XCTAssertEqual(match(key, [.command, .option]), .toggleInspector, key)
+        }
+        for key in ["=", "+", ";"] {XCTAssertEqual(match(key, .command), .workspace(.browser(.zoomIn)), key)}
+        XCTAssertEqual(match("", [.command, .option], code: 123), .space(-1))
+        XCTAssertEqual(match("", [.command, .option], code: 124), .space(1))
+        XCTAssertEqual(match("s", [.command, .control]), .toggleSidebar)
+        XCTAssertEqual(match("n", .command), .newWork)
+        // Editing keys and anything unassigned stay with the page.
+        for key in ["c", "v", "x", "a", "z", "k", "b", "s", "p"] {XCTAssertNil(match(key, .command), key)}
+        XCTAssertNil(match("z", [.command, .shift]))
+        XCTAssertNil(match("t", []))
+        XCTAssertNil(match("t", .control))
+        XCTAssertNil(match("t", [.command, .shift, .option]))
+        // Caps lock does not change a shortcut.
+        XCTAssertEqual(match("t", [.command, .capsLock]), .workspace(.commandBar(edit: false)))
+    }
+
+    @MainActor func testRoutedShortcutsKeepTheirMenuConditions() {
+        let model = AppModel(startPolling: false)
+        model.selectedId = nil
+        // Nothing selected: tab and browser shortcuts stay with the page.
+        XCTAssertFalse(model.perform(.workspace(.commandBar(edit: false))))
+        XCTAssertFalse(model.perform(.workspace(.browser(.reload))))
+        XCTAssertFalse(model.perform(.conversation))
+        XCTAssertFalse(model.perform(.toggleInspector))
+        let sidebar = model.showSidebar
+        XCTAssertTrue(model.perform(.toggleSidebar))
+        XCTAssertEqual(model.showSidebar, !sidebar)
+        model.showSidebar = sidebar
     }
 }

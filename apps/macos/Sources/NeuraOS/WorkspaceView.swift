@@ -32,6 +32,7 @@ struct WorkspaceView: View {
     @State private var cycle = RecentTabCycle()
     @State private var contentFrame = CGRect.zero
     @State private var clickMonitor: Any?
+    @State private var gutterHover = false
     @ObservedObject private var pins = BrowserPins.shared
     private var primaryKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
     private var projectPins: [BrowserPin] {pins.list(workspace.projectId)}
@@ -48,6 +49,15 @@ struct WorkspaceView: View {
         .onDisappear {if let clickMonitor {NSEvent.removeMonitor(clickMonitor)}; clickMonitor = nil}
         .onChange(of: model.requestedTab?.tabId) {_, _ in openRequestedTab()}
         .onChange(of: layout.active?.kind) {_, _ in publishActiveKind()}
+        .onChange(of: layout.activeId) {_, _ in
+            // Keyboard focus follows the tab that commands apply to.
+            guard model.selectedId == workspace.id, !model.commandBarVisible, let browser = activeBrowser() else {return}
+            DispatchQueue.main.async {browser.view.focusContent()}
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) {_ in
+            // Control may be released while another app is in front.
+            if cycle.active {cycle.finish(); layout.touch(layout.activeId)}
+        }
         .onChange(of: model.selectedId) {_, _ in publishActiveKind()}
         .onChange(of: projectPins.map(\.id)) {_, _ in dropStalePins()}
         .onChange(of: layout.splitId) {_, _ in persist()}
@@ -100,7 +110,7 @@ struct WorkspaceView: View {
         .environment(\.openURL, OpenURLAction {url in
             guard !deletionBlocked else {return .discarded}
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
-            return openURL(url, opener: nil, wanted: model.splitAgentLinks ? .split : .tab) ? .handled : .discarded
+            return openURL(url, opener: nil, wanted: model.splitAgentLinks ? .split : .tab, focusSplit: false) ? .handled : .discarded
         })
         .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); installClickMonitor()}
         .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
@@ -128,7 +138,9 @@ struct WorkspaceView: View {
             case .openPin(let id): openPin(id)
             case .browser(let command): browserCommand(command)
             case .toggleSplit: toggleSplit()
-            case .recent(let offset): if let id = cycle.step(offset, in: layout) {layout.focus(id, record: false)}
+            case .recent(let offset):
+                if let id = cycle.step(offset, in: layout), layout.tabs.contains(where: {$0.id == id}) {layout.focus(id, record: false)}
+                else {cycle.finish()}
             case .finishRecent: if cycle.active {cycle.finish(); layout.touch(layout.activeId)}
             case .commandBar(let edit): showCommandBar(edit: edit)
             }
@@ -314,7 +326,8 @@ struct WorkspaceView: View {
                     Group {
                         if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, onOpenURL: {url in
                             guard !deletionBlocked else {return}
-                            openURL(url, opener: item.id, wanted: model.splitAgentLinks ? .split : .tab)
+                            // The page appears beside the conversation; typing stays in the terminal.
+                            openURL(url, opener: item.id, wanted: model.splitAgentLinks ? .split : .tab, focusSplit: false)
                         })}
                         else if item.kind == "file", let path = item.filePath {
                             FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
@@ -348,7 +361,12 @@ struct WorkspaceView: View {
                         .frame(width: gutter, height: size.height)
                         .contentShape(Rectangle())
                         .offset(x: leftWidth)
-                        .onHover {inside in if inside {NSCursor.resizeLeftRight.push()} else {NSCursor.pop()}}
+                        .onHover {inside in
+                            guard inside != gutterHover else {return}
+                            gutterHover = inside
+                            if inside {NSCursor.resizeLeftRight.push()} else {NSCursor.pop()}
+                        }
+                        .onDisappear {if gutterHover {gutterHover = false; NSCursor.pop()}}
                         .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("workspace.contents")).onChanged {value in
                             guard size.width > gutter else {return}
                             layout.splitFraction = min(0.8, max(0.2, Double((value.location.x - gutter / 2) / (size.width - gutter))))
@@ -459,9 +477,9 @@ struct WorkspaceView: View {
         }
     }
     @discardableResult
-    private func openURL(_ url: URL, opener: String?, wanted: BrowserPlacement) -> Bool {
+    private func openURL(_ url: URL, opener: String?, wanted: BrowserPlacement, focusSplit: Bool = true) -> Bool {
         guard !deletionBlocked else {return false}
-        return layout.openBrowser(url, workspaceId: workspace.id, opener: opener, placement: placement(wanted, opener: opener))
+        return layout.openBrowser(url, workspaceId: workspace.id, opener: opener, placement: placement(wanted, opener: opener), focusSplit: focusSplit)
     }
     private func openBrowserPopup(_ view: NCChromiumView, url: String, opener: String) -> Bool {
         guard !deletionBlocked else {return false}
