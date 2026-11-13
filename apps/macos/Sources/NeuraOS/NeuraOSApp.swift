@@ -172,6 +172,7 @@ struct RootView: View {
             }
         }
         .background(Palette.surface)
+        .onAppear {KeyboardRouter.install(model)}
         .task(id: model.connected && model.state.features?.contains("provider.usage") == true) {
             guard model.connected, model.state.features?.contains("provider.usage") == true else {return}
             while !Task.isCancelled {

@@ -2,6 +2,7 @@
 #include "include/capi/cef_app_capi.h"
 #include "include/capi/cef_client_capi.h"
 #include "include/capi/cef_devtools_message_observer_capi.h"
+#include "include/capi/cef_image_capi.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
@@ -14,12 +15,15 @@
 #define API(name) static decltype(&name) p_##name
 API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
 API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_userfree_utf16_free);
+API(cef_string_list_size); API(cef_string_list_value);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
 static NSString *chromiumProfile;
 static bool pumping = false;
 static std::map<int, cef_browser_t *> browsers;
 static void (^shutdownCompletion)(void);
+// Page address for each favicon download in flight. CEF UI thread (the AppKit main thread) only.
+static NSMutableDictionary<NSValue *, NSString *> *faviconPages;
 
 @interface NCApplication : NSApplication <CefAppProtocol>
 @property(nonatomic) BOOL handlingSendEvent;
@@ -86,7 +90,9 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
     std::set<int> _devOutstanding;
     NSString *_url, *_title, *_pendingURL;
     BOOL _creating, _closed, _back, _forward, _loading, _automationCapture, _requestedHidden;
+    NSString *_faviconURL;
 }
+@property(nonatomic, readwrite) BOOL openedInBackground;
 - (void)emitState;
 - (void)failDevTools:(NSString *)reason;
 - (void)createBrowser;
@@ -141,6 +147,7 @@ static NSString *StartChromiumImpl() {
 #define LOAD(name) p_##name = (decltype(p_##name))dlsym(library, #name); if (!p_##name) return @"ChromiumのAPIが見つかりません。"
     LOAD(cef_initialize); LOAD(cef_shutdown); LOAD(cef_do_message_loop_work);
     LOAD(cef_browser_host_create_browser_sync); LOAD(cef_api_hash); LOAD(cef_string_userfree_utf16_free);
+    LOAD(cef_string_list_size); LOAD(cef_string_list_value);
 #undef LOAD
     const char *apiHash = p_cef_api_hash(CEF_API_VERSION, 0);
     if (!apiHash || strcmp(apiHash, CEF_API_HASH_PLATFORM) != 0) return @"ChromiumのAPIバージョンが一致しません。";
@@ -208,6 +215,27 @@ NSString *NCChromiumProfileDirectory(void) {return chromiumProfile;}
 
 #include "BrowserExtensions.inc"
 
+// The enabled main-menu item bound to a key, searching submenus. `key` is the
+// unshifted, lower-case character; an upper-case key equivalent implies Shift.
+static NSMenuItem *MenuItemForKey(NSMenu *menu, NSString *key, NSEventModifierFlags flags) {
+    if (!menu || !key.length) return nil;
+    [menu update];
+    const NSEventModifierFlags mask = NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagControl;
+    for (NSMenuItem *item in menu.itemArray) {
+        if (item.hasSubmenu) {
+            NSMenuItem *found = MenuItemForKey(item.submenu, key, flags);
+            if (found) return found;
+            continue;
+        }
+        NSString *equivalent = item.keyEquivalent;
+        if (!equivalent.length || !item.enabled || item.hidden || !item.action) continue;
+        NSEventModifierFlags wanted = item.keyEquivalentModifierMask & mask;
+        if (![equivalent isEqualToString:equivalent.lowercaseString]) wanted |= NSEventModifierFlagShift;
+        if (wanted == flags && [equivalent.lowercaseString isEqualToString:key]) return item;
+    }
+    return nil;
+}
+
 static cef_client_t *MakeClient(NCChromiumView *view);
 static cef_window_info_t WindowInfo(NCChromiumView *view) {
     cef_window_info_t info = {}; info.size = sizeof(info);
@@ -231,6 +259,45 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             CallbackRef browserRef(browser);
             NCChromiumView *v = View(s); if (!v) return;
             v->_title = String(title); [v emitState];
+        };
+        h->api.on_loading_progress_change = [](cef_display_handler_t *s, cef_browser_t *browser, double progress) {
+            CallbackRef browserRef(browser);
+            NCChromiumView *v = View(s);
+            if (v.onProgress) v.onProgress(progress);
+        };
+        h->api.on_favicon_urlchange = [](cef_display_handler_t *s, cef_browser_t *browser, cef_string_list_t urls) {
+            CallbackRef browserRef(browser);
+            NCChromiumView *v = View(s); if (!v || v->_closed) return;
+            cef_string_t first = {};
+            NSString *url = urls && p_cef_string_list_size(urls) > 0 && p_cef_string_list_value(urls, 0, &first) ? String(&first) : @"";
+            if (first.dtor) first.dtor(first.str);
+            NSString *page = [v->_url copy] ?: @"";
+            v->_faviconURL = url;
+            if (!url.length) {if (v.onFavicon) v.onFavicon(nil, page); return;}
+            // The page is remembered with the request: the tab may navigate before the icon arrives.
+            auto done = new Handler<cef_download_image_callback_t>(v);
+            if (!faviconPages) faviconPages = [NSMutableDictionary dictionary];
+            faviconPages[[NSValue valueWithPointer:&done->api]] = page;
+            done->api.on_download_image_finished = [](cef_download_image_callback_t *self, const cef_string_t *, int, cef_image_t *image) {
+                CallbackRef imageRef(image);
+                NCChromiumView *view = View(self);
+                NSValue *key = [NSValue valueWithPointer:self];
+                NSString *page = faviconPages[key];
+                [faviconPages removeObjectForKey:key];
+                if (!view || !image || !page) return;
+                int width = 0, height = 0;
+                auto value = image->get_as_png(image, 2, 1, &width, &height);
+                if (!value) return;
+                NSMutableData *data = [NSMutableData dataWithLength:value->get_size(value)];
+                BOOL complete = data.length && value->get_data(value, data.mutableBytes, data.length, 0) == data.length;
+                Release(value);
+                if (complete && view.onFavicon) view.onFavicon(data, page);
+            };
+            auto host = browser->get_host(browser);
+            NCString address(url);
+            // is_favicon: no cookies are sent or stored for this request.
+            host->download_image(host, &address.value, 1, 32, 0, &done->api);
+            Release(host);
         };
         return &h->api;
     };
@@ -257,6 +324,52 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");
             if (v.onError && !v->_closed) v.onError(@"ページの表示プロセスが終了しました。再読み込みしてください。");
         };
+        // Cmd-click and middle-click ask for another tab without creating a popup.
+        h->api.on_open_urlfrom_tab = [](cef_request_handler_t *s, cef_browser_t *browser, cef_frame_t *frame, const cef_string_t *url,
+            cef_window_open_disposition_t disposition, int gesture) -> int {
+            CallbackRef browserRef(browser); CallbackRef frameRef(frame);
+            NCChromiumView *v = View(s);
+            if (!gesture || shuttingDown || !v.onOpenTab) return 0;
+            if (disposition != CEF_WOD_NEW_BACKGROUND_TAB && disposition != CEF_WOD_NEW_FOREGROUND_TAB && disposition != CEF_WOD_NEW_WINDOW) return 0;
+            NSString *target = String(url); BOOL background = disposition == CEF_WOD_NEW_BACKGROUND_TAB;
+            dispatch_async(dispatch_get_main_queue(), ^{if (v.onOpenTab) v.onOpenTab(target, background);});
+            return 1;
+        };
+        return &h->api;
+    };
+    c->api.get_find_handler = [](cef_client_t *self) -> cef_find_handler_t * {
+        auto h = new Handler<cef_find_handler_t>(View(self));
+        h->api.on_find_result = [](cef_find_handler_t *s, cef_browser_t *browser, int, int count, const cef_rect_t *, int ordinal, int) {
+            CallbackRef browserRef(browser);
+            NCChromiumView *v = View(s);
+            if (v.onFind) v.onFind(ordinal, count);
+        };
+        return &h->api;
+    };
+    c->api.get_keyboard_handler = [](cef_client_t *self) -> cef_keyboard_handler_t * {
+        auto h = new Handler<cef_keyboard_handler_t>(View(self));
+        // neuraOS routes its own shortcuts before a page sees them (KeyboardRouter). What
+        // reaches here is offered to the remaining enabled menu items, such as Quit, Hide and
+        // Settings; text editing keys and everything else are left to the page.
+        h->api.on_pre_key_event = [](cef_keyboard_handler_t *, cef_browser_t *browser, const cef_key_event_t *event, cef_event_handle_t osEvent, int *) -> int {
+            CallbackRef browserRef(browser);
+            NSEvent *native = (__bridge NSEvent *)osEvent;
+            if (event->type != KEYEVENT_RAWKEYDOWN || !(event->modifiers & EVENTFLAG_COMMAND_DOWN) || native.type != NSEventTypeKeyDown) return 0;
+            NSEventModifierFlags flags = native.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagControl);
+            NSString *key = ([native charactersByApplyingModifiers:0] ?: native.charactersIgnoringModifiers ?: @"").lowercaseString;
+            if ((flags == NSEventModifierFlagCommand && [@[@"c", @"v", @"x", @"a", @"z"] containsObject:key]) ||
+                (flags == (NSEventModifierFlagCommand | NSEventModifierFlagShift) && [key isEqualToString:@"z"])) return 0;
+            NSMenuItem *item = MenuItemForKey(NSApp.mainMenu, key, flags);
+            if (!item) return 0;
+            // AppKit is still dispatching this event through the view hierarchy, and Chromium is
+            // inside its own key handling. Run the menu action once both have unwound.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSMenu *menu = item.menu;
+                NSInteger index = menu ? [menu indexOfItem:item] : -1;
+                if (index >= 0 && item.enabled) [menu performActionForItemAtIndex:index];
+            });
+            return 1;
+        };
         return &h->api;
     };
     c->api.get_life_span_handler = [](cef_client_t *self) -> cef_life_span_handler_t * {
@@ -272,13 +385,14 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             else {auto host = browser->get_host(browser); host->close_browser(host, 1); Release(host);}
         };
         h->api.on_before_popup = [](cef_life_span_handler_t *s, cef_browser_t *browser, cef_frame_t *frame, int, const cef_string_t *url,
-            const cef_string_t *, cef_window_open_disposition_t, int, const cef_popup_features_t *, cef_window_info_t *info,
+            const cef_string_t *, cef_window_open_disposition_t disposition, int, const cef_popup_features_t *, cef_window_info_t *info,
             cef_client_t **client, cef_browser_settings_t *, cef_dictionary_value_t **, int *) -> int {
             NCChromiumView *v = View(s);
             CallbackRef browserRef(browser); CallbackRef frameRef(frame);
             if (shuttingDown || !v.onPopup) return 1;
             NCChromiumView *child = [[NCChromiumView alloc] initWithFrame:v.bounds];
             child->_creating = YES;
+            child.openedInBackground = disposition == CEF_WOD_NEW_BACKGROUND_TAB;
             if (!v.onPopup(child, String(url))) return 1;
             child.hidden = YES;
             [v.window.contentView addSubview:child];
@@ -393,6 +507,38 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 - (void)goBack {if (_browser) _browser->go_back(_browser);}
 - (void)goForward {if (_browser) _browser->go_forward(_browser);}
 - (void)reload {if (_browser) _browser->reload(_browser); else [self createBrowser];}
+- (void)reloadIgnoringCache {if (_browser) _browser->reload_ignore_cache(_browser); else [self createBrowser];}
+- (BOOL)hasBrowser {return _browser != nullptr;}
+- (void)find:(NSString *)text forward:(BOOL)forward next:(BOOL)next {
+    if (!_browser) return;
+    auto host = _browser->get_host(_browser);
+    if (text.length) {NCString value(text); host->find(host, &value.value, forward, 0, next);}
+    else host->stop_finding(host, 1);
+    Release(host);
+}
+- (void)stopFinding {if (_browser) {auto host = _browser->get_host(_browser); host->stop_finding(host, 0); Release(host);}}
+- (void)zoom:(NSInteger)delta {
+    if (!_browser) return;
+    auto host = _browser->get_host(_browser);
+    // Chromium zoom levels are exponents of 1.2; keep within 25%...500%.
+    double level = delta == 0 ? 0 : MAX(-7.6, MIN(8.8, host->get_zoom_level(host) + (delta > 0 ? 0.5 : -0.5)));
+    host->set_zoom_level(host, level); Release(host);
+}
+- (void)showDevTools {
+    if (!_browser || shuttingDown) return;
+    auto host = _browser->get_host(_browser);
+    cef_window_info_t info = {}; info.size = sizeof(info); info.bounds = {120, 120, 1000, 700};
+    cef_browser_settings_t settings = {}; settings.size = sizeof(settings);
+    // The DevTools window joins the shutdown barrier through the Chrome client.
+    host->show_dev_tools(host, &info, MakeChromeClient(), &settings, nullptr);
+    Release(host);
+}
+- (void)focusContent {
+    if (!_browser || self.hidden) return;
+    NSView *content = self.subviews.firstObject;
+    if (content) [self.window makeFirstResponder:content];
+    auto host = _browser->get_host(_browser); host->set_focus(host, 1); Release(host);
+}
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
     if (_closed) return; _closed = YES; [self cancelDevTools];
