@@ -35,6 +35,8 @@ import ChromiumBridge
     @Published var automationOwner = ""
     private var observedURL = ""
     private var noticeTask: Task<Void, Never>?
+    /// True once Chromium has reported a finished load for this tab at least once.
+    private(set) var settled = false
 
     init(storageId: String, workspaceId: String, projectId: String, view: NCChromiumView? = nil, eager: Bool = true) {
         self.storageId = storageId; self.workspaceId = workspaceId; self.projectId = projectId
@@ -54,6 +56,7 @@ import ChromiumBridge
                     self.observedURL = url; self.address = url
                     UserDefaults.standard.set(url, forKey: "browser.\(self.storageId)")
                 }
+                if !loading, !url.isEmpty {self.settled = true}
                 if finished, !self.observedURL.isEmpty {BrowserHistory.shared.record(self.observedURL, title: title)}
             }
         }

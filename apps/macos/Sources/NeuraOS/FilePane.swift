@@ -39,6 +39,9 @@ struct FilePane: View {
     let workspace: Workspace
     let path: String
     let visible: Bool
+    // False for the pane that is on screen but not the one keyboard commands apply to:
+    // two files side by side must not both answer ⌘S and ⌘F.
+    var active = true
     let openFile: (String) -> Void
     @Binding var documents: [String: OpenDocument]
     @State private var saving = false
@@ -65,10 +68,10 @@ struct FilePane: View {
                         }.pickerStyle(.segmented).frame(width: 150)
                     }
                     if !FilePresentation.isMarkdown(path) || !markdownPreview {
-                        Button("検索") {findRequest += 1}.keyboardShortcut("f").disabled(!visible)
+                        Button("検索") {findRequest += 1}.keyboardShortcut(active ? KeyboardShortcut("f") : nil).disabled(!visible)
                         Toggle("折り返し", isOn: $wrapsLines).toggleStyle(.button)
                     }
-                    Button("保存") {save()}.keyboardShortcut("s").disabled(!document.dirty || saving || !visible)
+                    Button("保存") {save()}.keyboardShortcut(active ? KeyboardShortcut("s") : nil).disabled(!document.dirty || saving || !visible)
                 }
                 Button {if let url = try? FilePresentation.previewURL(root: workspace.path, path: path) {NSWorkspace.shared.activateFileViewerSelecting([url])}} label: {Image(systemName: "folder")}.help("Finderで表示")
                 Button {if let url = try? FilePresentation.previewURL(root: workspace.path, path: path) {NSWorkspace.shared.open(url)}} label: {Image(systemName: "arrow.up.forward.square")}.help("外部アプリで開く")
