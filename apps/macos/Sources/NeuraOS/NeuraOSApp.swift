@@ -234,10 +234,8 @@ struct Sidebar: View {
             .padding(.top, 14).padding(.bottom, SidebarMetrics.sectionSpacing - 6)
             // 2. Tabs that are always here: everywhere first, then this Space's.
             SidebarFixedTabs()
-            // 3. Where the work is: projects and their worktrees.
-            // Adding a project is rare: it lives in the "+" menu at the bottom, not here.
-            SidebarSectionHeader(title: "プロジェクト") {EmptyView()}
-                .padding(.top, SidebarMetrics.sectionSpacing).padding(.bottom, 2)
+            // 3. Where the work is. Project names are their own headings; adding a project is
+            // rare and lives in the "+" menu at the bottom.
             GeometryReader {geometry in
                 ZStack {
                     ForEach(pagerSpaces) {space in
@@ -418,7 +416,7 @@ struct Sidebar: View {
                         Button("フォルダを開く…") {model.addProject()}
                     }.frame(maxWidth: .infinity).padding(.vertical, 24)
                 }
-            }.padding(.horizontal, SidebarMetrics.gutter).padding(.top, 2)
+            }.padding(.horizontal, SidebarMetrics.gutter).padding(.top, SidebarMetrics.sectionSpacing - 10)
         }
     }
     private func workspaceRow(_ workspace: Workspace, space: SidebarSpace) -> some View {
