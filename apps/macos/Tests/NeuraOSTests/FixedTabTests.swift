@@ -65,6 +65,29 @@ final class FixedTabTests: XCTestCase {
         XCTAssertNil(model.fixedId)
     }
 
+    @MainActor func testAFixedTabAloneEnablesTabAndBrowserCommands() {
+        let model = AppModel(startPolling: false)
+        model.selectedId = nil
+        XCTAssertFalse(model.commandsAvailable)
+        XCTAssertFalse(model.worktreeCommandsAvailable)
+        let tab = FixedTabs.shared.add(FixedTab(kind: "browser", title: "test-\(UUID().uuidString)", url: "https://example.com/"))
+        defer {FixedTabs.shared.remove(tab.id)}
+        // An empty Space with a shared fixed page open: ⌘L, find and reload must work.
+        model.openFixed(tab.id)
+        model.activeTabKind = "browser"
+        XCTAssertTrue(model.commandsAvailable)
+        XCTAssertFalse(model.worktreeCommandsAvailable)
+        XCTAssertTrue(model.perform(.workspace(.browser(.reload))))
+        XCTAssertFalse(model.perform(.workspace(.toggleSplit)))
+        model.showNewSpace = true
+        XCTAssertFalse(model.commandsAvailable)
+        model.showNewSpace = false
+        // Putting it away with nothing underneath leaves no tab to act on.
+        model.closeFixed(tab.id, unload: true)
+        XCTAssertNil(model.activeTabKind)
+        XCTAssertFalse(model.commandsAvailable)
+    }
+
     @MainActor func testRightSidebarToggleActsOnTheAutomaticHideWhileItApplies() {
         let model = AppModel(startPolling: false)
         let shown = model.showInspector
