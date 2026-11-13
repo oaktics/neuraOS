@@ -1,17 +1,61 @@
 import SwiftUI
 import Combine
 import Darwin
+import IOKit
 import ServiceManagement
 import SleepControl
 
 /// Uses every terminal, including those in inactive workspaces. Waiting for a
 /// person is not autonomous work. Unknown/disconnected state never means done.
 enum AgentSleepPolicy {
-    static func decision(_ terminals: [TerminalRecord], connected: Bool) -> (working: Bool, complete: Bool) {
-        guard connected else {return (false, false)}
+    /// A finished turn may leave shells, subagents or wakeups that will resume
+    /// the agent. They count as work, but only for a bounded time: a forgotten
+    /// dev server must not keep a closed Mac awake indefinitely.
+    static let backgroundLimit: TimeInterval = 2 * 60 * 60
+
+    static func decision(_ terminals: [TerminalRecord], connected: Bool) -> (working: Bool, background: Bool, complete: Bool) {
+        guard connected else {return (false, false, false)}
         let live = terminals.filter {($0.provider == "codex" || $0.provider == "claude") && $0.status == "running"}
+        let settled: (TerminalRecord) -> Bool = {$0.activity == "idle" || $0.activity == "waiting"}
         return (live.contains {$0.activity == "working"},
-                live.allSatisfy {$0.activity == "idle" || $0.activity == "waiting"})
+                live.contains {settled($0) && $0.background == true},
+                live.allSatisfy(settled))
+    }
+
+    /// `backgroundFor` is how long only background work has remained, if any.
+    static func leaseState(fresh: Bool, working: Bool, backgroundFor: TimeInterval?, complete: Bool) -> String {
+        guard fresh else {return "unknown"}
+        if working || backgroundFor.map({$0 < backgroundLimit}) == true {return "work"}
+        return complete ? "done" : "unknown"
+    }
+}
+
+enum LidState {
+    static var closed: Bool? {
+        let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard service != 0 else {return nil}
+        defer {IOObjectRelease(service)}
+        return IORegistryEntryCreateCFProperty(service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
+    }
+}
+
+/// Suppressing lid-close sleep also suppresses the lock that sleep implies.
+/// Locking does not suspend processes, so agents keep running.
+enum ScreenLock {
+    static let preferenceKey = "agentSleepLockOnLidClose"
+    static var enabled: Bool {UserDefaults.standard.object(forKey: preferenceKey) as? Bool ?? true}
+    static func lock() {
+        typealias Function = @convention(c) () -> Int32
+        if let handle = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY),
+           let symbol = dlsym(handle, "SACLockScreenImmediate") {
+            _ = unsafeBitCast(symbol, to: Function.self)()
+            return
+        }
+        // Falls back to the user's "require password after display off" setting.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        process.arguments = ["displaysleepnow"]
+        try? process.run()
     }
 }
 
@@ -36,12 +80,27 @@ enum AgentSleepPolicy {
     private var lastSnapshot = Date.distantPast
     private var working = false
     private var complete = false
+    private var backgroundSince: TimeInterval?
+    private var lidClosed: Bool?
+    /// State arrives by push; without changes nothing would confirm that the
+    /// last snapshot still holds. Ask the owner to re-read it while enabled.
+    var requestRefresh: (() -> Void)?
+    nonisolated static let refreshInterval: TimeInterval = 8
+    nonisolated static let freshness: TimeInterval = 20
     private var observer: NSObjectProtocol?
+
+    /// On by default. The user's choice persists across launches; failures,
+    /// safety releases and quitting never change it.
+    nonisolated static let preferenceKey = "agentSleepWanted"
+    nonisolated static func wanted(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: preferenceKey) as? Bool ?? true
+    }
+    private var launchStartPending = false
 
     init() {
         refreshApproval()
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {self?.refreshApproval()}
+            MainActor.assumeIsolated {self?.refreshApproval(); self?.startIfWanted()}
         }
         observer = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {self?.disable()}
@@ -50,8 +109,24 @@ enum AgentSleepPolicy {
     func update(terminals: [TerminalRecord], connected: Bool) {
         let decision = AgentSleepPolicy.decision(terminals, connected: connected)
         working = decision.working; complete = decision.complete
+        if decision.working || !decision.background {backgroundSince = nil}
+        else if backgroundSince == nil {backgroundSince = ProcessInfo.processInfo.systemUptime}
         lastSnapshot = Date()
         heartbeat()
+    }
+    func setWanted(_ value: Bool) {
+        UserDefaults.standard.set(value, forKey: Self.preferenceKey)
+        launchStartPending = false
+        if value {enable()} else {disable()}
+    }
+    /// Called once at app launch. Starting must never raise a macOS approval
+    /// prompt by itself, so an unapproved service waits until the user returns
+    /// from System Settings. After the first attempt, only the user restarts it.
+    func startAtLaunch() {launchStartPending = true; startIfWanted()}
+    private func startIfWanted() {
+        guard launchStartPending, Self.wanted(), !enabled, !runnerActive, service.status == .enabled else {return}
+        launchStartPending = false
+        enable()
     }
     func disable() {
         enabled = false
@@ -60,7 +135,7 @@ enum AgentSleepPolicy {
         if let monitoringActivity {ProcessInfo.processInfo.endActivity(monitoringActivity)}
         monitoringActivity = nil
         if let lease {try? FileManager.default.removeItem(at: lease.deletingLastPathComponent())}
-        lease = nil
+        lease = nil; lidClosed = nil
         status = stopping ? "解除中…" : "無効"
     }
     func refreshApproval() {
@@ -71,7 +146,7 @@ enum AgentSleepPolicy {
         if !enabled && !runnerActive && approvalRequired {
             status = "システム設定でneuraOSのバックグラウンド実行を許可してください。"
         } else if wasRequired && service.status == .enabled && !enabled && !runnerActive {
-            status = "許可済みです。この起動中のスリープ制御を有効にできます。"
+            status = "許可済みです。スリープ制御を有効にできます。"
         }
     }
     func openApprovalSettings() {SMAppService.openSystemSettingsLoginItems()}
@@ -93,7 +168,7 @@ enum AgentSleepPolicy {
                 status = approvalRequired
                     ? "システム設定で許可してから、再度有効にしてください。"
                     : service.status == .enabled
-                        ? "登録を更新しました。「この起動中は有効にする」で再度お試しください。"
+                        ? "登録を更新しました。「有効にする」で再度お試しください。"
                         : "サービスの登録を確認できません。アプリを再起動して再度お試しください。"
             } catch {
                 registrationError = error
@@ -111,7 +186,7 @@ enum AgentSleepPolicy {
         startFailed = false
         do {
             // Register only once. Turning sleep control off does not revoke the
-            // installation approval, and launching the app never enables sleep control.
+            // installation approval. Launch starts it only when already approved.
             let registrationStatus = try SleepServiceRegistration.prepare(
                 status: {self.service.status},
                 validate: {try SleepServiceRegistration.validateBundle(at: Bundle.main.bundleURL)},
@@ -181,14 +256,22 @@ enum AgentSleepPolicy {
     }
     private func heartbeat() {
         guard enabled, let lease else {return}
-        let fresh = Date().timeIntervalSince(lastSnapshot) < 20
-        let value = Self.leaseValue(token: token, state: fresh && working ? "work" : fresh && complete ? "done" : "unknown")
-        do {try value.write(to: lease, atomically: true, encoding: .utf8)}
+        let age = Date().timeIntervalSince(lastSnapshot)
+        if age >= Self.refreshInterval {requestRefresh?()}
+        let backgroundFor = backgroundSince.map {ProcessInfo.processInfo.systemUptime - $0}
+        let state = AgentSleepPolicy.leaseState(fresh: age < Self.freshness, working: working, backgroundFor: backgroundFor, complete: complete)
+        do {try Self.leaseValue(token: token, state: state).write(to: lease, atomically: true, encoding: .utf8)}
         catch {disable(); status = "作業状態を書き込めないため解除しました。"; return}
+        let closed = LidState.closed
+        if state == "work", closed == true, lidClosed == false, ScreenLock.enabled {ScreenLock.lock()}
+        lidClosed = closed
         let file = URL(fileURLWithPath: SleepService.stateDirectory).appendingPathComponent("status")
         if let text = try? String(contentsOf: file, encoding: .utf8), text.hasPrefix(token + "\n") {
             starting = false
             status = String(text.dropFirst(token.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if state == "work", !working, status.hasPrefix("作業中") {
+                status = "バックグラウンド処理中：蓋を閉じても継続します（最長2時間）"
+            }
         }
     }
     nonisolated static func leaseValue(token: String, state: String,
@@ -212,14 +295,14 @@ struct AgentSleepFooter: View {
     private var actionHint: String {
         if controller.enabled {return "クリックしてスリープ制限を無効にします"}
         if controller.approvalRequired {return "クリックしてシステム設定で許可します"}
-        return "クリックしてこの起動中のスリープ制限を有効にします"
+        return "クリックしてスリープ制限を有効にします"
     }
 
     var body: some View {
         Button {
-            if controller.enabled {controller.disable()}
+            if controller.enabled {controller.setWanted(false)}
             else if controller.approvalRequired {controller.openApprovalSettings()}
-            else {controller.enable()}
+            else {controller.setWanted(true)}
         } label: {
             Label("スリープ制限：\(label)", systemImage: controller.enabled ? "moon.slash.fill" : "moon")
         }
@@ -235,15 +318,17 @@ struct AgentSleepFooter: View {
 
 struct AgentSleepSettings: View {
     @ObservedObject var controller: AgentSleepController
+    @AppStorage(ScreenLock.preferenceKey) private var lockOnLidClose = true
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("閉じたまま作業を続ける").font(.headline)
-            Text("外部モニターなしでも、neuraOS内のCodex・Claude Codeが作業中はMacをスリープさせません。全作業が終了、または回答・承認待ちになると、蓋が閉じていればスリープします。")
-            Text("この起動中だけ有効です。初回のみmacOSでヘルパーの許可が必要です。許可後のオン／オフでは通常、認証は不要です。バッテリー残量が10%以下、または高温の場合は解除します。通気のよい場所で使用してください。")
+            Text("外部モニターなしでも、neuraOS内のCodex・Claude Codeが作業中はMacをスリープさせません。全作業が終了、または回答・承認待ちになると、蓋が閉じていればスリープします。ターン終了後もバックグラウンドのシェルやサブエージェントが残っている間は、最長2時間継続します。")
+            Toggle("継続中に蓋を閉じたら画面をロックする", isOn: $lockOnLidClose)
+            Text("既定で有効です。無効にすると次回の起動後も無効のままです。初回のみmacOSでヘルパーの許可が必要です。許可後のオン／オフでは通常、認証は不要です。バッテリー残量が10%以下、または高温の場合は解除します。通気のよい場所で使用してください。")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
-                Button(controller.enabled ? "無効にする" : "この起動中は有効にする") {
-                    if controller.enabled {controller.disable()} else {controller.enable()}
+                Button(controller.enabled ? "無効にする" : "有効にする") {
+                    controller.setWanted(!controller.enabled)
                 }.disabled(controller.starting || controller.stopping || controller.repairing)
                 if controller.approvalRequired {
                     Button("システム設定で許可") {controller.openApprovalSettings()}

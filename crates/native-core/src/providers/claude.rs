@@ -345,6 +345,32 @@ pub fn activity_arguments(binary: &Path, provider: &str) -> Vec<String> {
     }
     vec!["--settings".into(), json!({"hooks":hooks}).to_string()]
 }
+/// Local work that will re-invoke the model after the turn ends. `None` when
+/// the provider did not report its task registry, which is not the same as zero.
+/// Cloud sessions and recurring schedules do not need this Mac to stay awake.
+pub(crate) fn background_count(payload: &Value) -> Option<usize> {
+    let tasks = payload["background_tasks"].as_array();
+    let crons = payload["session_crons"].as_array();
+    if tasks.is_none() && crons.is_none() {
+        return None;
+    }
+    let running = tasks.map_or(0, |tasks| {
+        tasks
+            .iter()
+            .filter(|task| {
+                task["type"] != "cloud session"
+                    && !matches!(
+                        task["status"].as_str(),
+                        Some("completed" | "failed" | "killed" | "stopped" | "cancelled" | "canceled")
+                    )
+            })
+            .count()
+    });
+    let wakeups = crons.map_or(0, |crons| {
+        crons.iter().filter(|cron| cron["recurring"] != true).count()
+    });
+    Some(running + wakeups)
+}
 /// Short-lived native hook helper: stdout stays empty, and failures never change
 /// the provider's tool decision. Only observational fields cross the private UDS.
 pub fn activity_hook() -> Result<()> {
@@ -373,6 +399,9 @@ pub fn activity_hook() -> Result<()> {
         if let Some(value) = payload[key].as_str().filter(|v| v.len() <= 4096) {
             event[key] = json!(value);
         }
+    }
+    if let Some(count) = background_count(&payload) {
+        event["background"] = json!(count.to_string());
     }
     if let Some(text) = payload["last_assistant_message"].as_str() {
         event["last_assistant_message"] = json!(tail(text, 8000));
