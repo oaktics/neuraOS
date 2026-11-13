@@ -327,13 +327,13 @@ struct WorkspaceView: View {
                     let shown = right || layout.selectedId == item.id
                     let visible = shown && frontmost
                     Group {
-                        if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, onOpenURL: {url in
+                        if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, active: layout.activeId == item.id, onOpenURL: {url in
                             guard !deletionBlocked else {return}
                             // The page appears beside the conversation; typing stays in the terminal.
                             openURL(url, opener: item.id, wanted: model.splitAgentLinks ? .split : .tab, focusSplit: false)
                         })}
                         else if item.kind == "file", let path = item.filePath {
-                            FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
+                            FilePane(workspace: workspace, path: path, visible: visible, active: layout.activeId == item.id, openFile: {layout.openFile($0)}, documents: $documents).id(path)
                         }
                         else if item.kind == "browser" {
                             BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, projectId: workspace.projectId, visible: visible,
@@ -684,6 +684,7 @@ struct TerminalPane: View {
     let provider: String
     @Binding var terminalId: String?
     let visible: Bool
+    var active = true
     let onOpenURL: (URL) -> Void
     @State private var showStop = false
     @State private var hasBeenVisible = false
@@ -703,7 +704,7 @@ struct TerminalPane: View {
                         Button("新しく起動") {launch()}.font(.system(size: 11)).disabled(model.isBusy(workspace.id) || !model.connected)
                     }
                 }.padding(.horizontal, 8).frame(height: 24)
-                if visible || hasBeenVisible {NativeTerminal(onOpenURL: onOpenURL, terminal: terminal, api: model.api, visible: visible, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
+                if visible || hasBeenVisible {NativeTerminal(onOpenURL: onOpenURL, terminal: terminal, api: model.api, visible: visible, active: active, onError: {model.report($0)}).padding(.horizontal, 4).frame(maxWidth: .infinity, maxHeight: .infinity).id(terminal.id)}
                 else {Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)}
             } else {
                 VStack(spacing: 16) {
