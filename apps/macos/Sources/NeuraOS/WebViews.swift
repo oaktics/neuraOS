@@ -166,7 +166,7 @@ struct BrowserPane: View {
                 if browser.isLoading {
                     GeometryReader {geometry in
                         Rectangle().fill(Color.accentColor)
-                            .frame(width: geometry.size.width * max(0.08, min(1, browser.progress)))
+                            .frame(width: geometry.size.width * CGFloat(max(0.08, min(1, browser.progress))))
                             .animation(.easeOut(duration: 0.2), value: browser.progress)
                     }.frame(height: 2)
                 }

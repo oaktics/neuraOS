@@ -309,9 +309,12 @@ struct WorkspaceView: View {
         GeometryReader {geometry in
             let size = geometry.size
             let splitTab = layout.split
-            let gutter = splitTab == nil ? 0 : Self.splitGutter
-            let leftWidth = splitTab == nil ? size.width : max(160, min(size.width - gutter - 160, (size.width - gutter) * layout.fraction))
-            let rightWidth = max(0, size.width - leftWidth - gutter)
+            // Explicit CGFloat throughout: older compilers do not mix Double and CGFloat here.
+            let gutter: CGFloat = splitTab == nil ? 0 : Self.splitGutter
+            let available: CGFloat = size.width - gutter
+            let proposed: CGFloat = available * CGFloat(layout.fraction)
+            let leftWidth: CGFloat = splitTab == nil ? size.width : max(160, min(available - 160, proposed))
+            let rightWidth: CGFloat = max(0, available - leftWidth)
             let frontmost = model.selectedId == workspace.id && !deletionBlocked
             ZStack(alignment: .topLeading) {
                 home
@@ -369,7 +372,8 @@ struct WorkspaceView: View {
                         .onDisappear {if gutterHover {gutterHover = false; NSCursor.pop()}}
                         .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("workspace.contents")).onChanged {value in
                             guard size.width > gutter else {return}
-                            layout.splitFraction = min(0.8, max(0.2, Double((value.location.x - gutter / 2) / (size.width - gutter))))
+                            let position: CGFloat = (value.location.x - gutter / 2) / (size.width - gutter)
+                            layout.splitFraction = min(0.8, max(0.2, Double(position)))
                         })
                         .help("ドラッグして幅を調整")
                 }
@@ -594,7 +598,7 @@ struct WorkspaceView: View {
                       event.window?.identifier?.rawValue.hasPrefix("main") == true else {return}
                 let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
                 guard contentFrame.contains(point) else {return}
-                let boundary = contentFrame.minX + (contentFrame.width - Self.splitGutter) * layout.fraction
+                let boundary: CGFloat = contentFrame.minX + (contentFrame.width - Self.splitGutter) * CGFloat(layout.fraction)
                 let right = point.x > boundary + Self.splitGutter
                 if point.x < boundary || right, (layout.splitFocused == true) != right {layout.splitFocused = right}
             }
