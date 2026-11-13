@@ -133,6 +133,9 @@ struct NativeTerminal: NSViewRepresentable {
     let terminal: TerminalRecord
     let api: DaemonClient
     let visible: Bool
+    // The pane that keyboard commands apply to. With two panes on screen both are visible,
+    // so becoming the active one is what moves keyboard focus here.
+    var active = true
     let onError: (Error) -> Void
     func makeCoordinator() -> Coordinator {Coordinator(terminal: terminal, api: api, onError: onError)}
     func makeNSView(context: Context) -> TerminalView {
@@ -155,6 +158,7 @@ struct NativeTerminal: NSViewRepresentable {
         context.coordinator.openLink = onOpenURL
         context.coordinator.updateStatus(terminal.status)
         context.coordinator.setVisible(visible)
+        context.coordinator.setActive(active)
     }
     static func dismantleNSView(_ view: TerminalView, coordinator: Coordinator) {coordinator.stop(); view.terminalDelegate = nil}
     @MainActor final class Coordinator: NSObject, @preconcurrency TerminalViewDelegate {
@@ -229,6 +233,12 @@ struct NativeTerminal: NSViewRepresentable {
                 pendingSize = nil
                 if let view, view.window?.firstResponder === view {view.window?.makeFirstResponder(nil)}
             }
+        }
+        private var active = true
+        func setActive(_ value: Bool) {
+            guard value != active else {return}
+            active = value
+            if value {focusIfVisible()}
         }
         private func focusIfVisible() {
             // SwiftUI may not have attached the view to its window yet.

@@ -155,11 +155,10 @@ struct BrowserAutomationError: Error {let code: String}
                 }
                 if deferred, action != "navigate" {
                     // The page object exists before its saved address has loaded. Wait for that
-                    // first load so a read does not describe the empty initial document.
-                    var started = false
+                    // first load so a read does not describe the empty initial document. The model
+                    // records the completion itself: a fast load can finish between two polls.
                     let limit = min(deadline, Date().timeIntervalSince1970 * 1000 + 10_000)
-                    while Date().timeIntervalSince1970 * 1000 < limit {
-                        if model.isLoading {started = true} else if started {break}
+                    while !model.settled, Date().timeIntervalSince1970 * 1000 < limit {
                         try await Task.sleep(for: .milliseconds(50))
                     }
                 }
