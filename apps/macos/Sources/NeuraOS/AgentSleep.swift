@@ -17,8 +17,10 @@ enum AgentSleepPolicy {
         guard connected else {return (false, false, false)}
         let live = terminals.filter {($0.provider == "codex" || $0.provider == "claude") && $0.status == "running"}
         let settled: (TerminalRecord) -> Bool = {$0.activity == "idle" || $0.activity == "waiting"}
+        // Reported background work counts even when the foreground turn failed
+        // and left the activity unknown; the time limit still bounds it.
         return (live.contains {$0.activity == "working"},
-                live.contains {settled($0) && $0.background == true},
+                live.contains {$0.activity != "working" && $0.background == true},
                 live.allSatisfy(settled))
     }
 

@@ -29,6 +29,11 @@ final class AgentSleepTests: XCTestCase {
         XCTAssertFalse(decision.working); XCTAssertTrue(decision.background); XCTAssertTrue(decision.complete)
         var exited = terminal("claude", "idle", "exited"); exited.background = true
         XCTAssertFalse(AgentSleepPolicy.decision([exited], connected: true).background)
+        var failed = terminal("claude", "unknown"); failed.background = true
+        let afterFailure = AgentSleepPolicy.decision([failed], connected: true)
+        XCTAssertTrue(afterFailure.background); XCTAssertFalse(afterFailure.complete)
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: 0, complete: false), "work")
+        XCTAssertFalse(AgentSleepPolicy.decision([failed], connected: false).background)
         let limit = AgentSleepPolicy.backgroundLimit
         XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: 0, complete: true), "work")
         XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: limit, complete: true), "done")
