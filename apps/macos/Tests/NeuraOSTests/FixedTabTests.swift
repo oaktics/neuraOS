@@ -84,6 +84,19 @@ final class FixedTabTests: XCTestCase {
         XCTAssertFalse(model.showInspector)
     }
 
+    @MainActor func testFixedTabListsStopGrowingAndLeaveRoomForProjects() {
+        func rows(_ count: Int) -> CGFloat {
+            SidebarFixedTabs.listHeight(count: count, unit: SidebarMetrics.rowHeight, spacing: SidebarMetrics.rowSpacing, visible: SidebarFixedTabs.visibleRows)
+        }
+        XCTAssertEqual(rows(0), 0)
+        XCTAssertEqual(rows(1), 32)
+        XCTAssertEqual(rows(6), 6 * 32 + 5 * 2)
+        // Past the limit the height is fixed, with half a row showing that the list scrolls.
+        XCTAssertEqual(rows(7), 6 * 34 + 16)
+        XCTAssertEqual(rows(200), rows(7))
+        XCTAssertEqual(SidebarFixedTabs.listHeight(count: 9, unit: 40, spacing: 8, visible: SidebarFixedTabs.visibleTileRows), 2 * 48 + 20)
+    }
+
     func testCommandBarFindsFixedTabsAndWorktrees() {
         let fixed = [FixedTab(id: "f1", kind: "browser", title: "Linear", url: "https://linear.app/team", spaceId: "work"),
                      FixedTab(id: "f2", kind: "claude", title: "調べもの係", workspaceId: "root")]

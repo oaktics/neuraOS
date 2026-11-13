@@ -100,16 +100,28 @@ struct SidebarFixedTabs: View {
                     .font(.system(size: 11)).foregroundStyle(.tertiary)
                     .padding(.horizontal, SidebarMetrics.gutter + SidebarMetrics.inset).padding(.bottom, 2)
             }
+            // Both lists scroll within a bounded height: however many tabs are fixed, the
+            // projects below always keep their room.
             if !global.isEmpty {
-                // Four even columns, like a shelf: the same tabs in every Space.
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
-                    ForEach(global) {tab in tile(tab)}
-                }.padding(.horizontal, SidebarMetrics.gutter).padding(.bottom, local.isEmpty ? 0 : 4)
+                let rows = (global.count + 3) / 4
+                ScrollView {
+                    // Four even columns, like a shelf: the same tabs in every Space.
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                        ForEach(global) {tab in tile(tab)}
+                    }.padding(.horizontal, SidebarMetrics.gutter)
+                }
+                .scrollIndicators(rows > Self.visibleTileRows ? .automatic : .hidden)
+                .frame(height: Self.listHeight(count: rows, unit: 40, spacing: 8, visible: Self.visibleTileRows))
+                .padding(.bottom, local.isEmpty ? 0 : 4)
             }
             if !local.isEmpty {
-                VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
-                    ForEach(local) {tab in row(tab)}
-                }.padding(.horizontal, SidebarMetrics.gutter)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                        ForEach(local) {tab in row(tab)}
+                    }.padding(.horizontal, SidebarMetrics.gutter)
+                }
+                .scrollIndicators(local.count > Self.visibleRows ? .automatic : .hidden)
+                .frame(height: Self.listHeight(count: local.count, unit: SidebarMetrics.rowHeight, spacing: SidebarMetrics.rowSpacing, visible: Self.visibleRows))
             }
         }
         .alert("固定タブの名前", isPresented: Binding(get: {renaming != nil}, set: {if !$0 {renaming = nil}})) {
@@ -127,6 +139,15 @@ struct SidebarFixedTabs: View {
                 stopping = nil
             }
         }
+    }
+
+    static let visibleTileRows = 2
+    static let visibleRows = 6
+    /// Height of `count` items, capped so that half of the next one shows there is more to scroll.
+    static func listHeight(count: Int, unit: CGFloat, spacing: CGFloat, visible: Int) -> CGFloat {
+        guard count > 0 else {return 0}
+        if count <= visible {return CGFloat(count) * unit + CGFloat(count - 1) * spacing}
+        return CGFloat(visible) * (unit + spacing) + unit / 2
     }
 
     private func running(_ tab: FixedTab) -> Bool {model.terminal(id: tab.terminalId)?.status == "running"}
