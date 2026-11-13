@@ -4,10 +4,16 @@ import ChromiumBridge
 
 extension AppModel {
     var commandBarVisible: Bool {CommandBarPanel.shared.isVisible}
+    private var dialogOpen: Bool {showNewSpace || showNewWorkspace || showNewProject}
+    /// Something that takes tab and browser commands is on screen: a worktree or a fixed tab.
+    var commandsAvailable: Bool {(selected != nil || fixedId != nil) && !dialogOpen}
+    /// Commands that act on a worktree's own tabs need one selected.
+    var worktreeCommandsAvailable: Bool {selected != nil && !dialogOpen}
 
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
-        guard let workspace = selected, !showNewSpace, !showNewWorkspace, !showNewProject,
+        // A fixed tab on screen receives the command instead of the worktree underneath it.
+        guard let target = fixedId.map({"fixed." + $0}) ?? selected?.id, !showNewSpace, !showNewWorkspace, !showNewProject,
               NSApp.modalWindow == nil else {return}
         if commandBarVisible {
             // While the command bar is up, only asking for it again (to switch its mode) passes.
@@ -15,7 +21,15 @@ extension AppModel {
         } else {
             guard WorkspaceCommandContext.allowsCommands(in: NSApp.keyWindow) else {return}
         }
-        workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspace.id, action: action))
+        workspaceCommands.send(WorkspaceCommandRequest(workspaceId: target, action: action))
+    }
+
+    /// Worktrees and folders the command bar can switch to, labelled with their project.
+    func commandBarWorkspaces() -> [CommandBarWorkspace] {
+        state.workspaces.map {workspace in
+            let project = state.projects.first {$0.id == workspace.projectId}?.name ?? ""
+            return CommandBarWorkspace(id: workspace.id, title: workspace.name, detail: project)
+        }
     }
 
     /// Browser tabs of every worktree, read from each workspace's saved tab strip.
@@ -116,11 +130,12 @@ extension AppModel {
         let dialog = showNewSpace || showNewWorkspace || showNewProject
         switch shortcut {
         case .workspace(let action):
-            guard let workspace = selected, !dialog else {return false}
+            guard fixedId != nil || selected != nil, !dialog else {return false}
             switch action {
             case .browser: guard activeTabKind == "browser" else {return false}
-            case .toggleSplit: guard activeTabKind != nil else {return false}
-            case .inspector(let pane): guard pane == "files" ? workspace.hasFolder : workspace.supportsGit else {return false}
+            case .toggleSplit: guard activeTabKind != nil, fixedId == nil else {return false}
+            case .inspector(let pane):
+                guard let workspace = selected, pane == "files" ? workspace.hasFolder : workspace.supportsGit else {return false}
             default: break
             }
             sendWorkspaceCommand(action)
@@ -140,8 +155,8 @@ extension AppModel {
             switchSpace(id)
         case .toggleSidebar: showSidebar.toggle()
         case .toggleInspector:
-            guard selected != nil else {return false}
-            showInspector.toggle()
+            guard selected != nil, fixedId == nil else {return false}
+            toggleInspector()
         }
         return true
     }
@@ -216,6 +231,10 @@ struct WorkspaceCommands: Commands {
             Group {
                 Button("新しいタブ（検索・URL・Terminal）") {send(.commandBar(edit: false))}.keyboardShortcut("t")
                 Button("アドレスを入力") {send(.commandBar(edit: true))}.keyboardShortcut("l")
+            }
+            // A fixed tab on screen is enough for these, even with no worktree selected.
+            .disabled(!model.commandsAvailable)
+            Group {
                 Divider()
                 Button("新しいTerminal") {send(.add("shell"))}.keyboardShortcut("t", modifiers: [.command, .control])
                 Button("新しい会話") {if let workspace = model.selected {send(.add(model.conversationProvider(for: workspace)))}}.keyboardShortcut("t", modifiers: [.command, .shift])
@@ -223,15 +242,16 @@ struct WorkspaceCommands: Commands {
                 Button("新しいClaude Code") {send(.add("claude"))}.keyboardShortcut("t", modifiers: [.command, .option])
                 Button("新しいBrowser") {send(.add("browser"))}.keyboardShortcut("b", modifiers: [.command, .shift])
             }
-            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace || model.showNewProject)
+            // New tabs open among a worktree's tabs.
+            .disabled(!model.worktreeCommandsAvailable)
             Group {
                 Divider()
                 // ⌘W itself is delivered by KeyboardRouter so it also works inside a page or terminal.
                 Button("タブを閉じる（⌘W）") {send(.close)}.disabled(model.activeTabKind == nil)
                 Button(model.activeTabKind == nil ? "右に並べて表示" : "右に並べて表示／分割を解除") {send(.toggleSplit)}
-                    .keyboardShortcut("\\").disabled(model.activeTabKind == nil)
+                    .keyboardShortcut("\\").disabled(model.activeTabKind == nil || model.fixedId != nil)
             }
-            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace || model.showNewProject)
+            .disabled(!model.commandsAvailable)
             Group {
                 Divider()
                 Button("前のタブ") {send(.move(-1))}.keyboardShortcut("[", modifiers: [.command, .shift])
@@ -242,7 +262,7 @@ struct WorkspaceCommands: Commands {
                         .keyboardShortcut(KeyEquivalent(Character(String(number))))
                 }
             }
-            .disabled(model.selected == nil || model.showNewSpace || model.showNewWorkspace || model.showNewProject)
+            .disabled(!model.worktreeCommandsAvailable)
         }
         CommandMenu("ブラウザ") {
             Group {
@@ -285,9 +305,7 @@ struct WorkspaceCommands: Commands {
         }
     }
 
-    private var browserActive: Bool {
-        model.selected != nil && model.activeTabKind == "browser" && !model.showNewSpace && !model.showNewWorkspace && !model.showNewProject
-    }
+    private var browserActive: Bool {model.commandsAvailable && model.activeTabKind == "browser"}
     private func send(_ action: WorkspaceAction) {model.sendWorkspaceCommand(action)}
     private func browser(_ command: BrowserCommand) {model.sendWorkspaceCommand(.browser(command))}
 }
