@@ -14,6 +14,18 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 @property(nonatomic, copy, nullable) BOOL (^onPopup)(NCChromiumView *view, NSString *url);
 @property(nonatomic, copy, nullable) void (^onClosed)(void);
 @property(nonatomic, copy, nullable) void (^onAutomationInvalidated)(NSString *reason);
+// Overall page load progress, 0...1.
+@property(nonatomic, copy, nullable) void (^onProgress)(double progress);
+// PNG bytes of the icon of `pageURL`, or nil when that page has none.
+@property(nonatomic, copy, nullable) void (^onFavicon)(NSData * _Nullable png, NSString *pageURL);
+// Result of the active find session: current match (1-based) and total.
+@property(nonatomic, copy, nullable) void (^onFind)(NSInteger ordinal, NSInteger count);
+// A user gesture asked for another tab without a popup (for example cmd-click).
+@property(nonatomic, copy, nullable) void (^onOpenTab)(NSString *url, BOOL background);
+// Set on a popup's view before onPopup runs: the opener asked for a background tab.
+@property(nonatomic, readonly) BOOL openedInBackground;
+// False until Chromium has created the page for this view.
+@property(nonatomic, readonly) BOOL hasBrowser;
 // Internal DevTools transport; never exposed as a generic MCP method.
 - (void)devTools:(NSString *)method parameters:(NSString *)json completion:(void (^)(NSString * _Nullable result, NSString * _Nullable error))completion;
 - (void)cancelDevTools;
@@ -23,6 +35,14 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 - (void)goBack;
 - (void)goForward;
 - (void)reload;
+- (void)reloadIgnoringCache;
+- (void)find:(NSString *)text forward:(BOOL)forward next:(BOOL)next;
+- (void)stopFinding;
+// delta > 0 zooms in, < 0 zooms out, 0 restores the default size.
+- (void)zoom:(NSInteger)delta;
+- (void)showDevTools;
+// Give keyboard focus back to the page.
+- (void)focusContent;
 - (void)stop;
 - (void)close;
 @end

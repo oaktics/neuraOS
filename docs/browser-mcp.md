@@ -15,11 +15,14 @@ Chrome-style extension windows remain outside browser MCP.
 `currentWorkspaceId` identifies the initial workspace. An optional workspaceId
 narrows the list. Target every subsequent request by workspaceId **and** tabId,
 never by URL or position. Saved tabs in workspaces not mounted by the app are
-not live CEF instances and do not appear until opened. Other projects are denied
+not live CEF instances and do not appear until opened. A tab restored from a
+previous run is listed with its saved URL but loads its page only when first
+shown; the first request that targets it loads it and waits for the page to exist. Other projects are denied
 by both daemon workspace ownership checks and the native registry.
 
-The browser toolbar shows MCP access and the active terminal ID. **停止・接続解除**
-cancels work and disables that tab; only the user can **MCP接続を再開**. Real mouse,
+While an agent operates a tab, a bar under the toolbar shows the active terminal
+ID. **停止して接続解除** cancels work and disables that tab; only the user can allow
+it again, from the toolbar's ⋯ menu (**エージェント（MCP）からの操作を許可**). Real mouse,
 keyboard or scroll input on an actively operated view also disconnects it before
 delivering the human input. One request owns a tab at a time, including reads.
 A competing CLI receives `browser_busy`, rather than interleaving input.
