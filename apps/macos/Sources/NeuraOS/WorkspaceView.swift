@@ -647,6 +647,12 @@ struct WorkspaceView: View {
     private func openRequestedTerminal() {
         guard let id = model.requestedTerminalId,
               let terminal = model.terminal(id: id), terminal.workspaceId == workspace.id else {return}
+        // A terminal shown by a fixed tab is opened there, never as a second pane among the tabs.
+        if let fixed = FixedTabs.shared.tab(owning: id) {
+            model.requestedTerminalId = nil
+            model.openFixed(fixed.id)
+            return
+        }
         restore()
         if let tab = layout.tabs.first(where: {$0.terminalId == id}) {layout.focus(tab.id)}
         else {

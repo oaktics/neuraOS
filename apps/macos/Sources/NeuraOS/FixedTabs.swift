@@ -46,6 +46,7 @@ struct FixedTab: Codable, Identifiable, Equatable {
     func tab(_ id: String) -> FixedTab? {tabs.first {$0.id == id}}
     /// Terminals shown by a fixed tab are not listed again among their worktree's tabs.
     func owns(terminal id: String) -> Bool {tabs.contains {$0.terminalId == id}}
+    func tab(owning terminalId: String) -> FixedTab? {tabs.first {$0.terminalId == terminalId}}
     func startingTabIds(in workspaceId: String) -> [String] {tabs.filter {$0.workspaceId == workspaceId}.map(\.id)}
 
     @discardableResult
@@ -189,7 +190,7 @@ struct FixedTabView: View {
                 Image(systemName: "folder.badge.questionmark").font(.system(size: 28, weight: .ultraLight)).foregroundStyle(.secondary)
                 Text("この固定タブの作業フォルダが見つかりません").font(.system(size: 15, weight: .medium))
                 Text("プロジェクトやworktreeが削除された可能性があります。").font(.system(size: 12)).foregroundStyle(.secondary)
-                Button("固定を解除") {model.removeFixed(tab.id)}
+                Button("固定を解除") {model.removeFixed(tab.id)}.disabled(model.isTerminalStarting(tab.id))
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }

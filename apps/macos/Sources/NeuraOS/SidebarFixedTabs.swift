@@ -199,11 +199,14 @@ struct SidebarFixedTabs: View {
             Button("すべてのSpaceに表示（全体共通）") {store.update(tab.id) {$0.spaceId = nil}}
         }
         Divider()
+        // A launch in flight still reports to this tab; removing it now would stop the new process.
         Button(tab.isTerminal && running(tab) ? "固定を解除（タブとして元の作業に戻す）" : "固定を解除", role: .destructive) {unfix(tab)}
+            .disabled(model.isTerminalStarting(tab.id))
     }
 
     /// Removing the row never stops a process: a running terminal returns to its worktree's tabs.
     private func unfix(_ tab: FixedTab) {
+        guard !model.isTerminalStarting(tab.id) else {return}
         let terminal = model.terminal(id: tab.terminalId)
         model.removeFixed(tab.id)
         if let terminal, terminal.status == "running", model.state.workspaces.contains(where: {$0.id == terminal.workspaceId}) {

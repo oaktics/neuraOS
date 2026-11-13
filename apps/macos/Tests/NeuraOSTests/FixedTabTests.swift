@@ -19,6 +19,8 @@ final class FixedTabTests: XCTestCase {
         XCTAssertEqual(store.tabs(in: "work", spaces: spaces).map(\.id), [linear.id, shell.id])
         XCTAssertTrue(store.tabs(in: "home", spaces: spaces).isEmpty)
         XCTAssertTrue(store.owns(terminal: "t1"))
+        XCTAssertEqual(store.tab(owning: "t1")?.id, agent.id)
+        XCTAssertNil(store.tab(owning: "t2"))
         XCTAssertFalse(store.owns(terminal: "t2"))
         XCTAssertEqual(store.startingTabIds(in: "root"), [agent.id, shell.id])
 
