@@ -110,7 +110,11 @@ extension AppModel {
     /// Put a fixed tab away. A web page is unloaded; a terminal or agent keeps running.
     func closeFixed(_ id: String, unload: Bool) {
         if unload {openedFixedIds.remove(id)}
-        if fixedId == id {fixedId = nil}
+        if fixedId == id {
+            fixedId = nil
+            // With no worktree underneath, nothing is left to take tab commands.
+            if selected == nil {activeTabKind = nil}
+        }
     }
 
     func removeFixed(_ id: String) {
