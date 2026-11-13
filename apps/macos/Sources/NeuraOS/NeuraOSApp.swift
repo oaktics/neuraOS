@@ -235,14 +235,9 @@ struct Sidebar: View {
             // 2. Tabs that are always here: everywhere first, then this Space's.
             SidebarFixedTabs()
             // 3. Where the work is: projects and their worktrees.
-            SidebarSectionHeader(title: "プロジェクト") {
-                Menu {
-                    Button("新しいプロジェクト…") {model.showNewProject = true}
-                        .disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
-                    Button("フォルダを開く…") {model.addProject()}
-                } label: {Image(systemName: "plus").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary).frame(width: 22, height: 22)}
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("プロジェクトを追加").accessibilityLabel("プロジェクトを追加")
-            }.padding(.top, SidebarMetrics.sectionSpacing).padding(.bottom, 2)
+            // Adding a project is rare: it lives in the "+" menu at the bottom, not here.
+            SidebarSectionHeader(title: "プロジェクト") {EmptyView()}
+                .padding(.top, SidebarMetrics.sectionSpacing).padding(.bottom, 2)
             GeometryReader {geometry in
                 ZStack {
                     ForEach(pagerSpaces) {space in
@@ -279,7 +274,13 @@ struct Sidebar: View {
                 }.scrollIndicators(.hidden)
                 Button {step(1)} label: {Image(systemName: "chevron.right").frame(width: 22, height: 28)}
                     .disabled(model.sidebarSpaces.adjacent(1) == nil).help("次のWorkspace（⌥⌘→）")
-                Button {model.showNewSpace = true} label: {Image(systemName: "plus").frame(width: 24, height: 28)}.help("新しいWorkspace（⇧⌘N）")
+                Menu {
+                    addProjectButtons
+                    Divider()
+                    Button("新しいWorkspace…") {model.showNewSpace = true}
+                } label: {Image(systemName: "plus").foregroundStyle(.tertiary).frame(width: 24, height: 28)}
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                .help("プロジェクトやWorkspaceを追加").accessibilityLabel("プロジェクトやWorkspaceを追加")
             }.buttonStyle(.plain).foregroundStyle(.tertiary).padding(.horizontal, SidebarMetrics.gutter).padding(.vertical, 6)
         }.background(Palette.sidebar).clipped()
         .background(SidebarSwipeArea(canBegin: {!settling}, onProgress: {translation in
@@ -315,6 +316,11 @@ struct Sidebar: View {
         } message: {workspace in
             Text("「\(workspace.name)」には未コミットの変更、未追跡ファイル、または.envなどの無視対象ファイルがあります。削除すると元に戻せません。ターミナルとエージェントはまとめて終了します。ブランチは残ります。")
         }
+    }
+    @ViewBuilder private var addProjectButtons: some View {
+        Button("新しいプロジェクト…") {model.showNewProject = true}
+            .disabled(!model.connected || !model.supportsFolderless || model.isBusy("project.create"))
+        Button("フォルダを開く…") {model.addProject()}
     }
     private func deleteWorkspace(_ workspace: Workspace, discardChanges: Bool = false) {
         guard !DraftCache.shared.load(workspace.id).values.contains(where: {$0.dirty}) else {
@@ -398,9 +404,10 @@ struct Sidebar: View {
                     }
                 }
                 if !projects.isEmpty {
-                    Color.clear.frame(height: 28)
+                    Color.clear.frame(height: 48)
                         .contentShape(Rectangle())
                         .accessibilityHidden(true)
+                        .contextMenu {addProjectButtons}
                         .modifier(SidebarProjectDropTarget {providers in
                             dropProject(providers, before: nil, in: space)
                         })
