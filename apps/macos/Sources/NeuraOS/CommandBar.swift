@@ -10,6 +10,8 @@ struct CommandBarItem: Identifiable, Equatable {
         case focusTab(workspaceId: String, tabId: String)
         case openPin(String)
         case add(String)
+        case openFixed(String)
+        case focusWorkspace(String)
     }
     var id: String
     var icon: String
@@ -35,8 +37,19 @@ struct CommandBarContext {
     var currentURL = ""
     var workspaceId = ""
     var conversationProvider = "codex"
+    /// False when no worktree is selected to start a terminal or conversation in.
+    var canLaunch = true
     var tabs: [CommandBarTab] = []
     var pins: [BrowserPin] = []
+    var fixed: [FixedTab] = []
+    var workspaces: [CommandBarWorkspace] = []
+}
+
+/// A worktree or folder that the command bar can switch to.
+struct CommandBarWorkspace: Equatable {
+    var id: String
+    var title: String
+    var detail: String
 }
 
 enum CommandBarResults {
@@ -70,8 +83,16 @@ enum CommandBarResults {
                                   detail: visit.url, hint: context.editing ? "移動" : "開く",
                                   action: context.editing ? .navigate(url) : .open(url))
         }
+        func fixedRow(_ tab: FixedTab) -> CommandBarItem {
+            CommandBarItem(id: "fixed." + tab.id, icon: tab.kind == "browser" ? "pin" : tab.icon, address: tab.url, title: tab.title,
+                           detail: "固定タブ · " + (tab.url.map(BrowserInput.displayHost) ?? tab.kindName), hint: "開く", action: .openFixed(tab.id))
+        }
+        func workspaceRow(_ workspace: CommandBarWorkspace) -> CommandBarItem {
+            CommandBarItem(id: "workspace." + workspace.id, icon: "arrow.triangle.branch", title: workspace.title, detail: workspace.detail,
+                           hint: "作業へ移動", action: .focusWorkspace(workspace.id))
+        }
         if query.isEmpty {
-            if !context.editing {
+            if !context.editing, context.canLaunch {
                 items.append(launcher(launchers[0]))
                 if let entry = launchers.first(where: {$0.kind == context.conversationProvider}) {
                     var row = launcher(entry); row.title = "新しい会話（\(entry.kind == "claude" ? "Claude Code" : "Codex")）"
@@ -79,6 +100,7 @@ enum CommandBarResults {
                 }
             }
             items += context.pins.prefix(6).map(pinRow)
+            if !context.editing {items += context.fixed.prefix(6).map(fixedRow)}
             items += context.tabs.filter {$0.workspaceId == context.workspaceId}.prefix(6).map(tabRow)
             items += history.prefix(6).compactMap(visitRow)
             return unique(items)
@@ -95,8 +117,10 @@ enum CommandBarResults {
         func matches(_ values: String...) -> Bool {values.contains {$0.lowercased().contains(needle)}}
         items += context.tabs.filter {matches($0.title, $0.url)}.prefix(5).map(tabRow)
         items += context.pins.filter {matches($0.title, $0.url)}.prefix(4).map(pinRow)
+        items += context.fixed.filter {matches($0.title, $0.url ?? "", $0.kindName)}.prefix(4).map(fixedRow)
+        items += context.workspaces.filter {matches($0.title, $0.detail)}.prefix(5).map(workspaceRow)
         items += history.prefix(6).compactMap(visitRow)
-        if !context.editing {
+        if !context.editing, context.canLaunch {
             items += launchers.filter {entry in matches(entry.title) || entry.words.contains {$0.hasPrefix(needle)}}.map(launcher)
         }
         return unique(items)

@@ -38,9 +38,12 @@ import ChromiumBridge
     /// True once Chromium has reported a finished load for this tab at least once.
     private(set) var settled = false
 
-    init(storageId: String, workspaceId: String, projectId: String, view: NCChromiumView? = nil, eager: Bool = true) {
+    /// False for pages outside any project (fixed sidebar tabs): agents cannot see or operate them.
+    let automationAvailable: Bool
+    init(storageId: String, workspaceId: String, projectId: String, view: NCChromiumView? = nil, eager: Bool = true, automation: Bool = true) {
         self.storageId = storageId; self.workspaceId = workspaceId; self.projectId = projectId
-        automationEnabled = !UserDefaults.standard.bool(forKey: "browser.mcpDisabled." + storageId)
+        automationAvailable = automation
+        automationEnabled = automation && !UserDefaults.standard.bool(forKey: "browser.mcpDisabled." + storageId)
         address = Self.savedAddress(storageId: storageId, workspaceId: workspaceId)
         loaded = eager || view != nil
         self.view = view ?? NCChromiumView(frame: .zero)
@@ -79,7 +82,7 @@ import ChromiumBridge
             else {message = "保存されていたアドレスは開けません。アドレスを入力し直してください。"}
         }
         Self.registry[storageId] = Weak(self)
-        BrowserAutomation.shared.register(self)
+        if automation {BrowserAutomation.shared.register(self)}
     }
     static func savedAddress(storageId: String, workspaceId: String, defaults: UserDefaults = .standard) -> String {
         let key = "browser.\(storageId)", legacyKey = "browser.\(workspaceId)"
@@ -152,13 +155,15 @@ struct BrowserPane: View {
     @Binding var url: String?
     let pin: BrowserPin?
     let split: Bool
+    /// A fixed sidebar tab: no split, and the pin saves the current page as the tab's destination.
+    let fixed: Bool
     let actions: BrowserPaneActions
     @StateObject private var browser: BrowserModel
     @FocusState private var findFocused: Bool
     init(storageId: String, workspaceId: String, projectId: String, visible: Bool, title: Binding<String?>, url: Binding<String?>,
-         pin: BrowserPin? = nil, split: Bool = false, eager: Bool = true, view: NCChromiumView? = nil, actions: BrowserPaneActions) {
-        self.visible = visible; self._title = title; self._url = url; self.pin = pin; self.split = split; self.actions = actions
-        _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, projectId: projectId, view: view, eager: eager))
+         pin: BrowserPin? = nil, split: Bool = false, fixed: Bool = false, eager: Bool = true, automation: Bool = true, view: NCChromiumView? = nil, actions: BrowserPaneActions) {
+        self.visible = visible; self._title = title; self._url = url; self.pin = pin; self.split = split; self.fixed = fixed; self.actions = actions
+        _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, projectId: projectId, view: view, eager: eager, automation: automation))
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -236,17 +241,19 @@ struct BrowserPane: View {
                 Button {actions.togglePin(browser.address, browser.title)} label: {
                     Image(systemName: pin == nil ? "pin" : "pin.fill").frame(width: 24, height: 24)
                         .foregroundStyle(pin == nil ? Color.primary : Color.accentColor)
-                }.help(pin == nil ? "このプロジェクトにピン留め（⌘D）" : "ピン留めを解除（⌘D）")
-                Button {actions.toggleSplit()} label: {
-                    Image(systemName: split ? "rectangle" : "rectangle.split.2x1").frame(width: 24, height: 24)
-                }.help(split ? "分割を解除（⌘\\）" : "右に並べて表示（⌘\\）")
+                }.help(fixed ? "このページを固定タブの行き先にする（⌘D）" : pin == nil ? "このプロジェクトにピン留め（⌘D）" : "ピン留めを解除（⌘D）")
+                if !fixed {
+                    Button {actions.toggleSplit()} label: {
+                        Image(systemName: split ? "rectangle" : "rectangle.split.2x1").frame(width: 24, height: 24)
+                    }.help(split ? "分割を解除（⌘\\）" : "右に並べて表示（⌘\\）")
+                }
                 BrowserDownloadsButton()
             }
             Menu {
                 if compact {
                     Button("URLをコピー") {browser.perform(.copyURL)}
-                    Button(pin == nil ? "このプロジェクトにピン留め" : "ピン留めを解除") {actions.togglePin(browser.address, browser.title)}
-                    Button(split ? "分割を解除" : "右に並べて表示") {actions.toggleSplit()}
+                    Button(fixed ? "このページを固定タブの行き先にする" : pin == nil ? "このプロジェクトにピン留め" : "ピン留めを解除") {actions.togglePin(browser.address, browser.title)}
+                    if !fixed {Button(split ? "分割を解除" : "右に並べて表示") {actions.toggleSplit()}}
                     Divider()
                 }
                 Button("ページ内を検索…") {browser.perform(.find)}
@@ -262,16 +269,18 @@ struct BrowserPane: View {
                 Button("このページを拡張対応ウィンドウで開く") {
                     if let url = BrowserModel.navigationURL(browser.address) {browser.message = NCOpenExtensionWindow(url.absoluteString)}
                 }
-                Divider()
-                Toggle("エージェント（MCP）からの操作を許可", isOn: Binding(
-                    get: {browser.automationEnabled},
-                    set: {enabled in if enabled {browser.automationEnabled = true} else {BrowserAutomation.shared.stop(browser)}}
-                ))
+                if browser.automationAvailable {
+                    Divider()
+                    Toggle("エージェント（MCP）からの操作を許可", isOn: Binding(
+                        get: {browser.automationEnabled},
+                        set: {enabled in if enabled {browser.automationEnabled = true} else {BrowserAutomation.shared.stop(browser)}}
+                    ))
+                }
             } label: {
-                Image(systemName: browser.automationEnabled ? "ellipsis" : "ellipsis.circle").frame(width: 24, height: 24)
+                Image(systemName: browser.automationEnabled || !browser.automationAvailable ? "ellipsis" : "ellipsis.circle").frame(width: 24, height: 24)
             }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help(browser.automationEnabled ? "その他" : "その他（エージェントからの操作は停止中）")
+            .help(browser.automationEnabled || !browser.automationAvailable ? "その他" : "その他（エージェントからの操作は停止中）")
             if compact {BrowserDownloadsButton()}
         }.buttonStyle(.plain).font(.system(size: 12)).padding(.horizontal, 8).frame(height: 34)
     }

@@ -7,7 +7,8 @@ extension AppModel {
 
     func sendWorkspaceCommand(_ action: WorkspaceAction) {
         // Capture the destination now; mounted background workspaces must never handle it.
-        guard let workspace = selected, !showNewSpace, !showNewWorkspace, !showNewProject,
+        // A fixed tab on screen receives the command instead of the worktree underneath it.
+        guard let target = fixedId.map({"fixed." + $0}) ?? selected?.id, !showNewSpace, !showNewWorkspace, !showNewProject,
               NSApp.modalWindow == nil else {return}
         if commandBarVisible {
             // While the command bar is up, only asking for it again (to switch its mode) passes.
@@ -15,7 +16,15 @@ extension AppModel {
         } else {
             guard WorkspaceCommandContext.allowsCommands(in: NSApp.keyWindow) else {return}
         }
-        workspaceCommands.send(WorkspaceCommandRequest(workspaceId: workspace.id, action: action))
+        workspaceCommands.send(WorkspaceCommandRequest(workspaceId: target, action: action))
+    }
+
+    /// Worktrees and folders the command bar can switch to, labelled with their project.
+    func commandBarWorkspaces() -> [CommandBarWorkspace] {
+        state.workspaces.map {workspace in
+            let project = state.projects.first {$0.id == workspace.projectId}?.name ?? ""
+            return CommandBarWorkspace(id: workspace.id, title: workspace.name, detail: project)
+        }
     }
 
     /// Browser tabs of every worktree, read from each workspace's saved tab strip.
@@ -116,11 +125,12 @@ extension AppModel {
         let dialog = showNewSpace || showNewWorkspace || showNewProject
         switch shortcut {
         case .workspace(let action):
-            guard let workspace = selected, !dialog else {return false}
+            guard fixedId != nil || selected != nil, !dialog else {return false}
             switch action {
             case .browser: guard activeTabKind == "browser" else {return false}
-            case .toggleSplit: guard activeTabKind != nil else {return false}
-            case .inspector(let pane): guard pane == "files" ? workspace.hasFolder : workspace.supportsGit else {return false}
+            case .toggleSplit: guard activeTabKind != nil, fixedId == nil else {return false}
+            case .inspector(let pane):
+                guard let workspace = selected, pane == "files" ? workspace.hasFolder : workspace.supportsGit else {return false}
             default: break
             }
             sendWorkspaceCommand(action)
@@ -140,8 +150,8 @@ extension AppModel {
             switchSpace(id)
         case .toggleSidebar: showSidebar.toggle()
         case .toggleInspector:
-            guard selected != nil else {return false}
-            showInspector.toggle()
+            guard selected != nil, fixedId == nil else {return false}
+            toggleInspector()
         }
         return true
     }

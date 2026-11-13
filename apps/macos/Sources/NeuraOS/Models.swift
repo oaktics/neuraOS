@@ -20,6 +20,9 @@ enum BrowserCommand: Equatable {
     case copyURL, togglePin, devTools, openExternally
 }
 
+/// Which kind of fixed tab the creation sheet starts with.
+struct FixedTabKind: Identifiable, Equatable {let id: String}
+
 enum WorkspaceAction: Equatable {
     case add(String), close, move(Int), select(Int), inspector(String)
     /// Open a page from the command bar or a link.
@@ -292,6 +295,25 @@ final class DaemonClient {
     let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     var openedIds: Set<String> = []
     var requestedTerminalId: String?
+    var newFixedTabKind: FixedTabKind?
+    /// Hide the right sidebar while only web pages are on screen.
+    var autoHideInspector = UserDefaults.standard.object(forKey: "inspector.autoHide") as? Bool ?? true {
+        didSet {UserDefaults.standard.set(autoHideInspector, forKey: "inspector.autoHide")}
+    }
+    /// Set by the worktree on screen: its right sidebar is currently hidden automatically.
+    var inspectorAutoHidden = false
+    /// The user asked to see the right sidebar anyway, until the tab on screen changes.
+    var inspectorPeek = false
+    var inspectorShown: Bool {inspectorAutoHidden ? inspectorPeek : showInspector}
+    func toggleInspector() {
+        if inspectorAutoHidden {inspectorPeek.toggle()} else {showInspector.toggle()}
+    }
+    /// The fixed (sidebar) tab shown in the main area, over the selected worktree.
+    var fixedId: String?
+    /// Fixed tabs whose content is kept alive.
+    var openedFixedIds: Set<String> = []
+    /// The worktree actually on screen: none while a fixed tab covers it.
+    var frontId: String? {fixedId == nil ? selectedId : nil}
     /// A tab to bring forward once its workspace is on screen.
     var requestedTab: (workspaceId: String, tabId: String)?
     /// Kind of the tab that has focus in the selected workspace; menus enable browser commands from it.
@@ -388,6 +410,7 @@ final class DaemonClient {
         Diagnostics.shared.record("action.select-workspace")
         if let workspace = state.workspaces.first(where: {$0.id == id}) {sidebarSpaces.activeId = sidebarSpaces.owner(of: workspace.projectId)}
         sidebarSpaces.remember(id)
+        fixedId = nil
         selectedId = id; if let id {openedIds.insert(id)}; UserDefaults.standard.set(id, forKey: "selectedWorkspace")}
     func report(_ error: Error) {self.error = error.localizedDescription}
     func refreshUsage() async {

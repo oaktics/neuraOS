@@ -113,7 +113,7 @@ struct SidebarSpaceName: View {
                 .help("クリックしてWorkspace名を編集")
                 .accessibilityLabel("Workspace名を編集: \(space.name)")
             }
-        }.font(.system(size: 13, weight: .semibold)).lineLimit(1)
+        }.font(.system(size: 15, weight: .semibold)).lineLimit(1)
     }
 
     private func finish() {
