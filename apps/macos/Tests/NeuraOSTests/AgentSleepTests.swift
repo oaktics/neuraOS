@@ -23,6 +23,37 @@ final class AgentSleepTests: XCTestCase {
         XCTAssertFalse(disconnected.working); XCTAssertFalse(disconnected.complete)
         XCTAssertTrue(AgentSleepPolicy.decision([terminal("claude", "working", "exited")], connected: true).complete)
     }
+    func testBackgroundWorkAfterATurnHoldsOnlyForABoundedTime() {
+        var idle = terminal("claude", "idle"); idle.background = true
+        let decision = AgentSleepPolicy.decision([idle, terminal("codex", "idle")], connected: true)
+        XCTAssertFalse(decision.working); XCTAssertTrue(decision.background); XCTAssertTrue(decision.complete)
+        var exited = terminal("claude", "idle", "exited"); exited.background = true
+        XCTAssertFalse(AgentSleepPolicy.decision([exited], connected: true).background)
+        let limit = AgentSleepPolicy.backgroundLimit
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: 0, complete: true), "work")
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: limit, complete: true), "done")
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: nil, complete: true), "done")
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: true, backgroundFor: nil, complete: false), "work")
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: true, working: false, backgroundFor: nil, complete: false), "unknown")
+        XCTAssertEqual(AgentSleepPolicy.leaseState(fresh: false, working: true, backgroundFor: 0, complete: true), "unknown")
+    }
+    func testSleepControlIsWantedUntilTheUserTurnsItOff() throws {
+        let name = "agent-sleep-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer {defaults.removePersistentDomain(forName: name)}
+        XCTAssertTrue(AgentSleepController.wanted(defaults))
+        defaults.set(false, forKey: AgentSleepController.preferenceKey)
+        XCTAssertFalse(AgentSleepController.wanted(defaults))
+    }
+    @MainActor func testQuietWorkAsksForAFreshSnapshotInsteadOfExpiring() {
+        let controller = AgentSleepController()
+        var requests = 0
+        controller.requestRefresh = {requests += 1}
+        XCTAssertEqual(AgentSleepController.refreshInterval, 8)
+        XCTAssertLessThan(AgentSleepController.refreshInterval * 2, AgentSleepController.freshness)
+        controller.update(terminals: [terminal("claude", "working")], connected: true)
+        XCTAssertEqual(requests, 0)
+    }
     func testCompletionDebounceResetsWhenWorkResumesAndDisconnectHasGrace() {
         var policy = SleepDebounce()
         XCTAssertFalse(policy.shouldRelease(state: "done", now: 0))

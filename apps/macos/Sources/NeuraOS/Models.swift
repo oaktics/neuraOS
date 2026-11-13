@@ -47,7 +47,7 @@ struct WorkspaceCommandRequest {
 struct Project: Codable, Identifiable, Equatable {let id: String; let name: String; let path: String; let isGit: Bool?; var folderless: Bool? = nil; var worktreeStartup: [String]? = nil; var worktreeSetup: String? = nil; var defaultConversationProvider: String? = nil; var defaultDelegationProvider: String? = nil; var inheritedProvider: String {let agents = Set((worktreeStartup ?? []).filter {["codex", "claude"].contains($0)}); return agents.count == 1 ? agents.first! : "codex"}; var conversationProvider: String {defaultConversationProvider ?? inheritedProvider}; var delegationProvider: String {defaultDelegationProvider ?? inheritedProvider}; var supportsGit: Bool {folderless != true && isGit != false}}
 struct WorktreeSetup: Codable, Hashable {let status: String; let script: String; let output: String; var error: String?}
 struct Workspace: Codable, Identifiable, Hashable {let id: String; let projectId: String; let name: String; let path: String; let branch: String; let kind: String; var setup: WorktreeSetup? = nil; var deletion: DeletionJob? = nil; var supportsGit: Bool {kind == "root" || kind == "worktree"}; var hasFolder: Bool {kind != "scratch"}}
-struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil}
+struct TerminalRecord: Codable, Identifiable, Equatable {let id: String; let workspaceId: String; let provider: String; let status: String; let cols: Int; let rows: Int; var activity: String? = nil; var sessionName: String? = nil; var background: Bool? = nil}
 struct Snapshot: Codable {
     var protocolVersion = 1; var hostName = "このMac"; var revision = 0
     var features: [String]?
@@ -344,6 +344,8 @@ final class DaemonClient {
             if change.type == "disconnected" {self.updateConnection(false); self.statePulse.signal()}
             if change.type == "ready" || change.state == true {self.statePulse.signal()}
         }
+        agentSleep.requestRefresh = { [weak self] in self?.statePulse.signal() }
+        agentSleep.startAtLaunch()
         polling = Task { [weak self] in
             guard let self else {return}
             var updates = self.statePulse.stream.makeAsyncIterator()

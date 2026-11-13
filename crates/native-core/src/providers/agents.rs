@@ -410,6 +410,17 @@ impl Agents {
         {
             return Ok(false);
         }
+        // Stop reports work that will re-invoke the model later (background
+        // shells, subagents, monitors, one-shot wakeups). Absent means unknown:
+        // keep the previous value rather than guessing that nothing is running.
+        let background = match name {
+            "Stop" | "StopFailure" => event["background"]
+                .as_str()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|count| count > 0),
+            "SessionEnd" => Some(false),
+            _ => None,
+        };
         let mut notification = None;
         match name {
             "UserPromptSubmit" | "PreToolUse" => {
@@ -437,6 +448,15 @@ impl Agents {
                     a.turn_id = None;
                 } else {
                     if a.turn_id.is_none() {
+                        // A background task can finish in a turn without tools.
+                        if let Some(background) = background {
+                            self.update_terminal(
+                                terminal,
+                                json!({"background":background}),
+                                None,
+                            )
+                            .await?;
+                        }
                         return Ok(false);
                     }
                     a.last_turn_id = a.turn_id.take();
@@ -466,7 +486,11 @@ impl Agents {
         }
         set_claude(&mut s, terminal, Some(live));
         self.save(&mut s, a.clone()).await?;
-        self.update_terminal(terminal,json!({"activity":if ["idle","working","waiting"].contains(&a.status.as_str()){a.status.as_str()}else{"unknown"}}),notification).await?;
+        let mut patch = json!({"activity":if ["idle","working","waiting"].contains(&a.status.as_str()){a.status.as_str()}else{"unknown"}});
+        if let Some(background) = background {
+            patch["background"] = json!(background);
+        }
+        self.update_terminal(terminal, patch, notification).await?;
         if matches!(name, "Stop" | "StopFailure") {
             self.deliver(&mut s).await?;
         }

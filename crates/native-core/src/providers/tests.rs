@@ -996,3 +996,46 @@ async fn admitted_prepare_send_does_not_reacquire_reader_behind_deletion_writer(
     drop(activity);
     writer.await.unwrap();
 }
+#[tokio::test]
+async fn stop_keeps_background_work_visible_until_a_later_stop_clears_it() {
+    let (store, agents) = fixture().await;
+    let (terminal, task) = claude(&agents, None).await;
+    store
+        .call(
+            "put",
+            json!({"table":"terminals","value":{"id":terminal,"workspaceId":"w","provider":"claude"}}),
+        )
+        .await
+        .unwrap();
+    confirm(&agents, &terminal, &task).await;
+    let background = |store: Arc<MemoryStore>, terminal: String| async move {
+        store
+            .call("get", json!({"table":"terminals","id":terminal}))
+            .await
+            .unwrap()["background"]
+            .clone()
+    };
+    event(&agents, &terminal, &task, "UserPromptSubmit", json!({})).await;
+    event(&agents, &terminal, &task, "Stop", json!({"background":"2"})).await;
+    assert_eq!(background(store.clone(), terminal.clone()).await, true);
+    // A synthesized Stop carries no registry and must not clear the flag.
+    event(&agents, &terminal, &task, "UserPromptSubmit", json!({})).await;
+    event(&agents, &terminal, &task, "Stop", json!({})).await;
+    assert_eq!(background(store.clone(), terminal.clone()).await, true);
+    // The finished task re-invokes the model in a turn without tools.
+    assert!(!event(&agents, &terminal, &task, "Stop", json!({"background":"0"})).await);
+    assert_eq!(background(store.clone(), terminal.clone()).await, false);
+}
+#[test]
+fn background_count_ignores_finished_remote_and_recurring_work() {
+    use super::claude::background_count;
+    assert_eq!(background_count(&json!({"hook_event_name":"Stop"})), None);
+    assert_eq!(background_count(&json!({"background_tasks":[],"session_crons":[]})), Some(0));
+    assert_eq!(
+        background_count(&json!({"background_tasks":[
+            {"type":"shell","status":"running"},{"type":"subagent"},
+            {"type":"shell","status":"completed"},{"type":"cloud session","status":"running"}],
+            "session_crons":[{"recurring":true},{"recurring":false}]})),
+        Some(3)
+    );
+}
