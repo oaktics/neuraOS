@@ -5,6 +5,18 @@ import Observation
 
 enum WorkspaceAction: Equatable {
     case add(String), close, move(Int), select(Int), inspector(String)
+    /// Open a page from the command bar or a link.
+    case open(URL, BrowserPlacement)
+    /// Load a page in the active browser tab.
+    case navigate(URL)
+    case focusTab(String)
+    case openPin(String)
+    case browser(BrowserCommand)
+    case toggleSplit
+    /// Step through recently used tabs; `finishRecent` commits when Control is released.
+    case recent(Int), finishRecent
+    /// Show the command bar: for a new tab, or to edit the current address.
+    case commandBar(edit: Bool)
 }
 
 struct WorkspaceCommandRequest {
@@ -263,6 +275,14 @@ final class DaemonClient {
     let workspaceCommands = PassthroughSubject<WorkspaceCommandRequest, Never>()
     var openedIds: Set<String> = []
     var requestedTerminalId: String?
+    /// A tab to bring forward once its workspace is on screen.
+    var requestedTab: (workspaceId: String, tabId: String)?
+    /// Kind of the tab that has focus in the selected workspace; menus enable browser commands from it.
+    var activeTabKind: String?
+    var commandBarVisible: Bool {CommandBarPanel.shared.isVisible}
+    var splitAgentLinks = UserDefaults.standard.object(forKey: "browser.splitAgentLinks") as? Bool ?? true {
+        didSet {UserDefaults.standard.set(splitAgentLinks, forKey: "browser.splitAgentLinks")}
+    }
     private var agentNotifications: AgentNotifications?
     private var polling: Task<Void, Never>?
     private let statePulse = EventPulse()

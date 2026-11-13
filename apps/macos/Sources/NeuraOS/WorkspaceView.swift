@@ -2,86 +2,6 @@ import SwiftUI
 import AppKit
 import ChromiumBridge
 
-struct WorkspaceTab: Codable, Identifiable, Equatable {
-    var id = UUID().uuidString.lowercased()
-    var kind: String
-    var number = 1
-    var terminalId: String?
-    var browserTitle: String?
-    var filePath: String?
-    var title: String {
-        if kind == "file", let filePath {return (filePath as NSString).lastPathComponent}
-        if kind == "browser", let browserTitle, !browserTitle.isEmpty {return browserTitle}
-        let name = kind == "codex" ? "Codex" : kind == "claude" ? "Claude Code" : kind == "shell" ? "Terminal" : kind == "browser" ? "Browser" : kind == "files" ? "ファイル" : kind == "github" ? "GitHub" : "差分"
-        return ["files", "diff", "github"].contains(kind) ? name : "\(name) \(number)"
-    }
-    func displayTitle(terminal: TerminalRecord?) -> String {
-        if ["codex", "claude"].contains(kind), terminal?.id == terminalId,
-           let name = terminal?.sessionName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {return name}
-        return title
-    }
-    var icon: String {kind == "codex" ? "sparkle" : kind == "claude" ? "asterisk" : kind == "shell" ? "terminal" : kind == "browser" ? "globe" : ["file", "files"].contains(kind) ? "doc" : kind == "github" ? "arrow.triangle.pull" : "plus.forwardslash.minus"}
-    var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
-}
-struct WorkspaceTabState: Codable {
-    var tabs: [WorkspaceTab] = []
-    var selectedId: String?
-
-    // A nil selection is the permanent home surface, not a missing tab.
-    mutating func migrateAgentTabs() {
-        if tabs.contains(where: {$0.kind == "agents" && $0.id == selectedId}) {selectedId = nil}
-        tabs.removeAll {$0.kind == "agents"}
-    }
-
-    @discardableResult
-    @MainActor mutating func openBrowser(_ url: URL, workspaceId: String, defaults: UserDefaults = .standard) -> Bool {
-        guard ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
-              BrowserModel.navigationURL(url.absoluteString) != nil else {return false}
-        let tab = WorkspaceTab(kind: "browser", number: (tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
-        // Seed the URL before SwiftUI constructs the browser and starts navigation.
-        defaults.set(url.absoluteString, forKey: "browser.\(workspaceId).\(tab.id)")
-        tabs.append(tab); selectedId = tab.id
-        return true
-    }
-
-    mutating func openFile(_ path: String) {
-        if let existing = tabs.first(where: {$0.kind == "file" && $0.filePath == path}) {
-            selectedId = existing.id
-        } else {
-            let tab = WorkspaceTab(kind: "file", filePath: path)
-            tabs.append(tab); selectedId = tab.id
-        }
-    }
-
-    mutating func reconcileTerminals(_ terminals: [TerminalRecord], seen: inout Set<String>, startingTabs: Set<String>) {
-        // A manual launch publishes its record before assigning the owning tab's
-        // binding. Wait for that binding so we cannot create a duplicate tab.
-        guard !tabs.contains(where: {startingTabs.contains($0.id)}) else {return}
-        for terminal in terminals where !seen.contains(terminal.id) {
-            if !tabs.contains(where: {$0.terminalId == terminal.id}) {
-                let number = (tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1
-                tabs.append(WorkspaceTab(kind: terminal.provider, number: number, terminalId: terminal.id))
-            }
-        }
-        seen.formUnion(terminals.map(\.id))
-        if let selectedId, !tabs.contains(where: {$0.id == selectedId}) {self.selectedId = nil}
-    }
-}
-
-extension Binding where Value == WorkspaceTabState {
-    // Never retain an array-element binding across an async launch or browser callback.
-    // Resolve the stable tab ID on every access; a removed tab becomes a no-op.
-    func tabValue(_ id: String, _ keyPath: WritableKeyPath<WorkspaceTab, String?>) -> Binding<String?> {
-        Binding<String?>(
-            get: {wrappedValue.tabs.first(where: {$0.id == id})?[keyPath: keyPath]},
-            set: {value in
-                guard let index = wrappedValue.tabs.firstIndex(where: {$0.id == id}) else {return}
-                wrappedValue.tabs[index][keyPath: keyPath] = value
-            }
-        )
-    }
-}
-
 enum TerminalLaunchCompletion {
     @MainActor static func attach(_ terminal: TerminalRecord, to binding: Binding<String?>,
                                   stop: (TerminalRecord) async -> Void) async {
@@ -107,7 +27,15 @@ struct WorkspaceView: View {
     private var selectedFile: String? {layout.tabs.first {$0.id == layout.selectedId}?.filePath}
     @State private var closingTab: WorkspaceTab?
     @State private var popupViews: [String: NCChromiumView] = [:]
-    private var activeKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
+    // Tabs restored from a previous run load their page only when first shown.
+    @State private var restoredTabs: Set<String> = []
+    @State private var cycle = RecentTabCycle()
+    @State private var contentFrame = CGRect.zero
+    @State private var clickMonitor: Any?
+    @ObservedObject private var pins = BrowserPins.shared
+    private var primaryKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
+    private var projectPins: [BrowserPin] {pins.list(workspace.projectId)}
+    private static let splitGutter: CGFloat = 7
     private var deletionBlocked: Bool {model.isWorkspaceBlocked(workspace.id)}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
     // Each refresh makes the daemon run `git status` and `git branch`. Nobody can
@@ -116,6 +44,16 @@ struct WorkspaceView: View {
         workspace.supportsGit && model.selectedId == workspace.id && !deletionBlocked && AppVisibility.shared.visible
     }
     var body: some View {
+        core
+        .onDisappear {if let clickMonitor {NSEvent.removeMonitor(clickMonitor)}; clickMonitor = nil}
+        .onChange(of: model.requestedTab?.tabId) {_, _ in openRequestedTab()}
+        .onChange(of: layout.active?.kind) {_, _ in publishActiveKind()}
+        .onChange(of: model.selectedId) {_, _ in publishActiveKind()}
+        .onChange(of: projectPins.map(\.id)) {_, _ in dropStalePins()}
+        .onChange(of: layout.splitId) {_, _ in persist()}
+        .onChange(of: layout.splitFraction) {_, _ in persist()}
+    }
+    private var core: some View {
         VStack(spacing: 0) {
             if let job = model.deletion(workspace.id) {WorkspaceDeletionStatus(workspace: workspace, job: job)}
             if model.deletionIntents[workspace.id] != nil || model.deletionIntentLoadFailed {
@@ -162,9 +100,9 @@ struct WorkspaceView: View {
         .environment(\.openURL, OpenURLAction {url in
             guard !deletionBlocked else {return .discarded}
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
-            return layout.openBrowser(url, workspaceId: workspace.id) ? .handled : .discarded
+            return openURL(url, opener: nil, wanted: model.splitAgentLinks ? .split : .tab) ? .handled : .discarded
         })
-        .onAppear {restore(); openRequestedTerminal()}
+        .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); installClickMonitor()}
         .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
@@ -180,10 +118,19 @@ struct WorkspaceView: View {
             switch request.action {
             case .add(let kind): add(kind)
             case .close:
-                if let item = layout.tabs.first(where: {$0.id == layout.selectedId}) {close(item)}
+                if let item = layout.active {close(item)}
             case .move(let offset): layout.moveSelection(by: offset)
             case .select(let number): layout.select(number: number)
             case .inspector(let pane): inspector = pane; model.showInspector = true
+            case .open(let url, let placement): openURL(url, opener: nil, wanted: placement)
+            case .navigate(let url): navigateActive(url)
+            case .focusTab(let id): if layout.tabs.contains(where: {$0.id == id}) {layout.focus(id)}
+            case .openPin(let id): openPin(id)
+            case .browser(let command): browserCommand(command)
+            case .toggleSplit: toggleSplit()
+            case .recent(let offset): if let id = cycle.step(offset, in: layout) {layout.focus(id, record: false)}
+            case .finishRecent: if cycle.active {cycle.finish(); layout.touch(layout.activeId)}
+            case .commandBar(let edit): showCommandBar(edit: edit)
             }
         }
         .onChange(of: inspector) {_, value in UserDefaults.standard.set(value, forKey: "inspector.\(workspace.id)")}
@@ -211,7 +158,7 @@ struct WorkspaceView: View {
     }
     private var tabBar: some View {
         HStack(spacing: 0) {
-            Button {layout.selectedId = nil} label: {
+            Button {layout.focus(nil)} label: {
                 Image(systemName: "house").frame(width: 36, height: 32).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -219,34 +166,104 @@ struct WorkspaceView: View {
             .background(layout.selectedId == nil ? Color.primary.opacity(0.055) : .clear)
             .accessibilityLabel("ホーム").help("ホームに戻る")
             Divider().frame(height: 18)
+            if !projectPins.isEmpty {
+                HStack(spacing: 2) {ForEach(projectPins) {pin in pinButton(pin)}}.padding(.horizontal, 6)
+                Divider().frame(height: 18)
+            }
             ScrollViewReader {proxy in
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
-                        ForEach(layout.tabs) {item in
-                            let title = item.displayTitle(terminal: model.terminal(id: item.terminalId))
-                            HStack(spacing: 8) {
-                                Button {layout.selectedId = item.id} label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: item.icon)
-                                        Text(title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
-                                        if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
-                                        TerminalRunningIndicator(terminalId: item.terminalId)
-                                    }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
-                                }.buttonStyle(.plain).accessibilityLabel(title).help(item.filePath ?? title)
-                                Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(title)を閉じる").help("\(title)を閉じる" + (layout.selectedId == item.id ? "（⇧⌘W）" : ""))
-                            }
-                            .font(.system(size: 12)).foregroundStyle(layout.selectedId == item.id ? .primary : .secondary)
-                            .background(layout.selectedId == item.id ? Color.primary.opacity(0.055) : .clear)
-                            .overlay(alignment: .bottom) {if layout.selectedId == item.id {Rectangle().fill(Color.accentColor).frame(height: 2)}}
-                            .id(item.id)
-                        }
+                        ForEach(layout.listed) {item in tabItem(item)}
                     }
                 }.scrollIndicators(.hidden)
-                .onChange(of: layout.selectedId) {_, id in if let id {proxy.scrollTo(id)}}
+                .onChange(of: layout.activeId) {_, id in if let id {proxy.scrollTo(id)}}
+            }
+            if layout.split != nil {
+                Button {toggleSplit()} label: {Image(systemName: "rectangle").frame(width: 28, height: 32).contentShape(Rectangle())}
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("分割を解除（⌘\\）").accessibilityLabel("分割を解除")
             }
             Menu {addTabButtons} label: {Image(systemName: "plus").frame(width: 28, height: 32)}
-                .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加（Terminal: ⌘T）。その他のキーは「タブ」メニュー")
+                .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加。⌘Tで検索・URL・Terminalをまとめて開けます")
         }.frame(height: 32)
+    }
+    private func tabItem(_ item: WorkspaceTab) -> some View {
+        let title = item.displayTitle(terminal: model.terminal(id: item.terminalId))
+        let active = layout.activeId == item.id
+        let shown = active || layout.selectedId == item.id || layout.split?.id == item.id
+        return HStack(spacing: 8) {
+            Button {
+                if NSEvent.modifierFlags.contains(.option) {layout.toggleSplit(item.id)} else {layout.focus(item.id)}
+            } label: {
+                HStack(spacing: 6) {
+                    if item.kind == "browser" {FaviconView(address: item.browserURL, size: 13)} else {Image(systemName: item.icon)}
+                    Text(title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
+                    if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
+                    TerminalRunningIndicator(terminalId: item.terminalId)
+                }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel(title).help((item.filePath ?? item.browserURL ?? title) + "\n⌥クリックで右に並べて表示")
+            Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(title)を閉じる").help("\(title)を閉じる" + (active ? "（⌘W）" : ""))
+        }
+        .font(.system(size: 12)).foregroundStyle(shown ? .primary : .secondary)
+        .background(shown ? Color.primary.opacity(0.055) : .clear)
+        .overlay(alignment: .bottom) {if shown {Rectangle().fill(active ? Color.accentColor : Color.secondary.opacity(0.5)).frame(height: 2)}}
+        .contextMenu {
+            Button(layout.split?.id == item.id ? "分割を解除" : "右に並べて表示") {layout.toggleSplit(item.id)}
+            if item.kind == "browser" {
+                Button("このプロジェクトにピン留め") {togglePin(item.id, address: item.browserURL ?? "", title: item.browserTitle ?? "")}
+                    .disabled(BrowserModel.navigationURL(item.browserURL ?? "")?.host == nil)
+            }
+            Divider()
+            Button("タブを閉じる") {close(item)}.disabled(model.isTerminalStarting(item.id))
+        }
+        .draggable(item.id)
+        .dropDestination(for: String.self) {ids, _ in
+            guard let id = ids.first, layout.tabs.contains(where: {$0.id == id}) else {return false}
+            layout.move(id, before: item.id)
+            return true
+        }
+        .id(item.id)
+    }
+    private func pinButton(_ pin: BrowserPin) -> some View {
+        let tab = layout.tabs.first {$0.pinId == pin.id}
+        let active = tab != nil && layout.activeId == tab?.id
+        let shown = tab != nil && (active || layout.selectedId == tab?.id || layout.split?.id == tab?.id)
+        return Button {
+            if NSEvent.modifierFlags.contains(.option), let tab {layout.toggleSplit(tab.id)} else {openPin(pin.id)}
+        } label: {
+            FaviconView(address: pin.url, size: 16)
+                .frame(width: 28, height: 26)
+                .background(shown ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .bottom) {
+                    if tab != nil {Capsule().fill(active ? Color.accentColor : Color.secondary.opacity(0.6)).frame(width: 10, height: 2).offset(y: 3)}
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(.secondary)
+        .help("\(pin.title)\n\(pin.url)").accessibilityLabel("ピン: \(pin.title)")
+        .contextMenu {
+            Button("開く") {openPin(pin.id)}
+            if let tab {
+                Button("保存したページに戻る") {
+                    if let url = URL(string: pin.url) {BrowserModel.live("\(workspace.id).\(tab.id)")?.navigate(url.absoluteString)}
+                    layout.focus(tab.id)
+                }
+                Button("現在のページをピンの行き先にする") {
+                    if let url = tab.browserURL, BrowserModel.navigationURL(url)?.host != nil {
+                        pins.update(pin.id, in: workspace.projectId, url: url, title: tab.browserTitle ?? "")
+                    }
+                }
+                Button(layout.split?.id == tab.id ? "分割を解除" : "右に並べて表示") {layout.toggleSplit(tab.id)}
+                Button("ページを閉じる（ピンは残す）") {close(tab)}
+            }
+            Divider()
+            Button("ピン留めを解除") {pins.remove(pin.id, from: workspace.projectId)}
+        }
+        .draggable("pin." + pin.id)
+        .dropDestination(for: String.self) {ids, _ in
+            guard let id = ids.first, id.hasPrefix("pin.") else {return false}
+            pins.move(String(id.dropFirst(4)), before: pin.id, in: workspace.projectId)
+            return true
+        }
     }
     @ViewBuilder private var addTabButtons: some View {
         Button {add(model.conversationProvider(for: workspace))} label: {Label("新しい会話", systemImage: "bubble.left")}
@@ -277,36 +294,85 @@ struct WorkspaceView: View {
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     private var contents: some View {
-        ZStack {
-            home
-                .opacity(layout.selectedId == nil ? 1 : 0)
-                .allowsHitTesting(layout.selectedId == nil && model.selectedId == workspace.id)
-                .accessibilityHidden(layout.selectedId != nil || model.selectedId != workspace.id)
-            ForEach(layout.tabs) {item in
-                let active = layout.selectedId == item.id
-                let visible = active && model.selectedId == workspace.id && !deletionBlocked
-                Group {
-                    if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, onOpenURL: {url in
-                        guard !deletionBlocked else {return}
-                        layout.openBrowser(url, workspaceId: workspace.id)
-                    })}
-                    else if item.kind == "file", let path = item.filePath {
-                        FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
+        GeometryReader {geometry in
+            let size = geometry.size
+            let splitTab = layout.split
+            let gutter = splitTab == nil ? 0 : Self.splitGutter
+            let leftWidth = splitTab == nil ? size.width : max(160, min(size.width - gutter - 160, (size.width - gutter) * layout.fraction))
+            let rightWidth = max(0, size.width - leftWidth - gutter)
+            let frontmost = model.selectedId == workspace.id && !deletionBlocked
+            ZStack(alignment: .topLeading) {
+                home
+                    .frame(width: leftWidth, height: size.height)
+                    .opacity(layout.selectedId == nil ? 1 : 0)
+                    .allowsHitTesting(layout.selectedId == nil && model.selectedId == workspace.id)
+                    .accessibilityHidden(layout.selectedId != nil || model.selectedId != workspace.id)
+                ForEach(layout.tabs) {item in
+                    let right = splitTab?.id == item.id
+                    let shown = right || layout.selectedId == item.id
+                    let visible = shown && frontmost
+                    Group {
+                        if item.isTerminal {TerminalPane(workspace: workspace, tabId: item.id, provider: item.kind, terminalId: $layout.tabValue(item.id, \.terminalId), visible: visible, onOpenURL: {url in
+                            guard !deletionBlocked else {return}
+                            openURL(url, opener: item.id, wanted: model.splitAgentLinks ? .split : .tab)
+                        })}
+                        else if item.kind == "file", let path = item.filePath {
+                            FilePane(workspace: workspace, path: path, visible: visible, openFile: {layout.openFile($0)}, documents: $documents).id(path)
+                        }
+                        else if item.kind == "browser" {
+                            BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, projectId: workspace.projectId, visible: visible,
+                                        title: $layout.tabValue(item.id, \.browserTitle), url: $layout.tabValue(item.id, \.browserURL),
+                                        pin: item.pinId.flatMap {id in projectPins.first {$0.id == id}}, split: splitTab != nil,
+                                        eager: !restoredTabs.contains(item.id), view: popupViews[item.id], actions: browserActions(item))
+                        }
                     }
-                    else if item.kind == "browser" {BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, projectId: workspace.projectId, visible: visible, title: $layout.tabValue(item.id, \.browserTitle), view: popupViews[item.id], onPopup: openBrowserPopup, onClosed: {remove(item)})}
-
-                }.opacity(active ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
+                    // Hidden tabs keep the full width so showing or hiding a split does not resize them.
+                    .frame(width: right ? rightWidth : shown ? leftWidth : size.width, height: size.height)
+                    .offset(x: right ? leftWidth + gutter : 0)
+                    .opacity(shown ? 1 : 0).allowsHitTesting(visible).accessibilityHidden(!visible)
+                }
+                if primaryKind == "diff" {
+                    Group {
+                        if let diff = selectedDiff {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text(diff.path).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle).help(diff.path).padding(.horizontal, 8).frame(height: 28)
+                                Divider()
+                                NativeTextEditor(text: .constant(diff.content), editable: false, diff: true)
+                            }
+                        } else {Text("右のGit一覧から差分を選択").foregroundStyle(.secondary)}
+                    }.frame(width: leftWidth, height: size.height)
+                }
+                if splitTab != nil {
+                    // A real gap between the panes: native page and terminal views would cover an overlay.
+                    Rectangle().fill(Palette.line).frame(width: 1, height: size.height)
+                        .frame(width: gutter, height: size.height)
+                        .contentShape(Rectangle())
+                        .offset(x: leftWidth)
+                        .onHover {inside in if inside {NSCursor.resizeLeftRight.push()} else {NSCursor.pop()}}
+                        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("workspace.contents")).onChanged {value in
+                            guard size.width > gutter else {return}
+                            layout.splitFraction = min(0.8, max(0.2, Double((value.location.x - gutter / 2) / (size.width - gutter))))
+                        })
+                        .help("ドラッグして幅を調整")
+                }
             }
-            if activeKind == "diff" {
-                if let diff = selectedDiff {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(diff.path).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle).help(diff.path).padding(.horizontal, 8).frame(height: 28)
-                        Divider()
-                        NativeTextEditor(text: .constant(diff.content), editable: false, diff: true)
-                    }
-                } else {Text("右のGit一覧から差分を選択").foregroundStyle(.secondary)}
-            }
+            .coordinateSpace(name: "workspace.contents")
+            .onAppear {contentFrame = geometry.frame(in: .global)}
+            .onChange(of: geometry.frame(in: .global)) {_, frame in contentFrame = frame}
         }
+    }
+    private func browserActions(_ item: WorkspaceTab) -> BrowserPaneActions {
+        BrowserPaneActions(
+            popup: {view, url in openBrowserPopup(view, url: url, opener: item.id)},
+            openTab: {address, background in
+                guard !deletionBlocked, let url = BrowserModel.navigationURL(address) else {return}
+                openURL(url, opener: item.id, wanted: background ? .background : .tab)
+            },
+            closed: {remove(item)},
+            editAddress: {_ in layout.focus(item.id); showCommandBar(edit: true)},
+            togglePin: {address, title in togglePin(item.id, address: address, title: title)},
+            toggleSplit: {if layout.split != nil {toggleSplit()} else {layout.toggleSplit(item.id)}}
+        )
     }
     private var inspectorPane: some View {
         VStack(spacing: 0) {
@@ -352,7 +418,7 @@ struct WorkspaceView: View {
             } else if document.dirty {updated[path] = document}
         }
         documents = updated
-        if let selectedId = layout.selectedId, !layout.tabs.contains(where: {$0.id == selectedId}) {layout.selectedId = nil}
+        layout.normalize()
         persist()
     }
     private var gitPane: some View {
@@ -380,21 +446,40 @@ struct WorkspaceView: View {
             }
         }
     }
-    private func openBrowserPopup(_ view: NCChromiumView, url: String) -> Bool {
-        let item = WorkspaceTab(kind: "browser", number: (layout.tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
+    /// A page opened from the right pane stays there; from the left pane it may go beside it.
+    private func placement(_ wanted: BrowserPlacement, opener: String?) -> BrowserPlacement {
+        let fromSplit = opener != nil && opener == layout.split?.id
+        switch wanted {
+        case .background: return .background
+        case .tab: return fromSplit ? .split : .tab
+        case .split:
+            // Too narrow to show two panes usefully: open an ordinary tab instead.
+            if fromSplit || contentFrame.width < 720 {return .tab}
+            return .split
+        }
+    }
+    @discardableResult
+    private func openURL(_ url: URL, opener: String?, wanted: BrowserPlacement) -> Bool {
+        guard !deletionBlocked else {return false}
+        return layout.openBrowser(url, workspaceId: workspace.id, opener: opener, placement: placement(wanted, opener: opener))
+    }
+    private func openBrowserPopup(_ view: NCChromiumView, url: String, opener: String) -> Bool {
+        guard !deletionBlocked else {return false}
+        var item = WorkspaceTab(kind: "browser", number: (layout.tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
+        item.openerId = opener
         popupViews[item.id] = view
         UserDefaults.standard.set(url, forKey: "browser.\(workspace.id).\(item.id)")
-        layout.tabs.append(item); layout.selectedId = item.id
+        layout.insert(item, placement: placement(view.openedInBackground ? .background : .tab, opener: opener))
         return true
     }
     private func add(_ kind: String) {
         guard !deletionBlocked else {return}
         Diagnostics.shared.record("action.add-tab")
         let item = WorkspaceTab(kind: kind, number: (layout.tabs.filter {$0.kind == kind}.map(\.number).max() ?? 0) + 1)
-        layout.tabs.append(item); layout.selectedId = item.id
+        layout.tabs.append(item); layout.focus(item.id)
     }
     private func showUtility(_ kind: String) {
-        if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.selectedId = item.id} else {add(kind)}
+        if let item = layout.tabs.first(where: {$0.kind == kind}) {layout.focus(item.id)} else {add(kind)}
     }
     private func close(_ item: WorkspaceTab) {
         guard !deletionBlocked else {return}
@@ -404,18 +489,108 @@ struct WorkspaceView: View {
     }
     private func remove(_ item: WorkspaceTab) {
         popupViews.removeValue(forKey: item.id)
-        guard let index = layout.tabs.firstIndex(where: {$0.id == item.id}) else {return}
-        layout.tabs.remove(at: index)
-        if layout.selectedId == item.id {layout.selectedId = layout.tabs.isEmpty ? nil : layout.tabs[min(index, layout.tabs.count - 1)].id}
+        layout.close(item.id)
+    }
+    private func toggleSplit() {
+        if layout.split != nil {layout.splitId = nil; layout.splitFocused = nil}
+        else if let id = layout.activeId {layout.toggleSplit(id)}
+    }
+    private func openPin(_ id: String) {
+        guard !deletionBlocked, let pin = pins.pin(id, in: workspace.projectId) else {return}
+        if let tab = layout.tabs.first(where: {$0.pinId == id}) {layout.focus(tab.id); return}
+        guard BrowserModel.navigationURL(pin.url) != nil else {return}
+        var tab = WorkspaceTab(kind: "browser", number: (layout.tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
+        tab.pinId = id; tab.browserURL = pin.url; tab.browserTitle = pin.title
+        UserDefaults.standard.set(pin.url, forKey: "browser.\(workspace.id).\(tab.id)")
+        // Pinned pages sit before ordinary tabs, in pin order.
+        layout.tabs.insert(tab, at: layout.tabs.prefix {$0.pinId != nil}.count)
+        layout.focus(tab.id)
+    }
+    private func togglePin(_ tabId: String, address: String, title: String) {
+        guard let index = layout.tabs.firstIndex(where: {$0.id == tabId}) else {return}
+        if let pinId = layout.tabs[index].pinId {
+            pins.remove(pinId, from: workspace.projectId)
+            layout.tabs[index].pinId = nil
+            return
+        }
+        guard let url = BrowserModel.navigationURL(address), url.host != nil else {return}
+        let pin = pins.add(url: url.absoluteString, title: title, to: workspace.projectId)
+        if !layout.tabs.contains(where: {$0.pinId == pin.id}) {layout.tabs[index].pinId = pin.id}
+    }
+    /// A pin removed in any worktree releases its page here as an ordinary tab.
+    private func dropStalePins() {
+        let ids = Set(projectPins.map(\.id))
+        for index in layout.tabs.indices {
+            if let pinId = layout.tabs[index].pinId, !ids.contains(pinId) {layout.tabs[index].pinId = nil}
+        }
+    }
+    private func activeBrowser() -> BrowserModel? {
+        guard let tab = layout.active, tab.kind == "browser" else {return nil}
+        return BrowserModel.live("\(workspace.id).\(tab.id)")
+    }
+    private func navigateActive(_ url: URL) {
+        guard !deletionBlocked else {return}
+        if let browser = activeBrowser() {browser.loaded = true; browser.navigate(url.absoluteString); browser.view.focusContent()}
+        else {openURL(url, opener: nil, wanted: .tab)}
+    }
+    private func browserCommand(_ command: BrowserCommand) {
+        guard !deletionBlocked, let tab = layout.active, tab.kind == "browser", let browser = activeBrowser() else {return}
+        if command == .togglePin {togglePin(tab.id, address: browser.address, title: browser.title)} else {browser.perform(command)}
+    }
+    private func showCommandBar(edit: Bool) {
+        guard !deletionBlocked, let window = NSApp.windows.first(where: {$0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible}) ?? NSApp.mainWindow else {return}
+        let browser = activeBrowser()
+        let context = CommandBarContext(editing: edit && browser != nil, currentURL: browser?.address ?? "", workspaceId: workspace.id,
+                                        conversationProvider: model.conversationProvider(for: workspace),
+                                        tabs: model.browserTabs(), pins: projectPins)
+        CommandBarPanel.shared.show(over: window, context: context) {action, split in
+            guard !deletionBlocked else {return}
+            switch action {
+            case .navigate(let url): navigateActive(url)
+            case .open(let url): openURL(url, opener: nil, wanted: split ? .split : .tab)
+            case .focusTab(let workspaceId, let tabId):
+                if workspaceId == workspace.id {layout.focus(tabId)}
+                else {model.requestedTab = (workspaceId, tabId); model.select(workspaceId)}
+            case .openPin(let id): openPin(id)
+            case .add(let kind): add(kind)
+            }
+        }
+    }
+    private func publishActiveKind() {
+        guard model.selectedId == workspace.id else {return}
+        let kind = layout.active?.kind
+        if model.activeTabKind != kind {model.activeTabKind = kind}
+    }
+    private func openRequestedTab() {
+        guard let request = model.requestedTab, request.workspaceId == workspace.id else {return}
+        restore()
+        if layout.tabs.contains(where: {$0.id == request.tabId}) {layout.focus(request.tabId)}
+        model.requestedTab = nil
+    }
+    /// With two panes on screen, a click decides which one keyboard commands apply to.
+    private func installClickMonitor() {
+        guard clickMonitor == nil else {return}
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {event in
+            MainActor.assumeIsolated {
+                guard model.selectedId == workspace.id, layout.split != nil, let content = event.window?.contentView,
+                      event.window?.identifier?.rawValue.hasPrefix("main") == true else {return}
+                let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+                guard contentFrame.contains(point) else {return}
+                let boundary = contentFrame.minX + (contentFrame.width - Self.splitGutter) * layout.fraction
+                let right = point.x > boundary + Self.splitGutter
+                if point.x < boundary || right, (layout.splitFocused == true) != right {layout.splitFocused = right}
+            }
+            return event
+        }
     }
     private func openRequestedTerminal() {
         guard let id = model.requestedTerminalId,
               let terminal = model.terminal(id: id), terminal.workspaceId == workspace.id else {return}
         restore()
-        if let tab = layout.tabs.first(where: {$0.terminalId == id}) {layout.selectedId = tab.id}
+        if let tab = layout.tabs.first(where: {$0.terminalId == id}) {layout.focus(tab.id)}
         else {
             let tab = WorkspaceTab(kind: terminal.provider, number: (layout.tabs.filter {$0.kind == terminal.provider}.map(\.number).max() ?? 0) + 1, terminalId: id)
-            layout.tabs.append(tab); layout.selectedId = tab.id
+            layout.tabs.append(tab); layout.focus(tab.id)
         }
         model.requestedTerminalId = nil
         persist()
@@ -425,6 +600,7 @@ struct WorkspaceView: View {
         let saved = UserDefaults.standard.data(forKey: storageKey).flatMap {try? JSONDecoder().decode(WorkspaceTabState.self, from: $0)}
         layout = saved ?? WorkspaceTabState()
         layout.migrateAgentTabs()
+        restoredTabs = Set(layout.tabs.filter {$0.kind == "browser"}.map(\.id))
         inspector = UserDefaults.standard.string(forKey: "inspector.\(workspace.id)") ?? "files"
         if layout.tabs.contains(where: {$0.kind == "github" && $0.id == layout.selectedId}) {
             inspector = "github"; model.showInspector = true
@@ -444,7 +620,8 @@ struct WorkspaceView: View {
                 layout.tabs.append(WorkspaceTab(kind: terminal.provider, number: number, terminalId: terminal.id))
             }
         }
-        if let selectedId = layout.selectedId, !layout.tabs.contains(where: {$0.id == selectedId}) {layout.selectedId = nil}
+        layout.normalize()
+        dropStalePins()
         persist()
     }
     private func reconcileTerminals() {

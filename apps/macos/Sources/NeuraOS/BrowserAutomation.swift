@@ -147,6 +147,11 @@ struct BrowserAutomationError: Error {let code: String}
             defer {ProcessInfo.processInfo.endActivity(activity)}
             defer {jobs.removeValue(forKey:id);owners.removeValue(forKey:id);failures.removeValue(forKey:id);model.automationOwner = "";pulse.signal()}
             do {
+                // A restored tab has no page until it is first shown; an agent request loads it.
+                if !model.loaded {model.loaded = true}
+                while !model.view.hasBrowser, Date().timeIntervalSince1970 * 1000 < deadline {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
                 let result = try await Self.execute(c, view: model.view, deadline: deadline, allowed: {model.automationEnabled})
                 results.append(["id":id,"result":result])
             } catch {results.append(["id":id,"error":failures[id] ?? (error as? BrowserAutomationError)?.code ?? "browser_cancelled"])}
