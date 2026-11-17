@@ -7,7 +7,8 @@ export async function buildNativeCore(){
  const root=resolve(import.meta.dirname,'../..');
  const local=join(homedir(),'.cargo/bin/cargo');
  const cargo=await access(local).then(()=>local,()=> 'cargo');
- await new Promise((resolve,reject)=>{const p=spawn(cargo,['build','--release','--locked','--jobs','2','--manifest-path',join(root,'crates/native-core/Cargo.toml')],{stdio:'inherit'});p.once('error',reject);p.once('exit',code=>code===0?resolve():reject(new Error('Native core build failed')));});
+ // CI may supply the release daemon from this same workflow run. Missing files fail closed.
+ if(process.env.NEURA_SKIP_RUST_BUILD!=='1') await new Promise((resolve,reject)=>{const p=spawn(cargo,['build','--release','--locked','--jobs','2','--manifest-path',join(root,'crates/native-core/Cargo.toml')],{stdio:'inherit'});p.once('error',reject);p.once('exit',code=>code===0?resolve():reject(new Error('Native core build failed')));});
  await mkdir(join(root,'.native'),{recursive:true});
  await copyFile(join(root,'crates/native-core/target/release/neura-native-core'),join(root,'.native/neura-native-core'));
 }
