@@ -1710,8 +1710,47 @@ fn terminal_id_error(s: &Registry, id: &str) -> Option<String> {
     tasks.sort();
     (!tasks.is_empty()).then(|| json!({"error":"task_id_required","terminalId":id,"taskIds":tasks,"recovery":"Use taskId from task_start/task_spawn, not the legacy id (terminalId). For resumed terminals select currentSessionIds[terminalId]."}).to_string())
 }
-// Bound both provider tool output and inbox text without changing stored evidence.
-pub(super) fn bounded_read(value: Value) -> Value {
+// Control-plane state is exact: only transcript content and report bodies
+// have display budgets. In particular, never run agent arrays through the
+// structural limiter: their IDs/states are required for instruction CAS/ack.
+pub(super) fn bounded_read(mut value: Value) -> Value {
+    let mut truncated = false;
+    if let Some(history) = value.as_object_mut().and_then(|v| v.remove("history")) {
+        let page = bounded_history(json!({"history":history}));
+        truncated = page["truncated"] == true;
+        if let Some(history) = page.get("history") {
+            value["history"] = history.clone();
+        } else {
+            value["history"] = json!({"error":page["error"]});
+        }
+    }
+    if let Some(reports) = value["agent"]
+        .get_mut("reports")
+        .and_then(Value::as_array_mut)
+    {
+        for report in reports {
+            if let Some(text) = report
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if text.len() > 2048 {
+                    let mut end = 2048;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    report["text"] = json!(format!("{}…[truncated]", &text[..end]));
+                    report["textTruncated"] = json!(true);
+                    truncated = true;
+                }
+            }
+        }
+    }
+    value["truncated"] = json!(truncated);
+    value
+}
+
+fn bounded_history(value: Value) -> Value {
     fn visit(v: &mut Value, budget: &mut usize, nodes: &mut usize, truncated: &mut bool) {
         if *nodes == 0 {
             *v = Value::Null;

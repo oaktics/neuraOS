@@ -145,8 +145,13 @@ CLI capability probes allow 8 seconds per `--help`/`--version` invocation; faile
 probes remain retryable and do not poison the success cache.
 
 `task_read` defaults to a recent conversation page (five Codex turns), with
-individual strings limited to 2 KiB, a shared 32 KiB text budget, and bounded
-structure, with a 64 KiB serialized response ceiling. `truncated: true` signals omitted content. `history.nextCursor` is
+transcript strings limited to 2 KiB, a shared 32 KiB transcript text budget,
+and bounded transcript structure with a 64 KiB history-page ceiling. Agent
+control state is exempt: instructions (including their history), pending work,
+requests, revisions, and all report IDs/metadata are preserved without dropping
+entries. The complete response may exceed 64 KiB to retain this state. Only report
+text bodies are shortened to 2 KiB, with per-report `textTruncated: true`; report
+IDs and metadata remain intact in conversation and reports modes. `truncated: true` signals omitted content. `history.nextCursor` is
 preserved verbatim for older pages; truncation never alters the source transcript.
 Use `mode: "reports"` to read the report inbox without fetching provider history,
 or `mode: "summary"` for status/counts only. Both avoid a provider RPC. Reading

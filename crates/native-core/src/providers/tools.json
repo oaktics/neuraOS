@@ -155,7 +155,7 @@
   },
   {
     "name": "task_read",
-    "description": "Read a bounded recent conversation page (tool/text output truncated), or mode=reports for the inbox without provider history, or mode=summary. truncated marks omitted content; original transcripts are unchanged. Pass history.nextCursor for older turns. Reading never consumes instructions or acknowledges reports.",
+    "description": "Read a bounded recent conversation page (tool/text output truncated), or mode=reports for the inbox without provider history, or mode=summary. Only transcript content and report text bodies are bounded; agent control state and all report IDs/metadata remain exact even if the response exceeds the history budget. truncated marks omitted content and report textTruncated marks shortened bodies; original transcripts are unchanged. Pass history.nextCursor for older turns. Reading never consumes instructions or acknowledges reports.",
     "inputSchema": {
       "type": "object",
       "properties": {

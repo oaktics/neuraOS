@@ -602,3 +602,50 @@ fn structured_tool_output_cannot_escape_read_response_budget() {
     assert_eq!(result["history"]["nextCursor"], "next");
     assert_eq!(result["truncated"], true);
 }
+
+#[test]
+fn read_preserves_all_control_state_even_when_it_exceeds_history_budget() {
+    let instructions: Vec<_> = (0..128).map(|i| json!({"id":format!("instruction-{i}"),"text":"retained evidence".repeat(128),"state":"cancelled","history":[{"state":"queued","at":"initial"},{"state":"cancelled","actorTaskId":"parent","at":"final"}]})).collect();
+    let reports: Vec<_> = (0..32).map(|i| json!({"id":format!("report-{i}"),"text":"界".repeat(3000),"kind":"completion","sourceTaskId":"worker","sourceTurnId":"turn","createdAt":"timestamp","notified":false,"updates":9})).collect();
+    let agent = json!({"id":"task","revision":456,"turnId":"current-turn","instructionHistoryPruned":3,"instructions":instructions,"pending":[{"id":"pending","state":"queued","text":"work".repeat(20000)}],"requests":[{"id":"request","options":(0..200).collect::<Vec<_>>()}],"reports":reports});
+    for history in [
+        None,
+        Some(json!({"data":[{"items":[{"text":"x".repeat(1_250_000)}]}],"nextCursor":"older"})),
+    ] {
+        let mut input = json!({"agent":agent});
+        if let Some(history) = history {
+            input["history"] = history;
+        }
+        let result = crate::providers::agents::bounded_read(input);
+        assert!(
+            result.to_string().len() > 64 * 1024,
+            "control state takes precedence over the display budget"
+        );
+        for key in [
+            "id",
+            "revision",
+            "turnId",
+            "instructionHistoryPruned",
+            "instructions",
+            "pending",
+            "requests",
+        ] {
+            assert_eq!(result["agent"][key], agent[key], "{key}");
+        }
+        assert_eq!(result["agent"]["reports"].as_array().unwrap().len(), 32);
+        for (original, actual) in agent["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(result["agent"]["reports"].as_array().unwrap())
+        {
+            for (key, value) in original.as_object().unwrap() {
+                if key != "text" {
+                    assert_eq!(&actual[key], value, "{key}");
+                }
+            }
+            assert_eq!(actual["textTruncated"], true);
+        }
+        assert_eq!(result["truncated"], true);
+    }
+}
