@@ -77,8 +77,16 @@ pub struct AppState {
     pub closing: tokio::sync::watch::Sender<bool>,
 }
 fn provider_error(e: String) -> ApiError {
+    if let Ok(detail) = serde_json::from_str::<Value>(&e) {
+        if detail["error"] == "task_id_required" {
+            return ApiError::new("task_id_required", e, 409).field("taskId", "terminal_id_supplied");
+        }
+    }
     let code = e.split(':').next().unwrap_or("provider_failed");
-    ApiError::new(code, "CLIの状態を確認してください。", 409)
+    let message = if code == "provider_probe_timeout" {
+        "CLI --help/--version did not finish within 8 seconds. Run those commands in the terminal to check CLI startup, then retry task_start in the existing workspace. No provider was switched."
+    } else { "CLIの状態を確認してください。" };
+    ApiError::new(code, message, 409)
 }
 fn invalid() -> ApiError {
     ApiError::new("invalid_request", "要求の形式が正しくありません。", 400)
@@ -569,7 +577,7 @@ async fn agent(
     Ok(Json(
         s.providers
             .agents
-            .read(&key, q.get("cursor").map(String::as_str))
+            .read_mode(&key, q.get("cursor").map(String::as_str), q.get("mode").map(String::as_str).unwrap_or("conversation"))
             .await
             .map_err(provider_error)?,
     ))
@@ -1818,4 +1826,18 @@ pub fn daemon_build() -> Option<u64> {
     option_env!("NEURA_BUILD_NUMBER")
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
+}
+
+#[cfg(test)]
+mod supervision_error_tests {
+    use super::*;
+    #[test]
+    fn terminal_id_guidance_survives_api_error_mapping() {
+        let error = provider_error(json!({"error":"task_id_required","terminalId":"terminal","taskIds":["task"],"recovery":"Use taskId, not terminalId"}).to_string());
+        assert_eq!(error.error, "task_id_required");
+        assert_eq!(error.field.as_deref(), Some("taskId"));
+        assert!(error.message.contains("Use taskId"));
+        assert!(error.message.contains("taskIds"));
+        assert!(provider_error("provider_probe_timeout".into()).message.contains("8 seconds"));
+    }
 }

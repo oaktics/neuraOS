@@ -1,3 +1,4 @@
+import {appInfoPlist} from './app-info.mjs';
 import {bundleRustLicenses} from './release/rust-licenses.mjs';
 import {buildNativeCore} from './build-core.mjs';
 import {packageNativeRuntime} from './release/native-runtime.mjs';
@@ -17,7 +18,6 @@ const version=JSON.parse(await readFile(join(root,'package.json'),'utf8')).versi
 const build=process.env.NEURA_BUILD_NUMBER??'0';
 if(!/^\d+$/.test(build))throw new Error('Invalid build number');
 const sparkleKeys=sparkleInfoKeys();
-const escape=value=>value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 // Only reuse Swift products explicitly prepared in this job; copy/sign steps still validate them.
 if(process.env.NEURA_SKIP_SWIFT_BUILD!=='1')execFileSync('swift',['build','--package-path',native,'-c','release','--force-resolved-versions',...(process.env.NEURA_SWIFT_BUILD_SYSTEM?['--build-system',process.env.NEURA_SWIFT_BUILD_SYSTEM]:[])],{stdio:'inherit'});
 await mkdir(join(output,'Contents/MacOS'),{recursive:true});
@@ -51,8 +51,8 @@ for(const [name,source] of [
 await bundleRustLicenses(root,output);
 await packageNativeRuntime(output,join(root,'crates/native-core/target/release/neura-native-core'),join(native,'.build/release/NeuraUpdater'));
 const bundleId=process.env.NEURA_APP_ID??'app.neuraos.native';
-const extra=(process.env.NEURA_DEV_DATA_DIR?`<key>NeuraDataDirectory</key><string>${escape(process.env.NEURA_DEV_DATA_DIR)}</string>`:'')+(process.env.NEURA_DEV_PORT?`<key>NeuraEndpoint</key><string>http://127.0.0.1:${Number(process.env.NEURA_DEV_PORT)}</string>`:'');
-await writeFile(join(output,'Contents/Info.plist'),`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleExecutable</key><string>NeuraOS</string><key>CFBundleIdentifier</key><string>${escape(bundleId)}</string><key>CFBundleName</key><string>neuraOS</string><key>CFBundleDisplayName</key><string>neuraOS</string><key>CFBundleIconFile</key><string>AppIcon</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${escape(version)}</string><key>CFBundleVersion</key><string>${build}</string><key>LSMinimumSystemVersion</key><string>14.0</string><key>NSHighResolutionCapable</key><true/><key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Web site URL</string><key>CFBundleTypeRole</key><string>Viewer</string><key>CFBundleURLSchemes</key><array><string>http</string><string>https</string></array></dict></array><key>NSBluetoothAlwaysUsageDescription</key><string>neuraOS uses Bluetooth when websites use nearby devices for sign-in, such as passkeys on your phone.</string><key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/><key>NSAllowsArbitraryLoadsInWebContent</key><true/></dict>${extra}${sparkleKeys}</dict></plist>`);
+await writeFile(join(output,'Contents/Info.plist'), appInfoPlist({bundleId, version, build,
+ dataDirectory: process.env.NEURA_DEV_DATA_DIR, port: process.env.NEURA_DEV_PORT, sparkleKeys}));
 await bundleChromium(output,bundleId);
 await bundleSparkle(output,native);
 signApplication(output, signingIdentity);

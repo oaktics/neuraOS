@@ -206,6 +206,8 @@ impl Client {
         Ok(result)
     }
     async fn startup(&self, mut terminal: Value) -> Value {
+        terminal["terminalId"] = terminal["id"].clone();
+        terminal["taskId"] = terminal["agentId"].clone();
         if terminal["provider"] != "claude" {
             return terminal;
         }
@@ -231,10 +233,12 @@ impl Client {
         }
         terminal["registrationPending"] = json!(channel != "connected");
         terminal["channelState"] = json!(channel);
-        if channel == "connected" {
-            terminal["agentId"] = agent.unwrap()["id"].clone();
-        } else {
-            terminal["recovery"]=json!("Claude has started but Channels receipt is not confirmed. Inspect this terminal and its standard Channels confirmation, MCP connection and account/organization policy. Check task_list for this terminalId; do not create another worker or claim delivery.");
+        if let Some(agent) = &agent {
+            terminal["taskId"] = agent["id"].clone();
+            terminal["agentId"] = agent["id"].clone();
+        }
+        if channel != "connected" {
+            terminal["recovery"]=json!("Claude has started but Channels receipt is not confirmed. Inspect this terminal and its standard Channels confirmation, MCP connection and account/organization policy. Check task_list for this terminalId; confirm the Channels startup prompt in that terminal. If unavailable, cancel the queued instruction with task_instruction before explicitly retrying another provider; never claim delivery or auto-switch providers.");
         }
         terminal
     }
@@ -342,8 +346,10 @@ impl Client {
                     .endpoint
                     .join(&format!("/v1/agents/{}", string(&a, "taskId")?))
                     .map_err(|e| e.to_string())?;
-                if let Some(cursor) = a["cursor"].as_str() {
-                    url.query_pairs_mut().append_pair("cursor", cursor);
+                for key in ["cursor", "mode"] {
+                    if let Some(value) = a[key].as_str() {
+                        url.query_pairs_mut().append_pair(key, value);
+                    }
                 }
                 self.request(
                     &format!(
@@ -387,12 +393,12 @@ impl Client {
                     }
                     if workspace["setup"]["status"] == "running" {
                         return Ok(
-                            json!({"workspace":workspace,"setupPending":true,"recovery":"Inspect workspace_list and retry the same operationId after setup completes."}),
+                            json!({"workspace":workspace,"taskId":null,"terminalId":null,"setupPending":true,"recovery":"Inspect workspace_list and retry the same operationId after setup completes."}),
                         );
                     }
                     if workspace["setup"]["status"] == "failed" {
                         return Ok(
-                            json!({"workspace":workspace,"startupError":workspace["setup"]["error"],"recovery":"Inspect setup, retry setup in the app, then retry the same operationId."}),
+                            json!({"workspace":workspace,"taskId":null,"terminalId":null,"startupError":workspace["setup"]["error"],"recovery":"Inspect setup, retry setup in the app, then retry the same operationId."}),
                         );
                     }
                 }
@@ -406,9 +412,12 @@ impl Client {
                 }
                 .await;
                 Ok(match result {
-                    Ok(t) => json!({"workspace":workspace,"terminal":self.startup(t).await}),
+                    Ok(t) => {
+                        let terminal = self.startup(t).await;
+                        json!({"workspace":workspace,"taskId":terminal["taskId"],"terminalId":terminal["terminalId"],"terminal":terminal})
+                    }
                     Err(e) => {
-                        json!({"workspace":workspace,"startupError":e,"recovery":"Worktree remains. Inspect task_list before retrying task_start."})
+                        json!({"workspace":workspace,"taskId":null,"terminalId":null,"startupError":e,"recovery":"Worktree remains. Inspect task_list before retrying task_start."})
                     }
                 })
             }

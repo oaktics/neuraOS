@@ -2,6 +2,7 @@
 #import "BrowserExtensionActions.h"
 #import <AppKit/AppKit.h>
 NS_ASSUME_NONNULL_BEGIN
+FOUNDATION_EXPORT NSString *NCChromiumInvalidationReason(BOOL closeRequested, BOOL cefReadyToClose);
 // Called before SwiftUI creates NSApplication. No Chromium work happens in tests.
 FOUNDATION_EXPORT void NCPrepareApplication(void);
 FOUNDATION_EXPORT NSString * _Nullable NCInitializeChromium(void);
