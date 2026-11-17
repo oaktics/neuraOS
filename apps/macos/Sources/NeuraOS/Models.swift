@@ -345,6 +345,7 @@ final class DaemonClient {
             if change.type == "ready" || change.state == true {self.statePulse.signal()}
         }
         agentSleep.requestRefresh = { [weak self] in self?.statePulse.signal() }
+        agentSleep.startHistory(api: api)
         agentSleep.startAtLaunch()
         polling = Task { [weak self] in
             guard let self else {return}
@@ -376,6 +377,7 @@ final class DaemonClient {
             let delivered = await agentNotifications?.receive(next, api: api) ?? true
             notificationRetry.update(failed: !delivered) { [weak self] in self?.statePulse.signal() }
         } catch {updateConnection(false)}
+        agentSleep.updateHistory(workspaces: state.workspaces, connected: connected)
         agentSleep.update(terminals: state.terminals, connected: connected)
     }
     // Transport polling must not invalidate views when the UI state is unchanged.
@@ -405,6 +407,8 @@ final class DaemonClient {
         guard connected != value else {return}
         Diagnostics.shared.record(value ? "daemon.connected" : "daemon.disconnected")
         connected = value
+        agentSleep.updateHistory(workspaces: state.workspaces, connected: value)
+        agentSleep.update(terminals: state.terminals, connected: value)
         if value {scheduleDeletionRecovery(onlyAbsent: false)}
         else {deletionRecoveryAttempted.removeAll()}
     }

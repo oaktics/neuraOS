@@ -1039,3 +1039,6 @@ fn background_count_ignores_finished_remote_and_recurring_work() {
         Some(3)
     );
 }
+
+#[path = "sleep_event_tests.rs"]
+mod sleep_event_tests;

@@ -31,8 +31,8 @@ pub fn channel() -> (EventSender, EventReceiver) {
         },
     )
 }
-/// Ignore token deltas, tool output and usage: only durable lifecycle, title and
-/// structured requests affect supervision. Bound copied summary text explicitly.
+/// Ignore token deltas, tool output and usage: only lifecycle, title, error
+/// metadata and structured requests affect supervision. Bound summary text.
 pub fn supervision_event(mut value: Value) -> Option<Value> {
     let method = value["method"].as_str()?.to_string();
     if value.get("id").is_none()
@@ -46,9 +46,15 @@ pub fn supervision_event(mut value: Value) -> Option<Value> {
                 | "thread/status/changed"
                 | "item/completed"
                 | "neura/disconnected"
+                | "error"
         )
     {
         return None;
+    }
+    if method == "error" && value.get("id").is_none() {
+        // History consumes only thread/turn identity and willRetry. Do not let
+        // a large or sensitive provider error body exhaust lifecycle credits.
+        value["params"].as_object_mut()?.remove("error");
     }
     if method == "item/completed" {
         if value["params"]["item"]["type"] != "agentMessage" {

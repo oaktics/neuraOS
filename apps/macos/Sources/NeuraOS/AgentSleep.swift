@@ -33,11 +33,13 @@ enum AgentSleepPolicy {
 }
 
 enum LidState {
-    static var closed: Bool? {
+    static var closed: Bool? {property("AppleClamshellState")}
+    static var sleepDisabled: Bool? {property("SleepDisabled")}
+    private static func property(_ key: String) -> Bool? {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
         guard service != 0 else {return nil}
         defer {IOObjectRelease(service)}
-        return IORegistryEntryCreateCFProperty(service, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
+        return IORegistryEntryCreateCFProperty(service, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool
     }
 }
 
@@ -62,6 +64,17 @@ enum ScreenLock {
 }
 
 @MainActor final class AgentSleepController: ObservableObject {
+    @Published private(set) var footerState = SleepFooterState(kind: .checking, reason: "OS 状態を確認しています")
+    @Published private(set) var wantedSetting = AgentSleepController.wanted()
+    @Published private(set) var history: SleepHistoryStore?
+    private var historyMonitor: SleepHistoryMonitor?
+    private var lastSuppression: Bool?
+    private var suppressionObserved = false
+    private var suppressionSince: Date?
+    private var previousFooterKind: SleepFooterState.Kind?
+    /// Isolated validation builds can observe but must never contact the shared
+    /// privileged helper (whose Mach service and registration are machine-wide).
+    var isolated: Bool {Bundle.main.bundleIdentifier == "com.neuraos.sleep-history-test"}
     @Published private(set) var enabled = false
     @Published private(set) var starting = false
     @Published private(set) var stopping = false
@@ -105,8 +118,21 @@ enum ScreenLock {
             MainActor.assumeIsolated {self?.refreshApproval(); self?.startIfWanted()}
         }
         observer = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {self?.disable()}
+            MainActor.assumeIsolated {self?.disable(); self?.historyMonitor?.stop()}
         }
+    }
+    func startHistory(api: DaemonClient) {
+        guard history == nil else {return}
+        let store = SleepHistoryStore(file: api.dataDirectory.appendingPathComponent("sleep-history/events.json"))
+        history = store
+        let monitor = SleepHistoryMonitor(store: store)
+        historyMonitor = monitor
+        monitor.sample = { [weak self] in self?.sampleStatus() }
+        monitor.start(api: api)
+    }
+    func updateHistory(workspaces: [Workspace], connected: Bool) {
+        historyMonitor?.projects = Dictionary(uniqueKeysWithValues: workspaces.map {($0.id, $0.projectId)})
+        historyMonitor?.daemon(connected: connected)
     }
     func update(terminals: [TerminalRecord], connected: Bool) {
         let decision = AgentSleepPolicy.decision(terminals, connected: connected)
@@ -115,16 +141,20 @@ enum ScreenLock {
         else if backgroundSince == nil {backgroundSince = ProcessInfo.processInfo.systemUptime}
         lastSnapshot = Date()
         heartbeat()
+        sampleStatus()
     }
     func setWanted(_ value: Bool) {
+        guard !isolated else {return}
+        wantedSetting = value
         UserDefaults.standard.set(value, forKey: Self.preferenceKey)
         launchStartPending = false
-        if value {enable()} else {disable()}
+        if value {enable()} else {startFailed = false; disable()}
+        sampleStatus()
     }
     /// Called once at app launch. Starting must never raise a macOS approval
     /// prompt by itself, so an unapproved service waits until the user returns
     /// from System Settings. After the first attempt, only the user restarts it.
-    func startAtLaunch() {launchStartPending = true; startIfWanted()}
+    func startAtLaunch() {guard !isolated else {return}; launchStartPending = true; startIfWanted()}
     private func startIfWanted() {
         guard launchStartPending, Self.wanted(), !enabled, !runnerActive, service.status == .enabled else {return}
         launchStartPending = false
@@ -151,10 +181,10 @@ enum ScreenLock {
             status = "許可済みです。スリープ制御を有効にできます。"
         }
     }
-    func openApprovalSettings() {SMAppService.openSystemSettingsLoginItems()}
+    func openApprovalSettings() {guard !isolated else {return}; SMAppService.openSystemSettingsLoginItems()}
 
     func repairRegistration() {
-        guard !enabled, !runnerActive, !repairing else {return}
+        guard !isolated, !enabled, !runnerActive, !repairing else {return}
         startFailed = false
         repairing = true
         status = "スリープ制御サービスの登録を修復しています…"
@@ -184,7 +214,7 @@ enum ScreenLock {
     }
 
     func enable() {
-        guard !enabled, !runnerActive, !repairing else {return}
+        guard !isolated, !enabled, !runnerActive, !repairing else {return}
         startFailed = false
         do {
             // Register only once. Turning sleep control off does not revoke the
@@ -249,7 +279,7 @@ enum ScreenLock {
     }
     private func finish(id: UUID, message: String) {
         guard sessionID == id else {return}
-        startFailed = starting && enabled && !message.isEmpty
+        startFailed = !message.isEmpty
         sessionID = nil
         starting = false; runnerActive = false
         disable()
@@ -267,13 +297,55 @@ enum ScreenLock {
         let closed = LidState.closed
         if state == "work", closed == true, lidClosed == false, ScreenLock.enabled {ScreenLock.lock()}
         lidClosed = closed
+        sampleStatus()
+    }
+    private func sampleStatus() {
+        let now = Date()
         let file = URL(fileURLWithPath: SleepService.stateDirectory).appendingPathComponent("status")
-        if let text = try? String(contentsOf: file, encoding: .utf8), text.hasPrefix(token + "\n") {
+        var helper: String?
+        // Helper rewrites once a second. A matching token alone can outlive it.
+        if enabled, !token.isEmpty,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+           let modified = attrs[.modificationDate] as? Date,
+           (0...4).contains(now.timeIntervalSince(modified)),
+           (attrs[.size] as? NSNumber)?.intValue ?? 4096 < 4096,
+           let text = try? String(contentsOf: file, encoding: .utf8), text.hasPrefix(token + "\n") {
+            helper = String(text.dropFirst(token.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
             starting = false
-            status = String(text.dropFirst(token.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
-            if state == "work", !working, status.hasPrefix("作業中") {
-                status = "バックグラウンド処理中：蓋を閉じても継続します（最長2時間）"
+            status = helper!
+        }
+        let suppressed = LidState.sleepDisabled
+        let fresh = (0..<Self.freshness).contains(now.timeIntervalSince(lastSnapshot))
+        footerState = .derive(starting: starting || repairing, stopping: stopping, permission: approvalRequired,
+                              failed: startFailed, enabled: enabled, freshWork: fresh && (working || backgroundSince != nil),
+                              helper: helper, sleepDisabled: suppressed, lidAvailable: LidState.closed != nil)
+        if previousFooterKind != footerState.kind {
+            let event: (SleepHistoryEvent.Kind, SleepHistoryEvent.Reason)?
+            switch footerState.kind {
+            case .releaseGrace: event = (.suppressionGrace, .completionGrace)
+            case .connectionGrace: event = (.suppressionGrace, .connectionGrace)
+            case .failed: event = (.controlFailed, .causeUnknown)
+            case .unknown: event = (.suppressionUnknown, suppressed == true && !enabled ? .externalSuppression : .stale)
+            default: event = nil
             }
+            if let event {history?.append(.init(date: now, kind: event.0, source: .observation, reason: event.1))}
+            previousFooterKind = footerState.kind
+        }
+        if !suppressionObserved || suppressed != lastSuppression {
+            let reason: SleepHistoryEvent.Reason
+            if !suppressionObserved {reason = .initial}
+            else if suppressed == nil {reason = .unavailable}
+            else if suppressed == false {
+                // This is observed policy context, never proof of why macOS changed.
+                reason = .normalSleep
+            }
+            else if footerState.kind == .continues {reason = .work}
+            else if footerState.kind == .releaseGrace {reason = .completionGrace}
+            else if footerState.kind == .connectionGrace {reason = .connectionGrace}
+            else {reason = .externalSuppression}
+            history?.append(.init(date: now, kind: suppressed.map {$0 ? .suppressionStarted : .suppressionStopped} ?? .suppressionUnknown,
+                                  source: .os, reason: reason, since: suppressionSince))
+            lastSuppression = suppressed; suppressionSince = now; suppressionObserved = true
         }
     }
     nonisolated static func leaseValue(token: String, state: String,
@@ -284,37 +356,21 @@ enum ScreenLock {
 
 struct AgentSleepFooter: View {
     @ObservedObject var controller: AgentSleepController
-
-    private var label: String {
-        if controller.repairing {return "修復中…"}
-        if controller.stopping {return "解除中…"}
-        if controller.starting {return "開始中…"}
-        if controller.approvalRequired {return "許可が必要"}
-        if controller.startFailed {return "開始失敗"}
-        return controller.enabled ? "有効" : "無効"
-    }
-
-    private var actionHint: String {
-        if controller.enabled {return "クリックしてスリープ制限を無効にします"}
-        if controller.approvalRequired {return "クリックしてシステム設定で許可します"}
-        return "クリックしてスリープ制限を有効にします"
-    }
-
+    @State private var showingHistory = false
+    @State private var selectedEvent: SleepHistoryEvent?
     var body: some View {
-        Button {
-            if controller.enabled {controller.setWanted(false)}
-            else if controller.approvalRequired {controller.openApprovalSettings()}
-            else {controller.setWanted(true)}
-        } label: {
-            Label("スリープ制限：\(label)", systemImage: controller.enabled ? "moon.slash.fill" : "moon")
-        }
-        .buttonStyle(.plain)
-        .disabled(controller.starting || controller.stopping || controller.repairing)
-        .foregroundStyle(controller.enabled ? Color.accentColor : Color.secondary)
-        .help("スリープ制限：\(label)\n\(controller.status)\n\(actionHint)")
-        .accessibilityLabel("スリープ制限：\(label)")
-        .accessibilityValue(controller.status)
-        .accessibilityHint(actionHint)
+        Button {showingHistory.toggle()} label: {SleepStatusPill(state: controller.footerState)}
+            .buttonStyle(SleepPillButtonStyle())
+            .help("スリープ状態の詳細と履歴を開く")
+            .accessibilityHint("詳細と履歴を開きます。設定は変更しません")
+            .sheet(item: $selectedEvent) {event in SleepHistoryConversation(event: event)}
+            .popover(isPresented: $showingHistory, arrowEdge: .top) {
+                if let history = controller.history {
+                    SleepHistoryPopover(controller: controller, history: history) {event in
+                        showingHistory = false; selectedEvent = event
+                    }
+                } else {Text("履歴の観測はまだ開始されていません").padding()}
+            }
     }
 }
 

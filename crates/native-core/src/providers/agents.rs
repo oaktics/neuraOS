@@ -57,6 +57,15 @@ impl Message {
             .push(json!({"state":state,"at":stamp(),"actorTaskId":actor}));
     }
 }
+/// Last provider error metadata only: no error strings or conversation data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeIssue {
+    pub id: String,
+    pub at: String,
+    pub will_retry: bool,
+    pub turn_id: Option<String>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
@@ -80,6 +89,8 @@ pub struct Agent {
     pub last_turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_issue: Option<RuntimeIssue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1072,7 +1083,7 @@ impl Agents {
                 return Err("agent_already_running".into());
             }
         }
-        s.codex.insert(terminal.into());
+        set_codex(&mut s, terminal, true);
         let mut a = s
             .agents
             .get(task)
@@ -1165,6 +1176,12 @@ impl Agents {
                 continue;
             }
             match method {
+                "error" => {
+                    a.runtime_issue = Some(RuntimeIssue {
+                        id: id(), at: stamp(), will_retry: p["willRetry"] == true,
+                        turn_id: p["turnId"].as_str().map(String::from),
+                    });
+                }
                 "turn/started" => {
                     a.status = "working".into();
                     a.turn_id = p["turn"]["id"].as_str().map(String::from);
@@ -1230,7 +1247,7 @@ impl Agents {
             self.save(&mut s, a).await?;
         }
         if method == "neura/disconnected" {
-            s.codex.remove(terminal);
+            set_codex(&mut s, terminal, false);
         }
         if completed {
             self.deliver(&mut s).await?;
@@ -1395,7 +1412,7 @@ impl Agents {
     pub async fn close(&self, terminal: &str) -> Result<()> {
         let mut s = self.state.lock().await;
         set_claude(&mut s, terminal, None);
-        s.codex.remove(terminal);
+        set_codex(&mut s, terminal, false);
         let rows: Vec<_> = s
             .agents
             .values()
@@ -1514,6 +1531,7 @@ fn fresh(session: &str, terminal: &str, workspace: &Value, provider: &str) -> Ag
         turn_id: None,
         last_turn_id: None,
         last_turn_status: None,
+        runtime_issue: None,
         summary: None,
         parent_task_id: None,
         pending: vec![],
@@ -1696,6 +1714,27 @@ fn set_claude(s: &mut Registry, terminal: &str, next: Option<ClaudeLive>) {
         s.claude.insert(terminal.into(), live);
     } else {
         s.claude.remove(terminal);
+    }
+}
+
+// providerConnection is live metadata in summary listings. Transport changes
+// must invalidate filtered deltas even if the persisted status is unchanged.
+fn set_codex(s: &mut Registry, terminal: &str, connected: bool) {
+    let modified = if connected {
+        s.codex.insert(terminal.into())
+    } else {
+        s.codex.remove(terminal)
+    };
+    if modified {
+        let affected: Vec<_> = s
+            .agents
+            .values()
+            .filter(|a| a.terminal_id == terminal)
+            .map(|a| (a.id.clone(), a.workspace_id.clone()))
+            .collect();
+        for (key, workspace) in affected {
+            changed(s, &key, &workspace, terminal);
+        }
     }
 }
 
