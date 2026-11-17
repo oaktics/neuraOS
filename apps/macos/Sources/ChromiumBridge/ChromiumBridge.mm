@@ -97,6 +97,7 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 @property(nonatomic, readwrite) BOOL openedInBackground;
 - (void)emitState;
 - (void)failDevTools:(NSString *)reason;
+- (void)invalidateAutomation:(cef_browser_t *)browser;
 - (void)createBrowser;
 @end
 
@@ -328,8 +329,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         h->api.on_render_process_terminated = [](cef_request_handler_t *s, cef_browser_t *browser, cef_termination_status_t, int, const cef_string_t *) {
             CallbackRef browserRef(browser);
             NCChromiumView *v = View(s);
-            [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
-            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");
+            [v invalidateAutomation:browser];
             if (v.onError && !v->_closed) v.onError(@"ページの表示プロセスが終了しました。再読み込みしてください。");
         };
         // Cmd-click and middle-click ask for another tab without creating a popup.
@@ -415,6 +415,8 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         h->api.do_close = [](cef_life_span_handler_t *s, cef_browser_t *browser) -> int {
             CallbackRef browserRef(browser);
             NCChromiumView *v = View(s);
+            if (v) v->_closed = YES;
+            [v invalidateAutomation:browser];
             dispatch_async(dispatch_get_main_queue(), ^{
                 @autoreleasepool {
                     [v setHidden:YES];
@@ -427,7 +429,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         h->api.on_before_close = [](cef_life_span_handler_t *s, cef_browser_t *browser) {
             NCChromiumView *v = View(s);
             CloseDownloads(browser->get_identifier(browser));
-            if (v) {[v failDevTools:@"browser_tab_closed"]; Release(v->_devRegistration); v->_devRegistration = nullptr; v->_devOutstanding.clear(); v->_browser = nullptr; if (!shuttingDown && v.onClosed) v.onClosed();}
+            if (v) {v->_closed = YES; [v failDevTools:@"browser_tab_closed"]; Release(v->_devRegistration); v->_devRegistration = nullptr; v->_devOutstanding.clear(); v->_browser = nullptr; if (!shuttingDown && v.onClosed) v.onClosed();}
             auto found = browsers.find(browser->get_identifier(browser));
             if (found != browsers.end()) {Release(found->second); browsers.erase(found);}
             Release(browser); CompleteShutdown();
@@ -477,6 +479,18 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     if (_browser) {auto frame = _browser->get_main_frame(_browser); if (frame) {NCString value(url); frame->load_url(frame, &value.value); Release(frame);}}
     else if (self.window) [self createBrowser];
 }
+// CEF marks mandatory page window.close() before do_close/on_before_close.
+// Consult that state at the boundary where pending CDP calls are failed.
+- (void)invalidateAutomation:(cef_browser_t *)browser {
+    BOOL ready = NO;
+    if (browser) {
+        auto host = browser->get_host(browser);
+        if (host) { ready = host->is_ready_to_be_closed(host); Release(host); }
+    }
+    NSString *reason = NCChromiumInvalidationReason(_closed, ready);
+    [self failDevTools:reason]; _devOutstanding.clear();
+    if (self.onAutomationInvalidated) self.onAutomationInvalidated(reason);
+}
 - (void)cancelDevTools {[self failDevTools:@"browser_cancelled"];}
 - (void)failDevTools:(NSString *)reason {
     NSDictionary *callbacks = [_devCallbacks copy]; [_devCallbacks removeAllObjects];
@@ -499,8 +513,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             [v->_devCallbacks removeObjectForKey:@(messageId)];
             if (callback) callback(success ? ([[NSString alloc] initWithBytes:result length:size encoding:NSUTF8StringEncoding] ?: @"{}") : nil, success ? nil : @"browser_protocol_error");
         };
-        observer->api.on_dev_tools_agent_detached = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser) {CallbackRef ref(browser); NCChromiumView *v = View(s); [v failDevTools:@"browser_renderer_crashed"]; if (v) v->_devOutstanding.clear();
-            if (v.onAutomationInvalidated) v.onAutomationInvalidated(@"browser_renderer_crashed");};
+        observer->api.on_dev_tools_agent_detached = [](cef_dev_tools_message_observer_t *s, cef_browser_t *browser) {CallbackRef ref(browser); NCChromiumView *v = View(s); [v invalidateAutomation:browser];};
         // CEF consumes the observer reference across its C API boundary.
         _devRegistration = host->add_dev_tools_message_observer(host, &observer->api);
     }
@@ -554,7 +567,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 }
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
-    if (_closed) return; _closed = YES; [self cancelDevTools];
+    if (_closed && !_browser) return; _closed = YES; [self failDevTools:@"browser_tab_closed"];
     if (_browser) CloseDownloads(_browser->get_identifier(_browser));
     // The view may deallocate before on_before_close (handlers hold it weakly).
     // Release our registration here; the later callback safely sees nullptr.
@@ -657,3 +670,7 @@ int NCRunChromiumSmoke(NSString *url, NSString *dataDirectory) {
 #include "BrowserDownloadRegression.inc"
 
 #include "BrowserExtensionsSmoke.inc"
+
+NSString *NCChromiumInvalidationReason(BOOL closeRequested, BOOL cefReadyToClose) {
+    return closeRequested || cefReadyToClose ? @"browser_tab_closed" : @"browser_renderer_crashed";
+}

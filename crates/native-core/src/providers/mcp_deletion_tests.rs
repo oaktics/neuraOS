@@ -38,6 +38,10 @@ async fn fixture(status: &str) -> (Client, Arc<StdMutex<Fixture>>, tokio::task::
         commands: vec![],
     }));
     let app = Router::new()
+        .route("/v1/agents", get(|State(state): State<Arc<StdMutex<Fixture>>>| async move {
+            let state = state.lock().unwrap();
+            Json(if state.present { json!({"currentSessionIds":{"terminal-id":JOB},"agents":[{"id":JOB,"terminalId":"terminal-id","channelState":if state.complete_on_read {"connected"} else {"pending"}}]}) } else {json!({"currentSessionIds":{},"agents":[]})})
+        }))
         .route("/v1/state", get(|State(state): State<Arc<StdMutex<Fixture>>>| async move {
             let stall = state.lock().unwrap().stall_state;
             if stall { std::future::pending::<()>().await; }
@@ -367,5 +371,39 @@ async fn old_daemon_keeps_legacy_command_and_absence_verification() {
         state.lock().unwrap().commands[0]["command"]["discardChanges"],
         false
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn startup_ids_are_explicit_even_before_channel_registration() {
+    let (client, state, server) = fixture("queued").await;
+    let codex = client
+        .startup(json!({"id":"terminal-id","agentId":"task-id","provider":"codex"}))
+        .await;
+    assert_eq!(codex["id"], "terminal-id");
+    assert_eq!(codex["terminalId"], "terminal-id");
+    assert_eq!(codex["taskId"], "task-id");
+    let pending = client
+        .startup(json!({"id":"terminal-id","provider":"claude"}))
+        .await;
+    assert_eq!(pending["terminalId"], "terminal-id");
+    assert_eq!(pending["taskId"], JOB);
+    assert_eq!(pending["registrationPending"], true);
+    assert!(pending["recovery"]
+        .as_str()
+        .unwrap()
+        .contains("Channels startup"));
+    state.lock().unwrap().complete_on_read = true;
+    let connected = client
+        .startup(json!({"id":"terminal-id","provider":"claude"}))
+        .await;
+    assert_eq!(connected["taskId"], JOB);
+    assert_eq!(connected["registrationPending"], false);
+    state.lock().unwrap().present = false;
+    let unregistered = client
+        .startup(json!({"id":"terminal-id","provider":"claude"}))
+        .await;
+    assert!(unregistered["taskId"].is_null());
+    assert_eq!(unregistered["terminalId"], "terminal-id");
     server.abort();
 }
