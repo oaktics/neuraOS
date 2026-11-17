@@ -94,6 +94,54 @@ final class SleepHistoryTests: XCTestCase {
         XCTAssertFalse(try String(contentsOf: file).contains("SECRET"))
         XCTAssertTrue(tracker.observe([agent], projects: [:], now: at).isEmpty)
     }
+    private func snapshot(_ status: String, turn: String? = nil, lastTurn: String? = nil,
+                          outcome: String? = nil) -> SleepAgentState {
+        SleepAgentState(id: "session", terminalId: "terminal", workspaceId: "workspace",
+                        status: status, channelState: nil, turnId: turn,
+                        lastTurnId: lastTurn, lastTurnStatus: outcome)
+    }
+
+    func testCompletedTurnBeforeTerminalClosureIsNotAnInterruption() {
+        for status in ["working", "waiting"] {
+            var tracker = SleepAgentTracker()
+            let now = Date()
+            _ = tracker.observe([snapshot(status, turn: "turn1")], projects: [:], now: now)
+            let events = tracker.observe(
+                [snapshot("interrupted", lastTurn: "turn1", outcome: "completed")],
+                projects: ["workspace": "project"], now: now.addingTimeInterval(2))
+            XCTAssertEqual(events.map(\.kind), [.agentCompleted], status)
+            XCTAssertEqual(events.first?.turnID, "turn1")
+            XCTAssertEqual(events.first?.projectID, "project")
+            XCTAssertTrue(tracker.observe([snapshot("working", turn: "turn2")],
+                                          projects: [:], now: now).isEmpty)
+            XCTAssertEqual(tracker.observe([snapshot("idle", lastTurn: "turn2", outcome: "completed")],
+                                           projects: [:], now: now).map(\.kind), [.agentCompleted])
+        }
+    }
+
+    func testStaleCompletedMetadataDoesNotHideInterruptedActiveTurn() {
+        for turn in [nil, "turn2"] as [String?] {
+            var tracker = SleepAgentTracker()
+            let now = Date()
+            _ = tracker.observe([snapshot("working", turn: turn)], projects: [:], now: now)
+            let events = tracker.observe(
+                [snapshot("interrupted", lastTurn: turn == nil ? nil : "turn1", outcome: "completed")],
+                projects: [:], now: now)
+            XCTAssertEqual(events.map(\.kind), [.agentInterrupted])
+        }
+    }
+
+    func testRestartRestorationOfCompletedSessionDoesNotInventInterruptionOrRecovery() {
+        var tracker = SleepAgentTracker()
+        let now = Date()
+        let restored = snapshot("interrupted", lastTurn: "turn1", outcome: "completed")
+        XCTAssertEqual(tracker.observe([restored], projects: [:], now: now).map(\.kind), [.agentUnknown])
+        XCTAssertTrue(tracker.observe([restored], projects: [:], now: now).isEmpty)
+        XCTAssertTrue(tracker.observe([snapshot("working", turn: "turn2")], projects: [:], now: now).isEmpty)
+        XCTAssertEqual(tracker.observe([snapshot("idle", lastTurn: "turn2", outcome: "completed")],
+                                       projects: [:], now: now).map(\.kind), [.agentCompleted])
+    }
+
     func testAgentFailuresRetriesAndRecoveryDoNotConfuseWaitingWithFailure() throws {
         func agent(_ status: String, turn: String? = nil, last: String? = nil, channel: String? = "connected") throws -> SleepAgentState {
             let value: [String: Any] = ["id":"session", "terminalId":"terminal", "workspaceId":"workspace", "status":status,

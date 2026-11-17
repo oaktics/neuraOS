@@ -211,7 +211,13 @@ struct SleepAgentTracker {
                 case "interrupted":
                     // Registry restart and terminal closure also use interrupted;
                     // a completed turn is not retroactively a failed execution.
-                    if agent.lastTurnStatus == "interrupted" || old?.status == "working" || old?.status == "waiting" {
+                    if let observedTurn = old?.turnId, observedTurn == agent.lastTurnId,
+                       agent.lastTurnStatus == "completed" {
+                        // Completion and terminal closure can both happen between polls.
+                        // Only the observed turn's outcome overrides the session status.
+                        event(troubled.contains(agent.id) ? .agentRecovered : .agentCompleted, since: statusSince[agent.id])
+                        troubled.remove(agent.id)
+                    } else if agent.lastTurnStatus == "interrupted" || old?.status == "working" || old?.status == "waiting" {
                         event(.agentInterrupted, since: statusSince[agent.id]); troubled.insert(agent.id)
                     } else {event(.agentUnknown, .causeUnknown)}
                 case "waiting": event(.agentWaiting, since: statusSince[agent.id])
