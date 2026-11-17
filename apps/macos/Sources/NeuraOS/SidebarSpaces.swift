@@ -74,7 +74,7 @@ struct SidebarSpaces: Codable {
 }
 
 private extension UTType {
-    static let sidebarSpace = UTType(exportedAs: "com.neuraos.sidebar-space")
+    static let sidebarSpace = UTType(exportedAs: "com.neuraos.sidebar-space", conformingTo: .data)
 }
 
 struct SidebarSpaceDrag: Codable, Transferable {
@@ -312,7 +312,8 @@ struct NewSidebarSpaceSheet: View {
 
 /// Private drag payload keeps project ordering separate from file and text drops.
 struct SidebarProjectDrag: Codable {
-    static let typeIdentifier = "com.neuraos.sidebar-project"
+    static let contentType = UTType(exportedAs: "com.neuraos.sidebar-project", conformingTo: .data)
+    static let typeIdentifier = contentType.identifier
     let projectId: String
     let spaceId: String
 
@@ -327,19 +328,151 @@ struct SidebarProjectDrag: Codable {
     }
 }
 
-/// Ordinary list rows accept drops; section headers are reserved by macOS for disclosure.
+/// A boundary is always identified by the following project; nil is the end.
+struct SidebarProjectBoundary: Equatable {
+    let spaceId: String
+    let beforeProjectId: String?
+}
+
+/// One shared selection prevents competing row indicators. An old target's
+/// delayed exit must not clear a newer target, even at the same boundary.
+struct SidebarProjectDropSelection {
+    private(set) var owner: UUID?
+    private(set) var boundary: SidebarProjectBoundary?
+    mutating func select(_ boundary: SidebarProjectBoundary, owner: UUID) {
+        self.owner = owner
+        self.boundary = boundary
+    }
+    mutating func clear(owner: UUID) {
+        guard self.owner == owner else {return}
+        self = Self()
+    }
+}
+
 struct SidebarProjectDropTarget: ViewModifier {
-    let perform: ([NSItemProvider]) -> Bool
-    @State private var isTargeted = false
+    let before: SidebarProjectBoundary
+    let after: SidebarProjectBoundary
+    @Binding var selection: SidebarProjectDropSelection
+    let spacing: CGFloat
+    let perform: ([NSItemProvider], SidebarProjectBoundary) -> Bool
+    @State private var owner = UUID()
+    @State private var height: CGFloat = 0
+    @State private var scroller = SidebarProjectAutoScroller()
 
     func body(content: Content) -> some View {
         content
+            .contentShape(Rectangle())
+            .background(SidebarProjectScrollViewProbe(scroller: scroller))
+            .background {
+                GeometryReader {geometry in
+                    Color.clear
+                        .onAppear {height = geometry.size.height}
+                        .onChange(of: geometry.size.height) {_, value in height = value}
+                }
+            }
+            .onDrop(of: [SidebarProjectDrag.typeIdentifier], delegate:
+                ProjectDropDelegate(height: height, before: before, after: after,
+                                    owner: owner, selection: $selection, scroller: scroller, perform: perform))
+            // Only the following group draws the line. "After A" and "before B"
+            // therefore share this exact position, including the trailing zone.
             .overlay(alignment: .top) {
-                if isTargeted {
-                    Capsule().fill(Color.accentColor).frame(height: 2)
+                if selection.boundary == before {
+                    Capsule().fill(Color.accentColor).frame(height: 3)
+                        .offset(y: -(spacing + 3) / 2)
                         .allowsHitTesting(false)
                 }
             }
-            .onDrop(of: [SidebarProjectDrag.typeIdentifier], isTargeted: $isTargeted, perform: perform)
+            .onDisappear {scroller.stop(); selection.clear(owner: owner)}
     }
+}
+
+private struct ProjectDropDelegate: DropDelegate {
+    let height: CGFloat
+    let before: SidebarProjectBoundary
+    let after: SidebarProjectBoundary
+    let owner: UUID
+    @Binding var selection: SidebarProjectDropSelection
+    let scroller: SidebarProjectAutoScroller
+    let perform: ([NSItemProvider], SidebarProjectBoundary) -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [SidebarProjectDrag.typeIdentifier])
+    }
+    func dropEntered(info: DropInfo) {update(info)}
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        update(info)
+        return DropProposal(operation: .move)
+    }
+    private func boundary(_ info: DropInfo) -> SidebarProjectBoundary {
+        info.location.y >= height / 2 ? after : before
+    }
+    private func update(_ info: DropInfo) {
+        selection.select(boundary(info), owner: owner)
+        let binding = $selection
+        let owner = owner
+        scroller.start(isActive: {binding.wrappedValue.owner == owner},
+                       onEnd: {binding.wrappedValue.clear(owner: owner)})
+    }
+    func dropExited(info: DropInfo) {selection.clear(owner: owner); scroller.stop()}
+    func performDrop(info: DropInfo) -> Bool {
+        let destination = boundary(info)
+        selection.clear(owner: owner)
+        scroller.stop()
+        return perform(info.itemProviders(for: [SidebarProjectDrag.typeIdentifier]), destination)
+    }
+}
+
+/// SwiftUI ScrollView does not autoscroll for custom drop delegates. Use its
+/// enclosing native clip view, and keep ticking when the pointer is stationary.
+private final class SidebarProjectAutoScroller {
+    weak var probe: NSView?
+    private var timer: Timer?
+    private var isActive: (() -> Bool)?
+    private var onEnd: (() -> Void)?
+    func start(isActive: @escaping () -> Bool, onEnd: @escaping () -> Void) {
+        self.isActive = isActive
+        self.onEnd = onEnd
+        guard timer == nil else {return}
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.tick() }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    func stop() {timer?.invalidate(); timer = nil; isActive = nil; onEnd = nil}
+    private func tick() {
+        guard isActive?() == true else {stop(); return}
+        guard NSEvent.pressedMouseButtons & 1 != 0,
+              let scroll = probe?.enclosingScrollView, let window = scroll.window,
+              let document = scroll.documentView else {
+            let end = onEnd
+            stop()
+            end?()
+            return
+        }
+        let clip = scroll.contentView
+        let point = clip.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        let bounds = clip.bounds
+        guard point.x >= bounds.minX, point.x <= bounds.maxX else {return}
+        let margin: CGFloat = 36
+        let delta: CGFloat
+        if point.y < bounds.minY + margin {delta = -10}
+        else if point.y > bounds.maxY - margin {delta = 10}
+        else {return}
+        let y = max(0, min(document.bounds.height - bounds.height, bounds.origin.y + delta))
+        clip.scroll(to: NSPoint(x: bounds.origin.x, y: y))
+        scroll.reflectScrolledClipView(clip)
+    }
+    deinit {timer?.invalidate()}
+}
+
+private struct SidebarProjectScrollViewProbe: NSViewRepresentable {
+    let scroller: SidebarProjectAutoScroller
+    final class ProbeView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {nil}
+    }
+    func makeNSView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        scroller.probe = view
+        return view
+    }
+    func updateNSView(_ view: ProbeView, context: Context) {scroller.probe = view}
 }
