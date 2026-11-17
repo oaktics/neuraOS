@@ -50,7 +50,15 @@ try {
    const embedded=targets.find(t=>t.url===url);assert(embedded);
    const tab=await connect(embedded.webSocketDebuggerUrl);clients.push(tab);
    await tab.call('Page.reload');
-   const state=await until(async()=>{const r=await tab.call('Runtime.evaluate',{expression:'Number(document.body.dataset.extensionVisits)',returnByValue:true});return r.result.value>previous?r.result.value:0;});
+   // Enabled preferences can precede content-script registration after reload.
+   // Retry navigation at a bounded rate until the installed script responds.
+   let lastReload=Date.now();
+   const state=await until(async()=>{
+    const r=await tab.call('Runtime.evaluate',{expression:'Number(document.body.dataset.extensionVisits)',returnByValue:true});
+    if(r.result.value>previous)return r.result.value;
+    if(Date.now()-lastReload>2000){await tab.call('Page.reload');lastReload=Date.now();}
+    return 0;
+   });
    previous=state;console.log('Content/worker/storage passed',state);
    const host=join(data,'native-host.py');
    await writeFile(host,`#!/usr/bin/python3

@@ -30,6 +30,39 @@ final class OnePasswordRegistrationTests: XCTestCase {
         XCTAssertThrowsError(try OnePasswordIntegration.register(manifest: Data("different".utf8), profile: profile))
         XCTAssertEqual(try Data(contentsOf: file), data)
     }
+    func testRegistrationUsesUserDataDirectoryNotDefaultProfile() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let chromium = root.appendingPathComponent("Chromium")
+        let defaultProfile = chromium.appendingPathComponent("Default")
+        try fm.createDirectory(at: defaultProfile, withIntermediateDirectories: true)
+        defer {try? fm.removeItem(at: root)}
+        try OnePasswordIntegration.register(manifest: OnePasswordIntegration.manifest(), profile: chromium)
+        XCTAssertTrue(fm.fileExists(atPath: chromium.appendingPathComponent("NativeMessagingHosts/" + OnePasswordIntegration.manifestName).path))
+        XCTAssertFalse(fm.fileExists(atPath: defaultProfile.appendingPathComponent("NativeMessagingHosts").path))
+    }
+    func testRejectsManifestAndProfileSymlinksIncludingDanglingManifest() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let profile = root.appendingPathComponent("Chromium")
+        let hosts = profile.appendingPathComponent("NativeMessagingHosts")
+        try fm.createDirectory(at: hosts, withIntermediateDirectories: true)
+        defer {try? fm.removeItem(at: root)}
+        let outside = root.appendingPathComponent("outside.json")
+        let data = try OnePasswordIntegration.manifest()
+        let destination = hosts.appendingPathComponent(OnePasswordIntegration.manifestName)
+        try fm.createSymbolicLink(at: destination, withDestinationURL: outside)
+        XCTAssertThrowsError(try OnePasswordIntegration.register(manifest: data, profile: profile))
+        XCTAssertFalse(fm.fileExists(atPath: outside.path))
+        try data.write(to: outside)
+        XCTAssertThrowsError(try OnePasswordIntegration.register(manifest: data, profile: profile))
+        XCTAssertEqual(try Data(contentsOf: outside), data)
+        try fm.removeItem(at: destination)
+        let alias = root.appendingPathComponent("alias")
+        try fm.createSymbolicLink(at: alias, withDestinationURL: profile)
+        XCTAssertThrowsError(try OnePasswordIntegration.register(manifest: data, profile: alias))
+        XCTAssertFalse(fm.fileExists(atPath: destination.path))
+    }
     func testDoesNotFollowHostDirectorySymlinks() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
