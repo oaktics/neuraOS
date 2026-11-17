@@ -1,12 +1,12 @@
 # Chromium extensions
 
-neuraOS uses CEF 156.0.7 (Chromium 156.0.8078.17). Signing/notarization permits macOS to run the application; it does not enable Chrome extension APIs.
+neuraOS uses stable CEF 156.0.30 (Chromium 156.0.8078.96). Signing/notarization permits macOS to run the application; it does not enable Chrome extension APIs.
 
 1Password-specific usability is deferred to [Issue #134](https://github.com/oaktics/neuraOS/issues/134)
 and is not a release acceptance gate for this general extension foundation.
-The dedicated 1Password setup entry is outside this release scope. Installation,
+The extension menu exposes desktop integration setup when 1Password is enabled. Installation,
 Connected status and content-script injection do not establish account sync,
-saving or filling; see the [deferred investigation](1password-browser.md).
+saving or filling; see the [setup instructions and investigation](1password-browser.md).
 
 ## Using extensions
 
@@ -36,7 +36,7 @@ The windows share the existing Chromium profile with embedded tabs, across works
 
 ## Why retain a separate window?
 
-Embedded macOS NSViews force CEF's Alloy style. The [CEF window-info definition](https://github.com/chromiumembedded/cef/blob/47dbc1d/include/internal/cef_types_mac.h) documents this restriction. The [CEF maintainer's extension guidance](https://github.com/chromiumembedded/cef/issues/3859) distinguishes profile-level extension features from Chrome UI features and directs embedders to use a Chrome-style window for `chrome://extensions`. [CEF #3763](https://github.com/chromiumembedded/cef/issues/3763) explains the related WebUI restrictions.
+Embedded macOS NSViews force CEF's Alloy style. The [CEF window-info definition](https://github.com/chromiumembedded/cef/blob/6028375/include/internal/cef_types_mac.h) documents this restriction. The [CEF maintainer's extension guidance](https://github.com/chromiumembedded/cef/issues/3859) distinguishes profile-level extension features from Chrome UI features and directs embedders to use a Chrome-style window for `chrome://extensions`. [CEF #3763](https://github.com/chromiumembedded/cef/issues/3763) explains the related WebUI restrictions.
 
 The existing embedded view, popup handling, browser MCP and download callbacks remain Alloy style. The new top-level Chrome windows use the same default request context and persistent `Chromium/Default` profile. Their tabs, popups and default-client windows participate in the existing CEF shutdown barrier.
 
@@ -50,7 +50,7 @@ The existing embedded view, popup handling, browser MCP and download callbacks r
 
 ## Native catalog and popup implementation
 
-The pinned CEF 156 SDK has no `CefExtension`/`GetExtensions`/`GetExtension` or
+The pinned CEF 156.0.30 SDK has no `CefExtension`/`GetExtensions`/`GetExtension` or
 extension-action dispatch API. Its `cef_request_context_t` inherits the public
 `cef_preference_manager_t`, however. neuraOS reads a **copy of the live global
 request context's `extensions.settings` preference** using `get_preference`,
@@ -78,9 +78,9 @@ normal tabs, popup children, Chrome windows and these popovers all participate
 in the same shutdown barrier. Normal tab sizing and the external pump are
 unchanged.
 
-## Measured embedded behavior (2026-11-17)
+## Measured embedded behavior (2026-11-17 baseline)
 
-Measured with CEF 156.0.7 / Chromium 156.0.8078.17, the bundled MV3 fixture,
+The pre-upgrade baseline used CEF 156.0.7 / Chromium 156.0.8078.17, the bundled MV3 fixture,
 an ad-hoc signed `com.neuraos.extensions-test.embedded` bundle, disposable
 profile and mock keychain. These results do **not** establish 1Password
 account/vault usability; no real sign-in, trust-list change or default-browser
@@ -133,9 +133,36 @@ pauses each phase for UI inspection; create `continue` in the printed isolated
 data directory to resume. The fixture also mounts the production toolbar for pin/menu testing, without
 registering a BrowserModel or MCP tab. Pins belong to the isolated test bundle. See [Chrome's unpacked-extension guide](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world) for the native management workflow.
 
+## Extension Origin regression
+
+CEF 156.0.7's extension Origin synthesis was fixed upstream in #4309. We pin
+stable 156.0.30, which contains `3d34cc3` (see [root cause and evidence](1password-browser.md)).
+The official arm64/x64 archive checksums live in `scripts/native/chromium/version.json`.
+Preparation, bundling and both CEF/Swift CI cache keys already consume that
+manifest; changing it invalidates the caches. C API headers/hash are rebuilt
+from the new SDK. Helper bundles, sandbox and signing layout are unchanged.
+
+```sh
+NEURA_APP_OUTPUT=/path/to/isolated-extensions-test.app \
+  NEURA_ORIGIN_CHROME='/path/to/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' \
+  node scripts/native/chromium/extension-origin-smoke.mjs
+```
+
+This automated probe requires a `com.neuraos.extensions-test…` bundle. It loads
+only `tests/fixtures/chromium-extension-origin` temporarily via CDP; Chrome uses
+`--load-extension` and a fresh user-data-dir. It opens the test Chrome app to
+activate its popup. Each browser gets a separate disposable profile and mock
+keychain. The server listens only on loopback. Evidence contains received
+Origin/Sec-Fetch headers, never credentials. `--diagnostic` records a broken
+baseline without enforcing Origin assertions. Default mode asserts that SW,
+popup and tab POSTs send `chrome-extension://<id>`, that ungranted CORS requests
+also preserve the origin, and that granted GETs never send literal `null`.
+An absent Origin on a granted GET is normal Chromium behavior. This probe does
+not replace the two-phase installed-extension persistence smoke above.
+
 ## External pump and host architecture
 
-CEF work is requested through `on_schedule_message_pump_work`, marshalled/coalesced onto the AppKit thread and scheduled with a replaceable one-shot timer. With no pending work the fallback is 33ms, matching the [pinned official CEF example](https://github.com/chromiumembedded/cef/blob/47dbc1d/tests/shared/browser/main_message_loop_external_pump.cc). Zero-delay requests yield to AppKit; nested calls are deferred. Native menu tracking and neuraOS sheets retain their reentry protection. Chrome-owned install/permission sheets keep pumping so their controls remain usable.
+CEF work is requested through `on_schedule_message_pump_work`, marshalled/coalesced onto the AppKit thread and scheduled with a replaceable one-shot timer. With no pending work the fallback is 33ms, matching the [pinned official CEF example](https://github.com/chromiumembedded/cef/blob/6028375/tests/shared/browser/main_message_loop_external_pump.cc). Zero-delay requests yield to AppKit; nested calls are deferred. Native menu tracking and neuraOS sheets retain their reentry protection. Chrome-owned install/permission sheets keep pumping so their controls remain usable.
 
 Run `node scripts/native/chromium/pump-smoke.mjs` with the isolated test bundle to compare the old repeating 10ms baseline and adaptive mode. Each run discards two seconds of warmup and records ten seconds of process CPU time, actual pump wakes, blocked calls and reentries. These are application-process measurements, not total system/renderer/GPU energy measurements.
 

@@ -537,3 +537,217 @@ async fn binding_deltas_cover_rebind_resume_filter_and_workspace_tombstones() {
     assert_eq!(deleted["removedSessionTerminalIds"], json!([second]));
     assert_eq!(deleted["currentSessionIds"], json!({}));
 }
+
+#[tokio::test]
+async fn sleep_history_summary_separates_provider_connection_from_turn_status() {
+    let (store, a) = fixture().await;
+    let task = id();
+    a.register_codex(
+        "t",
+        &json!({"id":"w","path":"/tmp/w","name":"work"}),
+        &codex_thread(&task),
+        None,
+    )
+    .await
+    .unwrap();
+    let page = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["agents"][0]["providerConnection"], "connected");
+    assert!(page["agents"][0].get("summary").is_none());
+    assert!(page["agents"][0].get("pending").is_none());
+    a.codex_event("t", &json!({"id":"w","path":"/tmp/w"}), &json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":"turn1","status":"completed"}}})).await.unwrap();
+    // Persisted completion is independent of the live transport after restart.
+    let restored = Agents::new(store, Arc::new(RuntimeStub::default()))
+        .await
+        .unwrap();
+    let page = restored
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["agents"][0]["providerConnection"], "disconnected");
+    assert_eq!(page["agents"][0]["lastTurnStatus"], "completed");
+}
+
+#[tokio::test]
+async fn provider_connection_binding_changes_invalidate_summary_deltas() {
+    let (_, a) = fixture().await;
+    let task = id();
+    let workspace = json!({"id":"w","path":"/tmp/w"});
+    a.register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    a.close("t").await.unwrap();
+    let before = a.query(json!({"summaryOnly":true})).await.unwrap();
+    // Re-registering the same session can leave its interrupted status intact.
+    a.register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    let delta = a.query(json!({"summaryOnly":true,"sinceRevision":before["revision"],"sinceEpoch":before["epoch"],"sinceFilter":before["filter"]})).await.unwrap();
+    assert_eq!(delta["agents"][0]["providerConnection"], "connected");
+    let before = a.query(json!({"summaryOnly":true})).await.unwrap();
+    a.close("t").await.unwrap();
+    let delta = a.query(json!({"summaryOnly":true,"sinceRevision":before["revision"],"sinceEpoch":before["epoch"],"sinceFilter":before["filter"]})).await.unwrap();
+    assert_eq!(delta["agents"][0]["providerConnection"], "disconnected");
+}
+
+#[tokio::test]
+async fn provider_retry_metadata_omits_error_text_and_preserves_turn_state() {
+    let (_, a) = fixture().await;
+    let task = id();
+    let workspace = json!({"id":"w","path":"/tmp/w"});
+    a.register_codex("t", &workspace, &codex_thread(&task), None).await.unwrap();
+    a.codex_event("t", &workspace, &json!({"method":"turn/started","params":{"threadId":task,"turn":{"id":"turn1"}}})).await.unwrap();
+    a.codex_event("t", &workspace, &json!({"method":"error","params":{"threadId":task,"turnId":"turn1","willRetry":true,"error":{"message":"SECRET-provider-response"}}})).await.unwrap();
+    let result = a.query(json!({"summaryOnly":true})).await.unwrap();
+    let row = &result["agents"][0];
+    assert_eq!(row["status"], "working");
+    assert_eq!(row["runtimeIssue"]["willRetry"], true);
+    assert_eq!(row["runtimeIssue"]["turnId"], "turn1");
+    assert!(!result.to_string().contains("SECRET"));
+    let issue = row["runtimeIssue"].clone();
+    a.codex_event("t", &workspace, &json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":"turn1","status":"completed"}}})).await.unwrap();
+    let result = a.query(json!({"summaryOnly":true})).await.unwrap();
+    assert_eq!(result["agents"][0]["runtimeIssue"], issue);
+    assert_eq!(result["agents"][0]["status"], "idle");
+}
+
+#[tokio::test]
+async fn stalled_channel_is_visible_without_probe_and_recovers() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    a.send(&task, "do work", "queue", None).await.unwrap();
+    a.expire_channel_fixture(&terminal).await;
+    a.reconcile_channels().await.unwrap();
+    a.reconcile_channels().await.unwrap();
+    let row = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(row["agents"][0]["channelState"], "unavailable");
+    assert!(row["agents"][0]["deliveryWarning"]
+        .as_str()
+        .unwrap()
+        .contains("Channels startup"));
+    assert_eq!(a.get(&task).await.unwrap().pending.len(), 1);
+    // Reconciliation did not consume the probe intended for the MCP transport.
+    confirm(&a, &terminal, &task).await;
+    assert!(a.get(&task).await.unwrap().delivery_warning.is_none());
+}
+
+#[tokio::test]
+async fn terminal_ids_have_actionable_errors_and_read_modes_do_not_fetch_history() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    for error in [
+        a.watch(&terminal, &[]).await.unwrap_err(),
+        a.query(json!({"taskIds":[terminal]})).await.unwrap_err(),
+    ] {
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "task_id_required");
+        assert_eq!(error["taskIds"][0], task);
+    }
+    for mode in ["reports", "summary"] {
+        let result = a.read_mode(&task, None, mode).await.unwrap();
+        assert_eq!(result["agent"]["id"], task);
+        assert!(result.get("history").is_none());
+    }
+    assert!(a.read_mode(&task, None, "invalid").await.is_err());
+}
+
+#[test]
+fn conversation_output_is_bounded_and_cursor_survives() {
+    let original = json!({"agent":{"reports":[{"id":"report-id","text":"界".repeat(150_000)}]},"history":{"data":(0..5).map(|i| json!({"id":i,"items":[{"type":"toolOutput","text":"x".repeat(250_000)}]})).collect::<Vec<_>>(),"nextCursor":"opaque-cursor"}});
+    let result = crate::providers::agents::bounded_read(original.clone());
+    assert!(result.to_string().len() < 64 * 1024);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["history"]["nextCursor"], "opaque-cursor");
+    assert_eq!(result["agent"]["reports"][0]["id"], "report-id");
+    assert!(original.to_string().len() > 1_250_000);
+}
+
+#[test]
+fn structured_tool_output_cannot_escape_read_response_budget() {
+    let items: Vec<_> = (0..200).map(|i| json!({"id":i,"payload":(0..100).map(|j| (format!("field{j}"),json!("界".repeat(100)))).collect::<serde_json::Map<_,_>>() })).collect();
+    let result = crate::providers::agents::bounded_read(
+        json!({"agent":{"id":"task"},"history":{"data":items,"nextCursor":"next"}}),
+    );
+    assert!(result.to_string().len() <= 64 * 1024);
+    assert_eq!(result["history"]["nextCursor"], "next");
+    assert_eq!(result["truncated"], true);
+}
+
+#[test]
+fn read_preserves_all_control_state_even_when_it_exceeds_history_budget() {
+    let instructions: Vec<_> = (0..128).map(|i| json!({"id":format!("instruction-{i}"),"text":"retained evidence".repeat(128),"state":"cancelled","history":[{"state":"queued","at":"initial"},{"state":"cancelled","actorTaskId":"parent","at":"final"}]})).collect();
+    let reports: Vec<_> = (0..32).map(|i| json!({"id":format!("report-{i}"),"text":"界".repeat(3000),"kind":"completion","sourceTaskId":"worker","sourceTurnId":"turn","createdAt":"timestamp","notified":false,"updates":9})).collect();
+    let agent = json!({"id":"task","revision":456,"turnId":"current-turn","instructionHistoryPruned":3,"instructions":instructions,"pending":[{"id":"pending","state":"queued","text":"work".repeat(20000)}],"requests":[{"id":"request","options":(0..200).collect::<Vec<_>>()}],"reports":reports});
+    for history in [
+        None,
+        Some(json!({"data":[{"items":[{"text":"x".repeat(1_250_000)}]}],"nextCursor":"older"})),
+    ] {
+        let mut input = json!({"agent":agent});
+        if let Some(history) = history {
+            input["history"] = history;
+        }
+        let result = crate::providers::agents::bounded_read(input);
+        assert!(
+            result.to_string().len() > 64 * 1024,
+            "control state takes precedence over the display budget"
+        );
+        for key in [
+            "id",
+            "revision",
+            "turnId",
+            "instructionHistoryPruned",
+            "instructions",
+            "pending",
+            "requests",
+        ] {
+            assert_eq!(result["agent"][key], agent[key], "{key}");
+        }
+        assert_eq!(result["agent"]["reports"].as_array().unwrap().len(), 32);
+        for (original, actual) in agent["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(result["agent"]["reports"].as_array().unwrap())
+        {
+            for (key, value) in original.as_object().unwrap() {
+                if key != "text" {
+                    assert_eq!(&actual[key], value, "{key}");
+                }
+            }
+            assert_eq!(actual["textTruncated"], true);
+        }
+        assert_eq!(result["truncated"], true);
+    }
+}
+
+#[test]
+fn exhausted_node_budget_drops_incomplete_records_as_whole_units() {
+    // Three valid Claude history records with 128 short blocks each exceed the
+    // 1,024-node budget. Every returned turn and item must keep its id.
+    let data: Vec<_> = (0..3)
+        .map(|t| json!({"id":format!("turn-{t}"),"status":"completed","items":(0..128).map(|i| json!({"id":format!("item-{t}-{i}"),"type":"agentMessage","text":"ok"})).collect::<Vec<_>>()}))
+        .collect();
+    let result = crate::providers::agents::bounded_read(
+        json!({"agent":{"id":"task"},"history":{"data":data,"nextCursor":"older"}}),
+    );
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["history"]["nextCursor"], "older");
+    let turns = result["history"]["data"].as_array().unwrap();
+    assert!(!turns.is_empty());
+    let mut items = 0;
+    for turn in turns {
+        assert!(turn["id"].is_string(), "turn without id: {turn}");
+        assert!(turn["status"].is_string(), "turn without status: {turn}");
+        for item in turn["items"].as_array().unwrap() {
+            assert!(item["id"].is_string(), "item without id: {item}");
+            assert!(item["type"].is_string(), "item without type: {item}");
+            items += 1;
+        }
+    }
+    assert!(items > 128, "budget should still return most of the history");
+}

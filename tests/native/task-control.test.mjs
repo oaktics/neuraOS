@@ -109,6 +109,9 @@ test('native MCP task controls: diagnostics, durable exact instruction lifecycle
   assert.deepEqual(bounded.pending.map(m=>m.text),['current design','keep this work']);
   assert.deepEqual(await tool('task_instruction',replacement),changed);
   const full=(await tool('task_list')).value;assert.equal(full.agents.length,1);
+  for(const key of ['instructions','pending','requests','reports','revision','turnId','instructionHistoryPruned']) {
+    assert.deepEqual(bounded[key],full.agents[0][key],`task_read must preserve exact control state: ${key}`);
+  }
   const lite=(await tool('task_list',{taskIds:[task.id],workspaceId:workspace.id,status:'working',summaryOnly:true,limit:10})).value;
   assert.equal(lite.agents.length,1);assert.equal(lite.agents[0].pendingCount,2);assert.equal(lite.agents[0].pending,undefined);
   for(const filter of [{workspaceId:randomUUID()},{workspaceId:workspace.id,status:'idle'}])assert.deepEqual((await tool('task_list',{...filter,taskIds:[task.id],summaryOnly:true})).value.agents,[]);

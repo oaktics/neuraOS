@@ -1,0 +1,176 @@
+{
+  "date": "2026-11-17",
+  "platform": "macOS arm64",
+  "cef": "156.0.30+g6028375+chromium-156.0.8078.96",
+  "upstreamFix": "3d34cc3f7cbf30088e085eaa1b63089c9dba06a1",
+  "ancestry": {
+    "status": "ahead",
+    "aheadBy": 17,
+    "behindBy": 0
+  },
+  "swiftTests": {
+    "passed": 205,
+    "failed": 0
+  },
+  "isolatedBuild": {
+    "configuration": "release",
+    "signing": "ad-hoc",
+    "bundleID": "com.neuraos.browser-smoke.origin134",
+    "result": "passed"
+  },
+  "chromiumSmoke": {
+    "phases": 2,
+    "result": "passed",
+    "checks": [
+      "rendering",
+      "history",
+      "popup opener",
+      "persistent storage",
+      "clean restart"
+    ]
+  },
+  "downloadSmoke": {
+    "result": "passed",
+    "checks": [
+      "save bytes",
+      "progress",
+      "cancel",
+      "network failure",
+      "destination dismissal"
+    ]
+  },
+  "pump": [
+    {
+      "mode": "fixed10",
+      "reentries": 0,
+      "blocked": 0,
+      "seconds": 9.984372973442078,
+      "cpuSeconds": 0.29329099999999997,
+      "timerWakeups": 409,
+      "workCalls": 409
+    },
+    {
+      "mode": "adaptive",
+      "reentries": 0,
+      "blocked": 0,
+      "seconds": 10.026165962219238,
+      "cpuSeconds": 0.20414699999999997,
+      "timerWakeups": 160,
+      "workCalls": 160
+    },
+    {
+      "mode": "fixed10",
+      "reentries": 0,
+      "blocked": 0,
+      "seconds": 9.980094909667969,
+      "cpuSeconds": 0.4919279999999999,
+      "timerWakeups": 413,
+      "workCalls": 413
+    },
+    {
+      "mode": "adaptive",
+      "reentries": 0,
+      "blocked": 0,
+      "seconds": 10.001231074333191,
+      "cpuSeconds": 0.37566200000000005,
+      "timerWakeups": 147,
+      "workCalls": 147
+    }
+  ],
+  "nativeBrowserMCP": [
+    {
+      "run": 1,
+      "passed": true,
+      "checks": [
+        "public project/workspace commands; managed Claude launch scoped browser credential (0600 fixture)",
+        "same-project list; foreign project excluded",
+        "CEF DOM snapshot; password excluded",
+        "CEF PNG screenshot",
+        "stale refs rejected after input",
+        "fill -> click -> visible result reread",
+        "hidden other-workspace same-URL tab snapshot and PNG isolated",
+        "document scrollY changed",
+        "real key Enter activates button",
+        "popup registered in same project",
+        "closed popup removed from native registry",
+        "navigation retains CEF session cookie; stale document refs rejected",
+        "stop disconnects tab",
+        "renderer crash explicitly cancels pending operation",
+        "app disconnect reported",
+        "app restart reconnects registry and preserves user disconnect"
+      ]
+    },
+    {
+      "run": 2,
+      "passed": true,
+      "checks": [
+        "public project/workspace commands; managed Claude launch scoped browser credential (0600 fixture)",
+        "same-project list; foreign project excluded",
+        "CEF DOM snapshot; password excluded",
+        "CEF PNG screenshot",
+        "stale refs rejected after input",
+        "fill -> click -> visible result reread",
+        "hidden other-workspace same-URL tab snapshot and PNG isolated",
+        "document scrollY changed",
+        "real key Enter activates button",
+        "popup registered in same project",
+        "closed popup removed from native registry",
+        "navigation retains CEF session cookie; stale document refs rejected",
+        "stop disconnects tab",
+        "renderer crash explicitly cancels pending operation",
+        "app disconnect reported",
+        "app restart reconnects registry and preserves user disconnect"
+      ]
+    },
+    {
+      "run": 3,
+      "passed": true,
+      "checks": [
+        "public project/workspace commands; managed Claude launch scoped browser credential (0600 fixture)",
+        "same-project list; foreign project excluded",
+        "CEF DOM snapshot; password excluded",
+        "CEF PNG screenshot",
+        "stale refs rejected after input",
+        "fill -> click -> visible result reread",
+        "hidden other-workspace same-URL tab snapshot and PNG isolated",
+        "document scrollY changed",
+        "real key Enter activates button",
+        "popup registered in same project",
+        "closed popup removed from native registry",
+        "navigation retains CEF session cookie; stale document refs rejected",
+        "stop disconnects tab",
+        "renderer crash explicitly cancels pending operation",
+        "app disconnect reported",
+        "app restart reconnects registry and preserves user disconnect"
+      ]
+    }
+  ],
+  "limitations": [
+    "Local arm64 only; x64 archive pin updated from official metadata but x64 runtime not executed.",
+    "Ad-hoc isolated builds; no Developer ID release/notarization or production app change.",
+    "No real 1Password accounts, native trust changes, save/fill/unlock acceptance."
+  ],
+  "extensionSmoke": {
+    "phases": 2,
+    "result": "passed",
+    "checks": [
+      "content/worker/storage",
+      "native messaging",
+      "native popover",
+      "ungranted host rejection",
+      "restart persistence",
+      "clean shutdown"
+    ]
+  },
+  "originSmoke": {
+    "contexts": [
+      "service_worker",
+      "popup",
+      "tab"
+    ],
+    "probesPerBrowser": 12,
+    "result": "passed",
+    "comparisonChrome": "153.0.8010.12",
+    "exactOriginAndSecFetchMatch": true
+  }
+}

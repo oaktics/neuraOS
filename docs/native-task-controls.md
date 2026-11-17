@@ -159,3 +159,14 @@ and, after a debug build,
 Actual installed-app metadata and downstream tool-to-language renderers require
 checking after the supervisor's authorized release; these fixtures prove the
 native descriptions returned to an MCP consumer, not a live session reload.
+
+MCP startup responses now provide explicit `taskId` / `terminalId` aliases; legacy
+`task_start.id` is still a terminal ID. Until registration completes `taskId` may
+be null. Known terminal IDs passed to task list/watch receive `task_id_required`
+with recovery guidance. Unconfirmed Claude Channels expose `deliveryWarning`
+after the bounded startup check; confirm the Channels prompt in the visible
+terminal, or cancel queued work before explicitly selecting another provider.
+`task_read` supports `mode: "reports"` and `mode: "summary"` without fetching
+conversation history. Default history output is bounded and marks truncation;
+see [supervision](codex-supervision.md#startup-ids-channels-recovery-and-bounded-reads)
+for budgets, cursor semantics, and recovery details.

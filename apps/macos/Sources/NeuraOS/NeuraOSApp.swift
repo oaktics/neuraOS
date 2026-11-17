@@ -6,6 +6,9 @@ import ChromiumBridge
 @main enum NeuraOSMain {
     static func main() {
         NCPrepareApplication()
+        if let index = CommandLine.arguments.firstIndex(of: "--sleep-history-fixture"), CommandLine.arguments.count > index + 1 {
+            SleepHistoryFixture.run(CommandLine.arguments[index + 1]); return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--extensions-smoke"), CommandLine.arguments.count > index + 3 {
             exit(NCRunExtensionsSmoke(CommandLine.arguments[index + 1], CommandLine.arguments[index + 2], Int32(CommandLine.arguments[index + 3]) ?? 0, ExtensionSmokeAccessory()))
         }
@@ -226,6 +229,7 @@ struct Sidebar: View {
     @State private var collapsed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "sidebar.collapsedProjects") ?? [])
     @State private var setupProject: Project?
     @State private var removingProject: Project?
+    @State private var projectDropSelection = SidebarProjectDropSelection()
     private var deleting: Workspace? {
         get {model.pendingWorkspaceDeletion}
         nonmutating set {model.pendingWorkspaceDeletion = newValue}
@@ -412,20 +416,34 @@ struct Sidebar: View {
         let projects = model.sidebarSpaces.projects(in: space.id, from: model.state.projects)
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
-                ForEach(projects) {project in
-                    projectRow(project, space: space)
-                    if !collapsed.contains(project.id) {
-                        ForEach(model.state.workspaces.filter {$0.projectId == project.id}) {workspace in
-                            workspaceRow(workspace, space: space)
+                ForEach(Array(projects.enumerated()), id: \.element.id) {index, project in
+                    let next = projects.dropFirst(index + 1).first?.id
+                    VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                        projectRow(project, space: space)
+                        if !collapsed.contains(project.id) {
+                            ForEach(model.state.workspaces.filter {$0.projectId == project.id}) {workspace in
+                                workspaceRow(workspace, space: space)
+                            }
                         }
                     }
+                    .modifier(SidebarProjectDropTarget(
+                        before: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: project.id),
+                        after: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: next),
+                        selection: $projectDropSelection, spacing: SidebarMetrics.rowSpacing
+                    ) {providers, boundary in
+                        dropProject(providers, before: boundary.beforeProjectId, in: space)
+                    })
                 }
                 if !projects.isEmpty {
                     Color.clear.frame(height: 48)
                         .contentShape(Rectangle())
                         .accessibilityHidden(true)
                         .contextMenu {addProjectButtons}
-                        .modifier(SidebarProjectDropTarget {providers in
+                        .modifier(SidebarProjectDropTarget(
+                            before: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: nil),
+                            after: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: nil),
+                            selection: $projectDropSelection, spacing: SidebarMetrics.rowSpacing
+                        ) {providers, _ in
                             dropProject(providers, before: nil, in: space)
                         })
                 } else {
@@ -437,6 +455,8 @@ struct Sidebar: View {
                 }
             }.padding(.horizontal, SidebarMetrics.gutter).padding(.top, SidebarMetrics.sectionSpacing - 10)
         }
+        .onChange(of: model.sidebarSpaces.active.id) {_, _ in projectDropSelection = SidebarProjectDropSelection()}
+        .onChange(of: projects.map(\.id)) {_, _ in projectDropSelection = SidebarProjectDropSelection()}
     }
     private func workspaceRow(_ workspace: Workspace, space: SidebarSpace) -> some View {
         // A fixed tab on screen leaves the worktree underneath marked, but not as the front item.
@@ -523,14 +543,16 @@ struct Sidebar: View {
             .onTapGesture {toggleCollapsed(project.id)}
         }
         .padding(.top, 10)
-        .onDrag {SidebarProjectDrag(projectId: project.id, spaceId: space.id).provider}
+        .onDrag {
+            SidebarProjectDrag(projectId: project.id, spaceId: space.id).provider
+        } preview: {
+            Label(project.name, systemImage: "folder")
+                .padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        }
         .help("クリックで折りたたみ、ドラッグで並び替え、右クリックで設定")
         .accessibilityLabel("\(project.name)、\(folded ? "折りたたみ中" : "展開中")")
         .accessibilityAddTraits(.isButton)
         .contextMenu {projectActions(project, space: space)}
-        .modifier(SidebarProjectDropTarget {providers in
-            dropProject(providers, before: project.id, in: space)
-        })
     }
 
     private func dropProject(_ providers: [NSItemProvider], before targetId: String?, in space: SidebarSpace) -> Bool {

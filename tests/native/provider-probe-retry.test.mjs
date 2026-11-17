@@ -9,7 +9,7 @@ import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const binary = process.env.NEURA_NATIVE_DAEMON;
-for (const [failureMode, errorCode] of [['timeout', 'provider_probe_timeout'], ['failed', 'provider_probe_failed'], ['unsupported', 'claude_mcp_unsupported']])
+for (const [failureMode, errorCode] of [['timeout', 'provider_probe_timeout'], ['failed', 'provider_probe_failed'], ['unsupported', 'claude_mcp_unsupported'], ['cold', null]])
 test(`Claude ${failureMode} probe recovers on the next open without restarting the daemon`, {skip: !binary, timeout: 45000}, async () => {
   const root = await mkdtemp(join(tmpdir(), 'neura-probe-retry-'));
   const home = join(root, 'home'), data = join(root, 'data'), folder = join(root, 'folder');
@@ -22,6 +22,7 @@ case "$1" in
     echo help >> "$HOME/probes"
     case "$(cat "$HOME/mode")" in
       timeout) exec /bin/sleep 30 ;;
+      cold) /bin/sleep 4 ;;
       failed) exit 1 ;;
       unsupported) echo old-cli; exit 0 ;;
     esac
@@ -66,6 +67,11 @@ echo FIXTURE_READY
     const workspace = state.workspaces.find(w => w.projectId === project.value.id);
     const open = () => request('/v1/commands', {type: 'terminal.open', workspaceId: workspace.id, provider: 'claude'});
     const result = await open();
+    if (failureMode === 'cold') {
+      assert.equal(result.status, 200, 'cold CLI startup beyond the old 3s budget must succeed');
+      assert.equal((await readFile(join(home, 'probes'), 'utf8')).trim().split('\n').length, 1);
+      return;
+    }
     assert.equal(result.status, 409);
     assert.equal(result.value.error, errorCode);
     await writeFile(join(home, 'mode'), 'ready');
