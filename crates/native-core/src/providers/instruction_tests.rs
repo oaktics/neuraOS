@@ -724,3 +724,30 @@ fn read_preserves_all_control_state_even_when_it_exceeds_history_budget() {
         assert_eq!(result["truncated"], true);
     }
 }
+
+#[test]
+fn exhausted_node_budget_drops_incomplete_records_as_whole_units() {
+    // Three valid Claude history records with 128 short blocks each exceed the
+    // 1,024-node budget. Every returned turn and item must keep its id.
+    let data: Vec<_> = (0..3)
+        .map(|t| json!({"id":format!("turn-{t}"),"status":"completed","items":(0..128).map(|i| json!({"id":format!("item-{t}-{i}"),"type":"agentMessage","text":"ok"})).collect::<Vec<_>>()}))
+        .collect();
+    let result = crate::providers::agents::bounded_read(
+        json!({"agent":{"id":"task"},"history":{"data":data,"nextCursor":"older"}}),
+    );
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["history"]["nextCursor"], "older");
+    let turns = result["history"]["data"].as_array().unwrap();
+    assert!(!turns.is_empty());
+    let mut items = 0;
+    for turn in turns {
+        assert!(turn["id"].is_string(), "turn without id: {turn}");
+        assert!(turn["status"].is_string(), "turn without status: {turn}");
+        for item in turn["items"].as_array().unwrap() {
+            assert!(item["id"].is_string(), "item without id: {item}");
+            assert!(item["type"].is_string(), "item without type: {item}");
+            items += 1;
+        }
+    }
+    assert!(items > 128, "budget should still return most of the history");
+}
