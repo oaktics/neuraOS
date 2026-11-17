@@ -151,11 +151,16 @@ NSArray<NCExtensionAction *> *NCExtensionActions(void) {
     auto value = context->base.get_preference(&context->base, &name.value);
     auto json = value ? p_cef_write_json(value, JSON_WRITER_DEFAULT) : nullptr;
     NSData *data = json ? [String(json) dataUsingEncoding:NSUTF8StringEncoding] : nil;
-    id settings = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (json) p_cef_string_userfree_utf16_free(json);
     // cef_write_json consumes the value reference across the C API boundary.
     Release(&context->base);
-    return [settings isKindOfClass:NSDictionary.class] ? NCReadExtensionActions(settings, [chromiumProfile stringByAppendingPathComponent:@"Default"]) : @[];
+    // Toolbars poll this; only re-read manifests, locales and icons when the settings change.
+    static NSData *cachedSettings; static NSArray<NCExtensionAction *> *cachedActions;
+    if (data && [data isEqualToData:cachedSettings]) return cachedActions;
+    id settings = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSArray *actions = [settings isKindOfClass:NSDictionary.class] ? NCReadExtensionActions(settings, [chromiumProfile stringByAppendingPathComponent:@"Default"]) : @[];
+    cachedSettings = data; cachedActions = actions;
+    return actions;
 }
 
 @interface NCExtensionPopover ()
