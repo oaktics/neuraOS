@@ -19,4 +19,15 @@ final class DefaultBrowserTests: XCTestCase {
         XCTAssertTrue(links.pending.isEmpty)
     }
 
+    @MainActor func testReceivingShowsTheMainWindowAndIgnoresNonWebLinks() {
+        let links = ExternalLinks()
+        var shown = 0
+        links.showMain = {shown += 1}
+        links.receive([URL(string: "file:///tmp/x")!])
+        XCTAssertEqual(shown, 0)
+        links.receive([URL(string: "https://a.example")!])
+        XCTAssertEqual(shown, 1)
+        _ = links.take()
+    }
+
 }

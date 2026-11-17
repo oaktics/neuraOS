@@ -18,9 +18,11 @@ packaged `.app` can be registered.
 
 - If a worktree is selected, a fixed tab covering it is put away and the worktree
   opens each link as a new ordinary browser tab (after its saved tabs are restored).
+- Receiving a link also shows the main window (re-created if it was closed).
 - If nothing takes the links within 2 s (8 s while the daemon is still
-  connecting) — no worktree selected, deletion in progress, main window closed —
-  they open in the Chrome-style extension window instead.
+  connecting) — no worktree selected, deletion in progress — they open in the
+  Chrome-style extension window instead. `ExternalLinks` keeps an app-lifetime
+  10 s safety net doing the same when no main scene is running at all.
 
 ## Opening a page outside neuraOS
 

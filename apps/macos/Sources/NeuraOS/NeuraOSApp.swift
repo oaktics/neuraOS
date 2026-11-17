@@ -99,9 +99,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)}
     /// Links from other apps when neuraOS is the default browser; RootView routes them.
     func application(_ application: NSApplication, open urls: [URL]) {
-        ExternalLinks.shared.receive(urls)
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: {$0.identifier?.rawValue.hasPrefix("main") == true}) {window.makeKeyAndOrderFront(nil)}
+        ExternalLinks.shared.receive(urls)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {false}
     func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush(); Diagnostics.shared.stop()}
@@ -118,6 +117,7 @@ enum Palette {
 }
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
@@ -197,7 +197,7 @@ struct RootView: View {
             }
         }
         .background(Palette.surface)
-        .onAppear {KeyboardRouter.install(model)}
+        .onAppear {KeyboardRouter.install(model); ExternalLinks.shared.showMain = {openWindow(id: "main")}}
         .task(id: model.connected && model.state.features?.contains("provider.usage") == true) {
             guard model.connected, model.state.features?.contains("provider.usage") == true else {return}
             while !Task.isCancelled {
@@ -211,9 +211,7 @@ struct RootView: View {
             if model.selected != nil {model.fixedId = nil}
             // Nothing took them (no worktree on screen, daemon away, window closed): use a separate window.
             do {try await Task.sleep(for: .seconds(model.connected ? 2 : 8))} catch {return}
-            for url in ExternalLinks.shared.take() {
-                if let error = NCOpenExtensionWindow(url.absoluteString) {model.error = error}
-            }
+            if let error = ExternalLinks.shared.openInExtensionWindow() {model.error = error}
         }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $model.showNewProject) {NewProjectSheet()}

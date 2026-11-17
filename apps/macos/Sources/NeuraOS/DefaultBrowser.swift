@@ -1,19 +1,42 @@
 import SwiftUI
 import AppKit
 import Observation
+import ChromiumBridge
 
 /// Web links other apps hand to neuraOS (as the default browser) until a worktree on screen opens them.
 @MainActor @Observable final class ExternalLinks {
     static let shared = ExternalLinks()
     private(set) var pending: [URL] = []
+    /// Set by the main scene: shows (or re-creates) the main window so a worktree can take the links.
+    @ObservationIgnored var showMain: (() -> Void)?
+    @ObservationIgnored private var fallback: Task<Void, Never>?
 
-    func receive(_ urls: [URL]) {
-        pending += urls.filter(Self.accepts)
+    func receive(_ urls: [URL], fallbackAfter delay: Duration = .seconds(10)) {
+        let accepted = urls.filter(Self.accepts)
+        guard !accepted.isEmpty else {return}
+        pending += accepted
+        showMain?()
+        // App-lifetime safety net: nothing on screen took them (main scene gone, UI stuck).
+        fallback?.cancel()
+        fallback = Task {[weak self] in
+            do {try await Task.sleep(for: delay)} catch {return}
+            self?.openInExtensionWindow()
+        }
     }
 
     func take() -> [URL] {
+        fallback?.cancel(); fallback = nil
         defer {pending = []}
         return pending
+    }
+
+    /// Returns the first error, if any page could not be opened.
+    @discardableResult func openInExtensionWindow() -> String? {
+        var failure: String?
+        for url in take() {
+            if let error = NCOpenExtensionWindow(url.absoluteString) {failure = failure ?? error; NSLog("External link: %@", error)}
+        }
+        return failure
     }
 
     /// Only ordinary web pages; credentials in the URL are refused like the address field does.
