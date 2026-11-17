@@ -183,10 +183,16 @@ NSArray<NCExtensionAction *> *NCExtensionActions(void) {
     self.content.onPopup = source.onPopup;
     self.content.onOpenTab = source.onOpenTab;
     self.content.onError = source.onError;
+    // CEF closes asynchronously: callbacks from an earlier popup must not affect this one.
     __weak NCExtensionPopover *weakSelf = self;
-    self.content.onClosed = ^{[weakSelf close];};
+    __weak NCChromiumView *weakContent = self.content;
+    self.content.onClosed = ^{
+        NCExtensionPopover *owner = weakSelf;
+        if (owner && owner.content == weakContent) [owner close];
+    };
     self.content.onPreferredSize = ^(NSInteger width, NSInteger height) {
         NCExtensionPopover *owner = weakSelf;
+        if (!owner || owner.content != weakContent) return;
         owner.popover.contentSize = NSMakeSize(MAX(400, MIN(600, width)), MAX(100, MIN(600, height)) + 50);
     };
     [self.content loadURL:action.popupURL];
