@@ -612,3 +612,115 @@ async fn provider_retry_metadata_omits_error_text_and_preserves_turn_state() {
     assert_eq!(result["agents"][0]["runtimeIssue"], issue);
     assert_eq!(result["agents"][0]["status"], "idle");
 }
+
+#[tokio::test]
+async fn stalled_channel_is_visible_without_probe_and_recovers() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    a.send(&task, "do work", "queue", None).await.unwrap();
+    a.expire_channel_fixture(&terminal).await;
+    a.reconcile_channels().await.unwrap();
+    a.reconcile_channels().await.unwrap();
+    let row = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(row["agents"][0]["channelState"], "unavailable");
+    assert!(row["agents"][0]["deliveryWarning"]
+        .as_str()
+        .unwrap()
+        .contains("Channels startup"));
+    assert_eq!(a.get(&task).await.unwrap().pending.len(), 1);
+    // Reconciliation did not consume the probe intended for the MCP transport.
+    confirm(&a, &terminal, &task).await;
+    assert!(a.get(&task).await.unwrap().delivery_warning.is_none());
+}
+
+#[tokio::test]
+async fn terminal_ids_have_actionable_errors_and_read_modes_do_not_fetch_history() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    for error in [
+        a.watch(&terminal, &[]).await.unwrap_err(),
+        a.query(json!({"taskIds":[terminal]})).await.unwrap_err(),
+    ] {
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "task_id_required");
+        assert_eq!(error["taskIds"][0], task);
+    }
+    for mode in ["reports", "summary"] {
+        let result = a.read_mode(&task, None, mode).await.unwrap();
+        assert_eq!(result["agent"]["id"], task);
+        assert!(result.get("history").is_none());
+    }
+    assert!(a.read_mode(&task, None, "invalid").await.is_err());
+}
+
+#[test]
+fn conversation_output_is_bounded_and_cursor_survives() {
+    let original = json!({"agent":{"reports":[{"id":"report-id","text":"界".repeat(150_000)}]},"history":{"data":(0..5).map(|i| json!({"id":i,"items":[{"type":"toolOutput","text":"x".repeat(250_000)}]})).collect::<Vec<_>>(),"nextCursor":"opaque-cursor"}});
+    let result = crate::providers::agents::bounded_read(original.clone());
+    assert!(result.to_string().len() < 64 * 1024);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["history"]["nextCursor"], "opaque-cursor");
+    assert_eq!(result["agent"]["reports"][0]["id"], "report-id");
+    assert!(original.to_string().len() > 1_250_000);
+}
+
+#[test]
+fn structured_tool_output_cannot_escape_read_response_budget() {
+    let items: Vec<_> = (0..200).map(|i| json!({"id":i,"payload":(0..100).map(|j| (format!("field{j}"),json!("界".repeat(100)))).collect::<serde_json::Map<_,_>>() })).collect();
+    let result = crate::providers::agents::bounded_read(
+        json!({"agent":{"id":"task"},"history":{"data":items,"nextCursor":"next"}}),
+    );
+    assert!(result.to_string().len() <= 64 * 1024);
+    assert_eq!(result["history"]["nextCursor"], "next");
+    assert_eq!(result["truncated"], true);
+}
+
+#[test]
+fn read_preserves_all_control_state_even_when_it_exceeds_history_budget() {
+    let instructions: Vec<_> = (0..128).map(|i| json!({"id":format!("instruction-{i}"),"text":"retained evidence".repeat(128),"state":"cancelled","history":[{"state":"queued","at":"initial"},{"state":"cancelled","actorTaskId":"parent","at":"final"}]})).collect();
+    let reports: Vec<_> = (0..32).map(|i| json!({"id":format!("report-{i}"),"text":"界".repeat(3000),"kind":"completion","sourceTaskId":"worker","sourceTurnId":"turn","createdAt":"timestamp","notified":false,"updates":9})).collect();
+    let agent = json!({"id":"task","revision":456,"turnId":"current-turn","instructionHistoryPruned":3,"instructions":instructions,"pending":[{"id":"pending","state":"queued","text":"work".repeat(20000)}],"requests":[{"id":"request","options":(0..200).collect::<Vec<_>>()}],"reports":reports});
+    for history in [
+        None,
+        Some(json!({"data":[{"items":[{"text":"x".repeat(1_250_000)}]}],"nextCursor":"older"})),
+    ] {
+        let mut input = json!({"agent":agent});
+        if let Some(history) = history {
+            input["history"] = history;
+        }
+        let result = crate::providers::agents::bounded_read(input);
+        assert!(
+            result.to_string().len() > 64 * 1024,
+            "control state takes precedence over the display budget"
+        );
+        for key in [
+            "id",
+            "revision",
+            "turnId",
+            "instructionHistoryPruned",
+            "instructions",
+            "pending",
+            "requests",
+        ] {
+            assert_eq!(result["agent"][key], agent[key], "{key}");
+        }
+        assert_eq!(result["agent"]["reports"].as_array().unwrap().len(), 32);
+        for (original, actual) in agent["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(result["agent"]["reports"].as_array().unwrap())
+        {
+            for (key, value) in original.as_object().unwrap() {
+                if key != "text" {
+                    assert_eq!(&actual[key], value, "{key}");
+                }
+            }
+            assert_eq!(actual["textTruncated"], true);
+        }
+        assert_eq!(result["truncated"], true);
+    }
+}

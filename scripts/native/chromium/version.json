@@ -1,20 +1,20 @@
 {
   "arm64": {
-    "last_modified": "2026-10-22T04:14:23.879000Z",
-    "name": "cef_binary_156.0.7+g47dbc1d+chromium-156.0.8078.17_macosarm64_minimal.tar.bz2",
-    "sha1": "038a6ce70a814181f6a507d40155c81e80b328e3",
-    "size": 134827440,
+    "last_modified": "2026-11-13T05:23:39.321000Z",
+    "name": "cef_binary_156.0.30+g6028375+chromium-156.0.8078.96_macosarm64_minimal.tar.bz2",
+    "sha1": "6393d8a838d3b29f6b6939b970b5931dde2082aa",
+    "size": 134874408,
     "type": "minimal",
-    "version": "156.0.7+g47dbc1d+chromium-156.0.8078.17",
-    "chromium": "156.0.8078.17"
+    "version": "156.0.30+g6028375+chromium-156.0.8078.96",
+    "chromium": "156.0.8078.96"
   },
   "x64": {
-    "last_modified": "2026-10-22T06:46:25.887000Z",
-    "name": "cef_binary_156.0.7+g47dbc1d+chromium-156.0.8078.17_macosx64_minimal.tar.bz2",
-    "sha1": "b30522a37e82de588f837a30acb55f0a99139dff",
-    "size": 141698414,
+    "last_modified": "2026-11-13T07:53:59.803000Z",
+    "name": "cef_binary_156.0.30+g6028375+chromium-156.0.8078.96_macosx64_minimal.tar.bz2",
+    "sha1": "d66ae063959536c86637c63560797713937f5116",
+    "size": 141703045,
     "type": "minimal",
-    "version": "156.0.7+g47dbc1d+chromium-156.0.8078.17",
-    "chromium": "156.0.8078.17"
+    "version": "156.0.30+g6028375+chromium-156.0.8078.96",
+    "chromium": "156.0.8078.96"
   }
 }

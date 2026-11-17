@@ -27,6 +27,7 @@ final class ExtensionToolbarView: NSView, NSMenuDelegate {
     private let pinnedStrip = NSStackView()
     private let pinnedScroll = NSScrollView()
     private var timer: Timer?
+    private var setupWindow: NSWindow?
     private var displayedPins: Set<String> = []
     private let pinsKey = "BrowserPinnedExtensionActions"
     private var pins: Set<String> {Set(UserDefaults.standard.stringArray(forKey: pinsKey) ?? [])}
@@ -68,7 +69,10 @@ final class ExtensionToolbarView: NSView, NSMenuDelegate {
         if !visible || lastAddress != address {popup.close()}
         lastAddress = address
     }
-    func stop() {timer?.invalidate(); timer = nil; popup.close()}
+    func stop() {
+        timer?.invalidate(); timer = nil; popup.close()
+        if let sheet = setupWindow {sheet.sheetParent?.endSheet(sheet); setupWindow = nil}
+    }
     deinit {timer?.invalidate()}
     private func refresh() {
         let latest = NCExtensionActions()
@@ -111,6 +115,10 @@ final class ExtensionToolbarView: NSView, NSMenuDelegate {
             menu.addItem(pin)
         }
         menu.addItem(.separator())
+        if actions.contains(where: {$0.identifier == OnePasswordIntegration.extensionID}) {
+            let item = menu.addItem(withTitle: "1Password のデスクトップ連携を設定…", action: #selector(setupOnePassword), keyEquivalent: "")
+            item.target = self
+        }
         for (title, selector) in [("拡張機能を追加・管理…", #selector(manage)), ("このページを拡張対応ウィンドウで開く", #selector(fallback))] {
             let item = menu.addItem(withTitle: title, action: selector, keyEquivalent: ""); item.target = self
         }
@@ -126,6 +134,21 @@ final class ExtensionToolbarView: NSView, NSMenuDelegate {
         var value = pins
         if !value.insert(id).inserted {value.remove(id)}
         UserDefaults.standard.set(value.sorted(), forKey: pinsKey); rebuild()
+    }
+    @objc private func setupOnePassword() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let parent = self.window, self.setupWindow == nil,
+                  NCExtensionActions().contains(where: {$0.identifier == OnePasswordIntegration.extensionID}) else {return}
+            self.popup.close()
+            let sheet = NSWindow()
+            sheet.contentViewController = NSHostingController(rootView: OnePasswordSetupView(onClose: { [weak self, weak sheet] in
+                guard let sheet else {return}
+                sheet.sheetParent?.endSheet(sheet)
+                self?.setupWindow = nil
+            }))
+            self.setupWindow = sheet
+            parent.beginSheet(sheet) { [weak self] _ in self?.setupWindow = nil }
+        }
     }
     @objc private func manage() {
         DispatchQueue.main.async { [weak self] in
