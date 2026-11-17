@@ -178,17 +178,20 @@ struct SleepAgentState: Decodable, Equatable {
 
 struct SleepAgentTracker {
     private var previous: [String: SleepAgentState] = [:]
-    private var troubled: Set<String> = []
+    // A session can contain unrelated turns. Only an issue observed on the
+    // active turn can establish recovery when that same turn completes.
+    private var troubledTurn: [String: String] = [:]
     private var statusSince: [String: Date] = [:]
     private var connectionSince: [String: Date] = [:]
     mutating func observe(_ agents: [SleepAgentState], projects: [String: String], now: Date) -> [SleepHistoryEvent] {
         var events: [SleepHistoryEvent] = []
         for agent in agents {
             let old = previous[agent.id]
-            func event(_ kind: SleepHistoryEvent.Kind, _ reason: SleepHistoryEvent.Reason = .turnReport, source: SleepHistoryEvent.Source = .observation, since: Date? = nil) {
+            let previouslyTroubledTurn = troubledTurn[agent.id]
+            func event(_ kind: SleepHistoryEvent.Kind, _ reason: SleepHistoryEvent.Reason = .turnReport, source: SleepHistoryEvent.Source = .observation, since: Date? = nil, turn: String? = nil) {
                 events.append(.init(date: now, kind: kind, source: source, reason: old == nil ? .initial : reason, since: since,
                                     projectID: projects[agent.workspaceId], workspaceID: agent.workspaceId,
-                                    terminalID: agent.terminalId, sessionID: agent.id, turnID: agent.turnId ?? agent.lastTurnId))
+                                    terminalID: agent.terminalId, sessionID: agent.id, turnID: turn ?? agent.turnId ?? agent.lastTurnId))
             }
             if let issue = agent.runtimeIssue, issue.id != old?.runtimeIssue?.id {
                 let formatter = ISO8601DateFormatter()
@@ -198,45 +201,77 @@ struct SleepAgentTracker {
                                     source: .observation, reason: issue.willRetry ? .providerRetry : .providerError,
                                     projectID: projects[agent.workspaceId], workspaceID: agent.workspaceId,
                                     terminalID: agent.terminalId, sessionID: agent.id, turnID: issue.turnId))
-                if issue.turnId != nil && (issue.turnId == agent.turnId || issue.turnId == agent.lastTurnId) {troubled.insert(agent.id)}
+                if let turn = issue.turnId, turn == agent.turnId,
+                   ["working", "waiting"].contains(agent.status) {
+                    troubledTurn[agent.id] = turn
+                }
             }
             if let channel = agent.providerConnection ?? agent.channelState, channel != (old?.providerConnection ?? old?.channelState) {
                 if channel == "connected" {event(.providerUp, .channelReport, since: connectionSince[agent.id])}
                 else if ["unavailable", "disconnected"].contains(channel) {event(.providerDown, .channelReport, since: connectionSince[agent.id])}
                 connectionSince[agent.id] = now
             }
-            if old?.status != agent.status || old?.lastTurnId != agent.lastTurnId {
-                switch agent.status {
-                case "failed": event(.agentFailed, since: statusSince[agent.id]); troubled.insert(agent.id)
-                case "interrupted":
-                    // Registry restart and terminal closure also use interrupted;
-                    // a completed turn is not retroactively a failed execution.
-                    if let observedTurn = old?.turnId, observedTurn == agent.lastTurnId,
-                       agent.lastTurnStatus == "completed" {
-                        // Completion and terminal closure can both happen between polls.
-                        // Only the observed turn's outcome overrides the session status.
-                        event(troubled.contains(agent.id) ? .agentRecovered : .agentCompleted, since: statusSince[agent.id])
-                        troubled.remove(agent.id)
-                    } else if agent.lastTurnStatus == "interrupted" || old?.status == "working" || old?.status == "waiting" {
-                        event(.agentInterrupted, since: statusSince[agent.id]); troubled.insert(agent.id)
-                    } else {event(.agentUnknown, .causeUnknown)}
-                case "waiting": event(.agentWaiting, since: statusSince[agent.id])
-                case "idle":
-                    if agent.lastTurnStatus == "completed" {
-                        event(troubled.contains(agent.id) ? .agentRecovered : .agentCompleted, since: statusSince[agent.id])
-                        troubled.remove(agent.id)
-                    }
-                case "working":
-                    if troubled.contains(agent.id) && old?.turnId != agent.turnId {event(.agentRetry, .causeUnknown, source: .inference, since: statusSince[agent.id])}
-                default: event(.agentUnknown, .causeUnknown)
+            let lifecycleChanged = old?.status != agent.status || old?.turnId != agent.turnId
+                || old?.lastTurnId != agent.lastTurnId || old?.lastTurnStatus != agent.lastTurnStatus
+            if lifecycleChanged {
+                // A terminal may close (or a new turn start) between polls. Report
+                // the observed turn's explicit outcome before session-level inference.
+                let observedOutcome = old?.turnId != nil && old?.turnId == agent.lastTurnId
+                    && old?.turnId != agent.turnId
+                    ? agent.lastTurnStatus : nil
+                func completed(_ turn: String?) {
+                    let recovered = turn != nil && (troubledTurn[agent.id] == turn || previouslyTroubledTurn == turn)
+                    event(recovered ? .agentRecovered : .agentCompleted,
+                          since: statusSince[agent.id], turn: turn)
+                    if troubledTurn[agent.id] == turn {troubledTurn.removeValue(forKey: agent.id)}
                 }
+                var reportedOutcome = true
+                switch observedOutcome {
+                case "completed": completed(agent.lastTurnId)
+                case "failed": event(.agentFailed, since: statusSince[agent.id], turn: agent.lastTurnId)
+                case "interrupted": event(.agentInterrupted, since: statusSince[agent.id], turn: agent.lastTurnId)
+                default: reportedOutcome = false
+                }
+                if !reportedOutcome || ["working", "waiting"].contains(agent.status) {
+                    switch agent.status {
+                    case "failed": event(.agentFailed, since: statusSince[agent.id], turn: old?.turnId)
+                    case "interrupted":
+                        // Restoration/closure alone does not establish a failed turn.
+                        if old == nil && agent.lastTurnStatus == "failed" {
+                            event(.agentFailed)
+                        } else if agent.lastTurnStatus == "interrupted"
+                                    && (old == nil || old?.lastTurnId != agent.lastTurnId
+                                        || old?.lastTurnStatus != agent.lastTurnStatus) {
+                            event(.agentInterrupted, since: statusSince[agent.id], turn: agent.lastTurnId)
+                        } else if old?.status == "working" || old?.status == "waiting" {
+                            event(.agentInterrupted, .causeUnknown, source: .inference,
+                                  since: statusSince[agent.id], turn: old?.turnId)
+                        } else {event(.agentUnknown, .causeUnknown)}
+                    case "waiting": event(.agentWaiting, since: statusSince[agent.id])
+                    case "idle":
+                        if agent.lastTurnStatus == "completed",
+                           old == nil || old?.turnId != nil || old?.lastTurnId != agent.lastTurnId
+                            || old?.lastTurnStatus != agent.lastTurnStatus {
+                            // Do not reuse a stale completion for a different active turn.
+                            if old?.turnId == nil || old?.turnId == agent.lastTurnId {
+                                completed(agent.lastTurnId)
+                            } else {event(.agentUnknown, .causeUnknown, turn: old?.turnId)}
+                        }
+                    case "working": break // A new turn is not evidence of a retry.
+                    default: event(.agentUnknown, .causeUnknown)
+                    }
+                }
+            }
+            if troubledTurn[agent.id] != agent.turnId {
+                troubledTurn.removeValue(forKey: agent.id)
             }
             if old?.status != agent.status || old?.turnId != agent.turnId {statusSince[agent.id] = now}
             previous[agent.id] = agent
         }
         // Disappearance is not completion. Keep no unbounded session cache.
         let ids = Set(agents.map(\.id))
-        previous = previous.filter {ids.contains($0.key)}; troubled.formIntersection(ids)
+        previous = previous.filter {ids.contains($0.key)}
+        troubledTurn = troubledTurn.filter {ids.contains($0.key)}
         statusSince = statusSince.filter {ids.contains($0.key)}; connectionSince = connectionSince.filter {ids.contains($0.key)}
         return events
     }

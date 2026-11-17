@@ -74,8 +74,8 @@ sudo /bin/rm -f "/Library/Application Support/neuraOS Sleep Control/owned" "/Lib
 
 - **OS取得**: NSWorkspace の willSleep/didWake 通知、2秒ごとの `AppleClamshellState` / `SleepDisabled` 読み取り。通知はOSが通知した事実であり、外部測定による物理的な睡眠の証明ではない。取得不能な蓋状態も記録する。
 - **アプリ観測**: helper の確認、Wi-Fi 専用 NWPathMonitor の経路利用可否、固定 HTTPS 確認先 `https://captive.apple.com/hotspot-detect.html` の30秒ごとの疎通（最大10秒 timeout、cookie/cache なし）、daemon 接続、provider 接続報告、ターン状態。Wi-Fi 経路は無線の関連付けや SSID の取得とは異なる。HTTPS成功は確認先への到達性であり、失敗もインターネット全体の断絶を断定しない。
-- **アプリ観測（provider報告）**: Codex の error / willRetry 通知は、ターンを失敗扱いにせずエラー報告・再試行予定として記録する。同じ通知IDは再起動後も重複保存しない。同じターンが正常完了すれば復旧として扱う。連続通知の間に複数のエラーがあっても最新メタデータだけを取得できる。
-- **推定**: 中断・失敗の後に新しいターンを観測した場合の「再実行」。同じ依頼の再試行かは判別できないため、その旨を明示する。失敗後の正常完了は復旧として記録する。正常完了・回答待ちは失敗に含めない。接続断・未知の activity は正常完了とみなさない。
+- **アプリ観測（provider報告）**: Codex の error / willRetry 通知は、ターンを失敗扱いにせずエラー報告・再試行予定として記録する。同じ通知IDは再起動後も重複保存しない。実行中／回答待ちの同じ turn ID に対するエラーを観測し、そのターンの正常完了を後で確認した場合だけ復旧として扱う。過去ターンの通知は元の日時・IDの履歴として保存するが、現在のターンを障害扱いにしない。連続通知の間に複数のエラーがあっても最新メタデータだけを取得できる。
+- **推定**: 実行中／回答待ちから interrupted へ変化し、そのターンの明示的な終了結果がない場合のみ中断を推定する。明示的な完了・失敗結果を優先し、古い別ターンの結果を流用しない。新しいターンは別の依頼かもしれないため、以前の失敗だけを根拠に再試行・復旧としない。再試行は provider の willRetry 報告として記録する。正常完了・回答待ちは失敗に含めない。接続断・未知の activity は正常完了とみなさない。
 - agent の要約一覧を2秒ごとに全ページ取得する。途中で revision が変われば部分結果は採用せず、観測欠落を記録して次の tick で最初から取り直す。本文はデコード・保存しない。瞬間的な中断→復旧など、サンプル間の変化は失われ得る。
 - アプリが起動していなかった期間、sleep/wake 間、10秒を超える監視遅延、agent 一覧を取得できない期間を欠落として記録する。停止期間中の OS ログを後から完全復元する機能ではない。再起動時の欠落開始は最後の保存時刻なので、最大30秒の保存間隔も含む。
 - 同じ時刻に Wi-Fi と provider の障害が記録されても、因果関係は不明のままとする。helper が終了した理由の詳細は現在状態に表示するが、任意文字列の理由を履歴へ保存しない。
@@ -103,3 +103,37 @@ sudo /bin/rm -f "/Library/Application Support/neuraOS Sleep Control/owned" "/Lib
 | VoiceOver実読み上げ、macOS初回許可 | **手動確認が必要**。AX情報の機械取得および状態fixtureまで。 |
 
 追加の既存互換確認: `node --experimental-strip-types --test tests/native/client-capabilities.test.ts` 成功。隔離プロセスは確認後に終了。実アプリの画像と保存前後の検証データは作業worktreeの `.sleep-history-test/evidence/` に保存し、通常のデータや認証情報をリポジトリへ含めない。
+
+
+### Tracker transition audit (PR #198)
+
+The table-driven unit test `testAgentTransitionTable` covers 37 named sequences.
+Every step also repeats the identical snapshot and requires no duplicate event.
+Historical runtime issues retain their original timestamp/ID (and store deduplication);
+they never mark a different turn troubled. An initial snapshot establishes a baseline,
+not evidence that the current turn retried an earlier one.
+
+| Transition group | Expected history |
+| --- | --- |
+| Restart: clean working; stale issue with completed or cleared last status | Historical provider event if present; no inferred retry; next completion is ordinary |
+| Restart: active working/waiting issue, including willRetry | Provider error/retry report; waiting if applicable; same-turn completion can recover |
+| Restart: completed/closed-completed turn plus historical issue | Historical report and completion/unknown; no new incident or recovery |
+| Restart: failed/interrupted/closed-failed/unknown, with or without historical issue | Explicit outcome or unknown; a later unrelated turn is not retry/recovery |
+| Same turn: working → waiting → working → completed | Waiting and completion only |
+| Same turn: active error/retry → waiting/completed/closed-completed | Provider report, optional waiting, then same-turn recovery |
+| Unscoped issue or issue first seen after completion | Provider report only; no inferred recovery |
+| New working/waiting turn with previous issue | No retry/recovery inheritance |
+| Failed/interrupted turn → new turn → completed | Failure/interruption remains history; new turn completes normally |
+| Completion/failure before terminal closure | Matched turn outcome wins over session status |
+| Waiting → interrupted without outcome; stale other-turn completion | Inferred interruption, linked to the observed active turn |
+| Previous outcome and new active/waiting turn in one poll | Report old outcome separately; preserve new turn's own issue |
+| Outcome arrives with unchanged session status | Report newly supplied outcome |
+| Stale idle completion for a different active turn | Unknown, not completion/recovery |
+| Completed/interrupted status churn | Do not replay the same outcome as a new incident |
+| Connection down/up with clean, stale-issue, or active-issue turn | Connection observations remain independent of turn failure/recovery |
+
+Separate regressions verify session disappearance clears cached evidence, inferred
+interruption uses the observed turn ID and inference source, missing/mismatched turn
+IDs do not mask interruption, and persisted provider reports contain no error text.
+The archived `agentRetry` kind remains decodable for existing history; new retries
+are recorded only as provider-reported `providerRetry`, not inferred from a new turn.

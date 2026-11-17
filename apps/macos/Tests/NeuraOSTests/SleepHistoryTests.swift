@@ -82,7 +82,7 @@ final class SleepHistoryTests: XCTestCase {
         let agent = try JSONDecoder().decode(SleepAgentState.self, from: JSONSerialization.data(withJSONObject: json))
         var tracker = SleepAgentTracker()
         let events = tracker.observe([agent], projects: [:], now: at)
-        XCTAssertEqual(events.map(\.kind), [.providerRetry, .agentRecovered])
+        XCTAssertEqual(events.map(\.kind), [.providerRetry, .agentCompleted])
         XCTAssertEqual(events.first?.source, .observation)
         XCTAssertEqual(events.first?.reason, .providerRetry)
         let file = directory.appendingPathComponent("events.json")
@@ -99,6 +99,174 @@ final class SleepHistoryTests: XCTestCase {
         SleepAgentState(id: "session", terminalId: "terminal", workspaceId: "workspace",
                         status: status, channelState: nil, turnId: turn,
                         lastTurnId: lastTurn, lastTurnStatus: outcome)
+    }
+
+    func testAgentTransitionTable() {
+        typealias Kind = SleepHistoryEvent.Kind
+        typealias Step = (SleepAgentState, [Kind])
+        let issueID = UUID()
+        func state(_ status: String, _ turn: String? = nil, _ last: String? = nil, _ outcome: String? = nil,
+                   issue: String? = nil, retry: Bool = false, connection: String? = nil) -> SleepAgentState {
+            var value = snapshot(status, turn: turn, lastTurn: last, outcome: outcome)
+            if let issue {
+                value.runtimeIssue = .init(id: issueID, at: "2026-11-17T00:00:00Z",
+                                           willRetry: retry, turnId: issue == "unscoped" ? nil : issue)
+            }
+            value.providerConnection = connection
+            return value
+        }
+        let cases: [(String, [Step])] = [
+            ("restart clean active", [(state("working", "t2", "t1"), []),
+                                      (state("idle", nil, "t2", "completed"), [.agentCompleted])]),
+            ("restart stale completed issue", [
+                (state("working", "t2", "t1", "completed", issue: "t1"), [.providerError]),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("restart daemon clears outcome but retains last ID", [
+                (state("working", "t2", "t1", issue: "t1", retry: true), [.providerRetry]),
+                (state("idle", nil, "t2", "completed", issue: "t1", retry: true), [.agentCompleted])]),
+            ("restart active issue", [
+                (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("idle", nil, "t1", "completed", issue: "t1"), [.agentRecovered])]),
+            ("restart waiting active retry", [
+                (state("waiting", "t1", issue: "t1", retry: true), [.providerRetry, .agentWaiting]),
+                (state("idle", nil, "t1", "completed", issue: "t1", retry: true), [.agentRecovered])]),
+            ("restart completed historical retry", [
+                (state("idle", nil, "t1", "completed", issue: "t1", retry: true), [.providerRetry, .agentCompleted]),
+                (state("working", "t2", "t1", issue: "t1", retry: true), [])]),
+            ("restart interrupted historical completion", [
+                (state("interrupted", nil, "t1", "completed", issue: "t1"), [.providerError, .agentUnknown]),
+                (state("working", "t2", "t1", issue: "t1"), []),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("restart failed", [(state("failed", nil, "t1", "failed"), [.agentFailed]),
+                                (state("working", "t2", "t1"), []),
+                                (state("idle", nil, "t2", "completed"), [.agentCompleted])]),
+            ("restart interrupted fact", [(state("interrupted", nil, "t1", "interrupted"), [.agentInterrupted]),
+                                          (state("working", "t2", "t1"), [])]),
+            ("restart interrupted unknown", [(state("interrupted"), [.agentUnknown])]),
+            ("same turn waiting is not failure", [
+                (state("working", "t1"), []), (state("waiting", "t1"), [.agentWaiting]),
+                (state("working", "t1"), []), (state("idle", nil, "t1", "completed"), [.agentCompleted])]),
+            ("same turn active issue then closure", [
+                (state("working", "t1"), []), (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("interrupted", nil, "t1", "completed", issue: "t1"), [.agentRecovered])]),
+            ("same turn retry announcement", [
+                (state("working", "t1"), []), (state("working", "t1", issue: "t1", retry: true), [.providerRetry]),
+                (state("waiting", "t1", issue: "t1", retry: true), [.agentWaiting]),
+                (state("idle", nil, "t1", "completed", issue: "t1", retry: true), [.agentRecovered])]),
+            ("unscoped issue cannot establish recovery", [
+                (state("working", "t1", issue: "unscoped"), [.providerError]),
+                (state("idle", nil, "t1", "completed", issue: "unscoped"), [.agentCompleted])]),
+            ("late issue after completion", [
+                (state("working", "t1"), []),
+                (state("idle", nil, "t1", "completed", issue: "t1"), [.providerError, .agentCompleted])]),
+            ("new turn clears previous active issue", [
+                (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("working", "t2", "t1", issue: "t1"), []),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("new waiting turn clears previous issue", [
+                (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("waiting", "t2", "t1", issue: "t1"), [.agentWaiting]),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("failure then unrelated completion", [
+                (state("working", "t1"), []), (state("failed", nil, "t1", "failed"), [.agentFailed]),
+                (state("working", "t2", "t1"), []),
+                (state("idle", nil, "t2", "completed"), [.agentCompleted])]),
+            ("interruption then unrelated completion", [
+                (state("working", "t1"), []), (state("interrupted", nil, "t1", "interrupted"), [.agentInterrupted]),
+                (state("working", "t2", "t1"), []),
+                (state("idle", nil, "t2", "completed"), [.agentCompleted])]),
+            ("completion outranks failed session", [
+                (state("working", "t1"), []), (state("failed", nil, "t1", "completed"), [.agentCompleted])]),
+            ("failed outcome before terminal closure", [
+                (state("working", "t1"), []), (state("interrupted", nil, "t1", "failed"), [.agentFailed])]),
+            ("working completion before closure", [
+                (state("working", "t1"), []), (state("interrupted", nil, "t1", "completed"), [.agentCompleted])]),
+            ("waiting completion before closure", [
+                (state("waiting", "t1"), [.agentWaiting]),
+                (state("interrupted", nil, "t1", "completed"), [.agentCompleted])]),
+            ("waiting interruption without outcome", [
+                (state("waiting", "t1"), [.agentWaiting]), (state("interrupted"), [.agentInterrupted])]),
+            ("stale completion cannot hide active interruption", [
+                (state("working", "t2", "t1"), []),
+                (state("interrupted", nil, "t1", "completed"), [.agentInterrupted])]),
+            ("new active issue and previous completion in one poll", [
+                (state("working", "t1"), []),
+                (state("working", "t2", "t1", "completed", issue: "t2"), [.providerError, .agentCompleted]),
+                (state("idle", nil, "t2", "completed", issue: "t2"), [.agentRecovered])]),
+            ("previous recovery and new waiting turn in one poll", [
+                (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("waiting", "t2", "t1", "completed", issue: "t1"), [.agentRecovered, .agentWaiting]),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("same status outcome arrives later", [
+                (state("interrupted"), [.agentUnknown]),
+                (state("interrupted", nil, "t1", "interrupted"), [.agentInterrupted])]),
+            ("stale idle completion cannot recover active turn", [
+                (state("working", "t2", "t1", issue: "t2"), [.providerError]),
+                (state("idle", nil, "t1", "completed", issue: "t2"), [.agentUnknown])]),
+            ("completed status churn cannot duplicate outcome", [
+                (state("idle", nil, "t1", "completed"), [.agentCompleted]),
+                (state("interrupted", nil, "t1", "completed"), [.agentUnknown]),
+                (state("idle", nil, "t1", "completed"), [])]),
+            ("interrupted status churn cannot duplicate incident", [
+                (state("interrupted", nil, "t1", "interrupted"), [.agentInterrupted]),
+                (state("idle", nil, "t1", "interrupted"), []),
+                (state("interrupted", nil, "t1", "interrupted"), [.agentUnknown])]),
+            ("restart closed failed turn", [
+                (state("interrupted", nil, "t1", "failed"), [.agentFailed]),
+                (state("working", "t2", "t1"), []),
+                (state("idle", nil, "t2", "completed"), [.agentCompleted])]),
+            ("restart historical failed issue", [
+                (state("failed", nil, "t1", "failed", issue: "t1"), [.providerError, .agentFailed]),
+                (state("waiting", "t2", "t1", issue: "t1"), [.agentWaiting]),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("active error followed by failed outcome and clean turn", [
+                (state("working", "t1", issue: "t1"), [.providerError]),
+                (state("failed", nil, "t1", "failed", issue: "t1"), [.agentFailed]),
+                (state("working", "t2", "t1", issue: "t1"), []),
+                (state("idle", nil, "t2", "completed", issue: "t1"), [.agentCompleted])]),
+            ("connection recovery does not resolve active issue", [
+                (state("working", "t1", issue: "t1", connection: "unavailable"), [.providerError, .providerDown]),
+                (state("working", "t1", issue: "t1", connection: "connected"), [.providerUp]),
+                (state("idle", nil, "t1", "completed", issue: "t1", connection: "connected"), [.agentRecovered])]),
+            ("connection changes do not imply incidents", [
+                (state("working", "t1", connection: "connected"), [.providerUp]),
+                (state("working", "t1", connection: "disconnected"), [.providerDown]),
+                (state("working", "t1", connection: "connected"), [.providerUp]),
+                (state("idle", nil, "t1", "completed", connection: "connected"), [.agentCompleted])]),
+            ("connection changes with stale issue", [
+                (state("working", "t2", "t1", issue: "t1", connection: "disconnected"), [.providerError, .providerDown]),
+                (state("working", "t2", "t1", issue: "t1", connection: "connected"), [.providerUp]),
+                (state("idle", nil, "t2", "completed", issue: "t1", connection: "connected"), [.agentCompleted])])
+        ]
+        for (name, steps) in cases {
+            var tracker = SleepAgentTracker()
+            for (index, step) in steps.enumerated() {
+                let now = Date(timeIntervalSince1970: 1_800_000_000 + Double(index * 2))
+                let events = tracker.observe([step.0], projects: ["workspace": "project"], now: now)
+                XCTAssertEqual(events.map(\.kind), step.1, "\(name), step \(index)")
+                // Polling identical summaries must not synthesize another incident.
+                XCTAssertTrue(tracker.observe([step.0], projects: [:], now: now).isEmpty, name)
+            }
+        }
+    }
+
+    func testDisappearanceClearsTurnEvidenceAndInferredInterruptionKeepsObservedTurnID() {
+        var tracker = SleepAgentTracker()
+        let now = Date()
+        var working = snapshot("working", turn: "t2", lastTurn: "t1")
+        working.runtimeIssue = .init(id: UUID(), at: "2026-11-17T00:00:00Z", willRetry: false, turnId: "t2")
+        _ = tracker.observe([working], projects: [:], now: now)
+        let interrupted = tracker.observe([snapshot("interrupted", lastTurn: "t1", outcome: "completed")],
+                                          projects: [:], now: now)
+        XCTAssertEqual(interrupted.map(\.kind), [.agentInterrupted])
+        XCTAssertEqual(interrupted.first?.turnID, "t2")
+        XCTAssertEqual(interrupted.first?.source, .inference)
+        XCTAssertEqual(interrupted.first?.reason, .causeUnknown)
+        _ = tracker.observe([working], projects: [:], now: now)
+        XCTAssertTrue(tracker.observe([], projects: [:], now: now).isEmpty)
+        let restored = tracker.observe([snapshot("idle", lastTurn: "t2", outcome: "completed")],
+                                       projects: [:], now: now)
+        XCTAssertEqual(restored.map(\.kind), [.agentCompleted])
     }
 
     func testCompletedTurnBeforeTerminalClosureIsNotAnInterruption() {
@@ -143,16 +311,16 @@ final class SleepHistoryTests: XCTestCase {
     }
 
     func testAgentFailuresRetriesAndRecoveryDoNotConfuseWaitingWithFailure() throws {
-        func agent(_ status: String, turn: String? = nil, last: String? = nil, channel: String? = "connected") throws -> SleepAgentState {
+        func agent(_ status: String, turn: String? = nil, last: String? = nil, lastTurn: String = "turn1", channel: String? = "connected") throws -> SleepAgentState {
             let value: [String: Any] = ["id":"session", "terminalId":"terminal", "workspaceId":"workspace", "status":status,
-                                        "turnId":turn as Any? ?? NSNull(), "lastTurnId":last == nil ? NSNull() : "turn1" as Any,
+                                        "turnId":turn as Any? ?? NSNull(), "lastTurnId":last == nil ? NSNull() : lastTurn as Any,
                                         "lastTurnStatus":last as Any? ?? NSNull(), "channelState":channel as Any? ?? NSNull()]
             return try JSONDecoder().decode(SleepAgentState.self, from: JSONSerialization.data(withJSONObject: value))
         }
         var tracker = SleepAgentTracker()
         let now = Date()
-        func observe(_ status: String, turn: String? = nil, last: String? = nil) throws -> [SleepHistoryEvent] {
-            tracker.observe([try agent(status, turn: turn, last: last)], projects: ["workspace":"project"], now: now)
+        func observe(_ status: String, turn: String? = nil, last: String? = nil, lastTurn: String = "turn1") throws -> [SleepHistoryEvent] {
+            tracker.observe([try agent(status, turn: turn, last: last, lastTurn: lastTurn)], projects: ["workspace":"project"], now: now)
         }
         _ = try observe("working", turn: "turn1")
         let waiting = try observe("waiting", turn: "turn1")
@@ -163,10 +331,9 @@ final class SleepHistoryTests: XCTestCase {
         XCTAssertEqual(failure.first?.projectID, "project")
         XCTAssertEqual(failure.first?.sessionID, "session")
         let retry = try observe("working", turn: "turn2")
-        XCTAssertEqual(retry.first?.kind, .agentRetry)
-        XCTAssertEqual(retry.first?.source, .inference)
-        XCTAssertEqual(try observe("idle", last: "completed").map(\.kind), [.agentRecovered])
-        XCTAssertTrue(try observe("idle", last: "completed").isEmpty)
+        XCTAssertTrue(retry.isEmpty)
+        XCTAssertEqual(try observe("idle", last: "completed", lastTurn: "turn2").map(\.kind), [.agentCompleted])
+        XCTAssertTrue(try observe("idle", last: "completed", lastTurn: "turn2").isEmpty)
         XCTAssertEqual(try observe("interrupted").map(\.kind), [.agentUnknown])
         _ = try observe("working", turn: "turn3")
         XCTAssertEqual(try observe("interrupted").map(\.kind), [.agentInterrupted])
