@@ -18,7 +18,8 @@ const build=process.env.NEURA_BUILD_NUMBER??'0';
 if(!/^\d+$/.test(build))throw new Error('Invalid build number');
 const sparkleKeys=sparkleInfoKeys();
 const escape=value=>value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
-execFileSync('swift',['build','--package-path',native,'-c','release','--force-resolved-versions',...(process.env.NEURA_SWIFT_BUILD_SYSTEM?['--build-system',process.env.NEURA_SWIFT_BUILD_SYSTEM]:[])],{stdio:'inherit'});
+// Only reuse Swift products explicitly prepared in this job; copy/sign steps still validate them.
+if(process.env.NEURA_SKIP_SWIFT_BUILD!=='1')execFileSync('swift',['build','--package-path',native,'-c','release','--force-resolved-versions',...(process.env.NEURA_SWIFT_BUILD_SYSTEM?['--build-system',process.env.NEURA_SWIFT_BUILD_SYSTEM]:[])],{stdio:'inherit'});
 await mkdir(join(output,'Contents/MacOS'),{recursive:true});
 await mkdir(join(output,'Contents/Resources'),{recursive:true});
 await copyFile(join(native,'Assets/AppIcon.icns'),join(output,'Contents/Resources/AppIcon.icns'));

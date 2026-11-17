@@ -55,13 +55,7 @@ jobs:
           node-version: '24.13.0'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            crates/native-core/target
-          key: native-rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/native-core/Cargo.lock') }}
+      - uses: ./.github/actions/rust-cache
       - run: cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib --tests
       - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
       - run: pnpm install --frozen-lockfile
@@ -88,6 +82,7 @@ jobs:
           echo "NEURA_SIGN_KEYCHAIN=$RUNNER_TEMP/neura-signing.keychain-db" >> "$GITHUB_ENV"
       - run: pnpm build
         env:
+          NEURA_SKIP_RUST_BUILD: '1'
           NEURA_BUILD_NUMBER: ${{ github.run_number }}
       - run: node scripts/native/chromium/smoke.mjs
       - run: node scripts/native/release/package.mjs
@@ -96,6 +91,8 @@ jobs:
       - name: Build isolated browser fixture
         run: node scripts/native/build.mjs
         env:
+          NEURA_SKIP_RUST_BUILD: '1'
+          NEURA_SKIP_SWIFT_BUILD: '1'
           NEURA_APP_OUTPUT: apps/macos/dist/browser-fixture/neuraOS.app
           NEURA_APP_ID: com.neuraos.browser-smoke.ci
           NEURA_DEV_DATA_DIR: /tmp/neura-browser-ci

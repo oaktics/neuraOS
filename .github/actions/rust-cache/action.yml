@@ -1,0 +1,21 @@
+name: Rust build cache
+description: Refresh both debug and release compilation caches on each revision
+runs:
+  using: composite
+  steps:
+    - id: toolchain
+      shell: bash
+      run: |
+        fingerprint=$( { rustc -vV; cargo -V; xcodebuild -version; xcrun --show-sdk-version; } | shasum -a 256 | cut -d ' ' -f 1)
+        echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          crates/native-core/target
+        # Immutable entries must advance with the source, not only Cargo.lock.
+        # Restore the last compatible revision; Cargo checks source freshness.
+        key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-${{ github.sha }}
+        restore-keys: |
+          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-

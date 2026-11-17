@@ -13,7 +13,7 @@
 
 GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポジトリのdefault branchを初期値に使うため、通常のPRは`staging`向けになる。リリースPRだけマージ先を`main`へ変更する。既存PRのマージ先は自動変更されないので、機能PRは個別に`staging`へ変更する。
 
-リポジトリ管理者はrulesetでPR経由の変更と必須チェックを設定する。`staging`は`macos`、`main`は`build`を必須にする。どちらも最新のマージ先に対するチェック成功を要求し、管理者にも適用する。レビュー承認数は0とし、単独開発でもPR経由で変更できるようにする。ワークフローファイルだけでは直接pushやチェック前のマージを禁止できない。
+リポジトリ管理者はrulesetでPR経由の変更と必須チェックを設定する。`staging`は`macos`、`main`は`build`を必須にする。`staging`はstrict=false（最新baseへの追従を要求しない）とし、他のPRのマージだけを理由にCIを再実行する必要はない。`staging` → `main`のリリースPRで統合済みソースを再検証する。`main`はstrict=trueとし、最新のマージ先に対する`build`の成功を要求する。これらの保護は管理者にも適用する。レビュー承認数は0とし、単独開発でもPR経由で変更できるようにする。ワークフローファイルだけでは直接pushやチェック前のマージを禁止できない。
 
 長期運用する`staging` → `main`はsquash/rebaseせずmerge commitで履歴をつなぐ。リリース後は`main` → `staging`の同期PRをマージして履歴を揃える。緊急修正を`main`へ入れた場合も、同じように`staging`へ戻す。
 
@@ -26,6 +26,7 @@ GitHubのdefault branchは`staging`にする。neuraOSのPR作成画面はリポ
 - ルートのMarkdown、`docs/`、PRテンプレート、Issueテンプレートだけの変更は、軽量な変更判定と必須チェックの完了だけを行う。macOS検証・成果物作成・Release公開を省略する。その他の場所にあるMarkdown（テストfixture等）は検証対象。mainのpushは直前のpushではなく最後に公開したReleaseとの差分で判定し、待機中のコード変更がドキュメントpushで置き換わっても未公開コードを配布する。初回Releaseは必ず検証・公開する。週次・手動実行は変更内容によらず検証する。
 - 必須チェック`macos`と`build`は結果集約用のUbuntuジョブ。変更判定の失敗や必要な検証の失敗・キャンセルを成功として扱わない。ワークフロー自体をpath filterで省略しないため、ドキュメントPRでも必須チェックがPendingのまま残らない。
 - 同じPR／ブランチの通常CIと、同じリリースPRの配布検証は、新しい更新が来たら古い実行をキャンセルする。公開処理を含む`main`のリリースは、実行中の1件をキャンセルせず完了させる。待機は最新の1件だけを保持し、さらに更新が来た場合は古い待機分を置き換える。すべての中間コミットを個別配布する保証はなく、まとめて最新の変更を配布する運用とする。
+- 通常CIはRust（Debugテスト・Release daemon・HTTP/MCP）、Node/TS、Swiftテストを並列実行し、Rust完了後にパッケージ・smokeを実行する。daemonは同一runのartifactで渡し、fixtureでは同じジョブのSwift Release成果物も再利用する。Rustキャッシュはtoolchain・lockfile・commitで更新し、互換な直前のDebug/Release成果物を復元する。Swiftキャッシュは並列ジョブ間の書込み競合を避けるため用途別に分ける。
 - pnpm、CEF SDK、Swiftの`.build`をキャッシュする。SwiftキャッシュはOS・CPU・Xcode/Swift/SDK・依存lockfile・CEFバージョンを分離し、同じ条件の過去のコンパイル結果を再利用する。ソース変更の判定と再ビルドはSwiftPMが行い、テストは毎回実行する。DebugテストとReleaseビルドの検証は維持する。
 - ZIPは既に圧縮済みのためartifact転送時の再圧縮を省く。配布ZIPとcrash symbolsのActions artifactは1日保持とし、不要な長期保存を減らす。公開済みGitHub ReleaseのZIPは引き続き取得できる。
 - 手動の通常CIは任意のブランチで実行できる。手動リリースは`main`を指定する。`staging`等を選んだ場合はビルド・公開ともスキップする。
