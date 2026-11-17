@@ -249,6 +249,7 @@ struct BrowserPane: View {
                 }
                 BrowserDownloadsButton()
             }
+            BrowserExtensionToolbar(browser: browser).fixedSize()
             Menu {
                 if compact {
                     Button("URLをコピー") {browser.perform(.copyURL)}

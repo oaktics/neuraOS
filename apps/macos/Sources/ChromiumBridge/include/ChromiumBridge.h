@@ -1,4 +1,5 @@
 #import "BrowserDownloads.h"
+#import "BrowserExtensionActions.h"
 #import <AppKit/AppKit.h>
 NS_ASSUME_NONNULL_BEGIN
 // Called before SwiftUI creates NSApplication. No Chromium work happens in tests.
@@ -14,6 +15,8 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 @property(nonatomic, copy, nullable) BOOL (^onPopup)(NCChromiumView *view, NSString *url);
 @property(nonatomic, copy, nullable) void (^onClosed)(void);
 @property(nonatomic, copy, nullable) void (^onAutomationInvalidated)(NSString *reason);
+// Optional intrinsic sizing for extension document popovers; unset for normal tabs.
+@property(nonatomic, copy, nullable) void (^onPreferredSize)(NSInteger width, NSInteger height);
 // Overall page load progress, 0...1.
 @property(nonatomic, copy, nullable) void (^onProgress)(double progress);
 // PNG bytes of the icon of `pageURL`, or nil when that page has none.
@@ -54,5 +57,10 @@ FOUNDATION_EXPORT int NCRunDownloadSmoke(NSString * _Nonnull url, NSString * _No
 
 // True only for the process-local isolated smoke profile, never persisted preferences.
 FOUNDATION_EXPORT BOOL NCChromiumUsesTestKeychain(void);
+
+// Optional UI fixture adapter; called only after the isolated-bundle guard.
+@protocol NCExtensionsSmokeToolbarProviding
+- (NSView * _Nullable)toolbarForBrowser:(NCChromiumView * _Nonnull)browser URL:(NSString * _Nonnull)url;
+@end
 
 FOUNDATION_EXPORT int NCRunExtensionsSmoke(NSString * _Nonnull url, NSString * _Nonnull dataDirectory, int port, NSView * _Nullable accessory);
