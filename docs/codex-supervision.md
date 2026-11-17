@@ -122,3 +122,36 @@ agent並列数とwatch対象数に任意の固定上限は設けません。以�
 `node_modules`、`.build`、`.cef` などもignoredなら削除を拒否します。まず中身・用途・生成元を確認し、再生成可能と確認できた生成物だけを対象を絞って除去してください。名前だけで再生成可能とは判断しません。`.env`、秘密情報、未知のファイル、保持を求められたデータは残し、cleanupの阻害理由として報告します。MCPに汎用force/discardや名前だけに基づく再帰削除を公開しません。
 
 受付成功は削除完了ではありません。pendingなら返されたjob IDを保持し、`workspace_deletion_status` で進捗を確認します。同ツールは最大25秒のlong-pollに対応し、新たな削除や破棄を行いません。タイムアウトだけを理由に新しいoperationを繰り返さないでください。jobがsucceededで、daemonの `verifiedAbsent` と登録状態の独立した読み戻しが一致した場合だけ `completed:true` / `verifiedAbsent:true` を返します。失敗時もjobと `workspacePresent` を返します。読み戻し自体ができなければ確認済みとは扱いません。監督も `workspace_list` で結果を確認し、ブロックされた場合は削除未完了と報告します。
+
+### Startup IDs, Channels recovery, and bounded reads
+
+`task_start` returns `taskId` and `terminalId`; legacy `id` remains the terminal
+ID. `task_spawn` exposes both IDs at the top level and in `terminal`. A pending
+registration can have a null `taskId`; resolve it from `task_list`'s
+`currentSessionIds[terminalId]`. A registered Claude task ID does **not** prove
+Channels receipt. `task_watch` and filtered `task_list` reject known terminal IDs
+with `task_id_required`, naming the correct field and candidate task IDs.
+
+An unconfirmed Claude channel becomes `unavailable` after a 60-second threshold
+(the daemon reconciliation interval is 60 seconds, so detection takes at most
+about 120 seconds). `deliveryWarning` appears in full and summary task lists and
+`task_wait` snapshots, with a revision change. Instructions remain queued.
+Open the returned terminal and confirm Claude's Channels startup prompt; check
+MCP/account policy if it stays unavailable. Receipt confirmation clears the
+warning. To use another provider, cancel the still-queued instruction using
+`task_instruction` with its exact revision/state, then explicitly retry
+`task_start` in the existing workspace. There is no automatic provider switch.
+CLI capability probes allow 8 seconds per `--help`/`--version` invocation; failed
+probes remain retryable and do not poison the success cache.
+
+`task_read` defaults to a recent conversation page (five Codex turns), with
+individual strings limited to 2 KiB, a shared 32 KiB text budget, and bounded
+structure, with a 64 KiB serialized response ceiling. `truncated: true` signals omitted content. `history.nextCursor` is
+preserved verbatim for older pages; truncation never alters the source transcript.
+Use `mode: "reports"` to read the report inbox without fetching provider history,
+or `mode: "summary"` for status/counts only. Both avoid a provider RPC. Reading
+never consumes instructions or acknowledges reports. Acknowledgment must still
+name the exact report IDs. For full report text use the existing filtered
+`task_list` without `summaryOnly`; original conversation evidence stays in the
+provider transcript. A history cursor retrieves older turns, not omitted text
+within a truncated turn.

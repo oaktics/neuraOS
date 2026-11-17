@@ -73,6 +73,8 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_warning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_id: Option<String>,
@@ -109,6 +111,7 @@ struct ClaudeLive {
     initial: Option<String>,
     nonce: String,
     probe_sent: Option<i64>,
+    registered_at: i64,
     confirmed: bool,
     probe_acked: bool,
     started: i64,
@@ -255,6 +258,7 @@ impl Agents {
                 initial,
                 nonce: id(),
                 probe_sent: None,
+                registered_at: now(),
                 confirmed: false,
                 probe_acked: false,
                 started: 0,
@@ -450,12 +454,8 @@ impl Agents {
                     if a.turn_id.is_none() {
                         // A background task can finish in a turn without tools.
                         if let Some(background) = background {
-                            self.update_terminal(
-                                terminal,
-                                json!({"background":background}),
-                                None,
-                            )
-                            .await?;
+                            self.update_terminal(terminal, json!({"background":background}), None)
+                                .await?;
                         }
                         return Ok(false);
                     }
@@ -527,10 +527,11 @@ impl Agents {
                 set_claude(&mut s, terminal, Some(live));
                 return Ok(json!({"content":content,"meta":{"kind":"probe","task_id":session}}));
             }
-            if live.probe_sent.is_some_and(|at| now() - at > 60000)
+            if now() - live.registered_at > 60000
                 && a.channel_state.as_deref() != Some("unavailable")
             {
                 a.channel_state = Some("unavailable".into());
+                a.delivery_warning = Some(CHANNEL_RECOVERY.into());
                 self.save(&mut s, a).await?;
             }
             return Ok(json!({}));
@@ -593,6 +594,7 @@ impl Agents {
             live.probe_acked = true;
             let mut a = get(&s, live.session.as_ref().unwrap())?;
             a.channel_state = Some("connected".into());
+            a.delivery_warning = None;
             self.save(&mut s, a).await?;
             set_claude(&mut s, terminal, Some(live));
         }
@@ -1272,13 +1274,26 @@ impl Agents {
         Ok(())
     }
     pub async fn read(&self, target: &str, cursor: Option<&str>) -> Result<Value> {
+        self.read_mode(target, cursor, "conversation").await
+    }
+    pub async fn read_mode(&self, target: &str, cursor: Option<&str>, mode: &str) -> Result<Value> {
+        if !["conversation", "reports", "summary"].contains(&mode) {
+            return Err("invalid_read_mode".into());
+        }
         let a = self.get(target).await?;
+        if mode != "conversation" {
+            let mut result = json!({"agent":{"id":a.id,"terminalId":a.terminal_id,"status":a.status,"revision":a.revision,"turnId":a.turn_id,"channelState":a.channel_state,"deliveryWarning":a.delivery_warning,"pendingCount":a.pending.len(),"reportCount":a.reports.len()}});
+            if mode == "reports" {
+                result["agent"]["reports"] = json!(a.reports);
+            }
+            return Ok(bounded_read(result));
+        }
         let history = if a.provider == "claude" {
             super::claude::history(a.transcript_path.as_deref(), cursor).await?
         } else {
-            self.runtime.rpc(&a.terminal_id,"thread/turns/list",json!({"threadId":target,"limit":20,"sortDirection":"desc","itemsView":"full","cursor":cursor})).await?
+            self.runtime.rpc(&a.terminal_id,"thread/turns/list",json!({"threadId":target,"limit":5,"sortDirection":"desc","itemsView":"full","cursor":cursor})).await?
         };
-        Ok(json!({"agent":a,"history":history}))
+        Ok(bounded_read(json!({"agent":a,"history":history})))
     }
     pub async fn command(&self, command: &Value) -> Result<Value> {
         let target = command["agentId"].as_str().ok_or("agent_missing")?;
@@ -1334,19 +1349,33 @@ impl Agents {
             let _ = self.flush(&id).await;
         }
     }
+    #[cfg(test)]
+    pub async fn expire_channel_fixture(&self, terminal: &str) {
+        self.state
+            .lock()
+            .await
+            .claude
+            .get_mut(terminal)
+            .unwrap()
+            .registered_at = now() - 61_000;
+    }
     pub async fn reconcile_channels(&self) -> Result<()> {
-        let terminals: Vec<_> = {
-            let s = self.state.lock().await;
-            s.claude
-                .iter()
-                .filter(|(_, live)| {
-                    !live.confirmed && live.probe_sent.is_some_and(|at| now() - at > 60000)
-                })
-                .map(|(terminal, _)| terminal.clone())
-                .collect()
-        };
-        for terminal in terminals {
-            self.channel(&terminal).await?;
+        let mut state = self.state.lock().await;
+        let expired: Vec<_> = state
+            .claude
+            .values()
+            .filter(|live| !live.confirmed && now() - live.registered_at > 60000)
+            .filter_map(|live| live.session.as_ref())
+            .filter_map(|id| state.agents.get(id))
+            .filter(|a| a.channel_state.as_deref() != Some("unavailable"))
+            .cloned()
+            .collect();
+        // Reconciliation must not call channel(): that would consume a probe
+        // without returning it to the actual MCP connection.
+        for mut agent in expired {
+            agent.channel_state = Some("unavailable".into());
+            agent.delivery_warning = Some(CHANNEL_RECOVERY.into());
+            self.save(&mut state, agent).await?;
         }
         Ok(())
     }
@@ -1461,7 +1490,7 @@ fn get(s: &Registry, id: &str) -> Result<Agent> {
     s.agents
         .get(id)
         .cloned()
-        .ok_or_else(|| "agent_missing".into())
+        .ok_or_else(|| terminal_id_error(s, id).unwrap_or_else(|| "agent_missing".into()))
 }
 fn online(s: &Registry, a: &Agent) -> bool {
     s.codex.contains(&a.terminal_id)
@@ -1481,6 +1510,7 @@ fn fresh(session: &str, terminal: &str, workspace: &Value, provider: &str) -> Ag
         provider: provider.into(),
         transcript_path: None,
         channel_state: None,
+        delivery_warning: None,
         turn_id: None,
         last_turn_id: None,
         last_turn_status: None,
@@ -1666,5 +1696,118 @@ fn set_claude(s: &mut Registry, terminal: &str, next: Option<ClaudeLive>) {
         s.claude.insert(terminal.into(), live);
     } else {
         s.claude.remove(terminal);
+    }
+}
+
+const CHANNEL_RECOVERY: &str = "Claude Channels receipt was not confirmed within 60 seconds; queued instructions are undelivered. Open terminalId and confirm the Channels startup prompt; check MCP connection and account policy. To change provider, cancel queued instructions with task_instruction, then explicitly retry task_start with the chosen provider. Providers are never switched automatically.";
+fn terminal_id_error(s: &Registry, id: &str) -> Option<String> {
+    let mut tasks: Vec<_> = s
+        .agents
+        .values()
+        .filter(|a| a.terminal_id == id)
+        .map(|a| a.id.clone())
+        .collect();
+    tasks.sort();
+    (!tasks.is_empty()).then(|| json!({"error":"task_id_required","terminalId":id,"taskIds":tasks,"recovery":"Use taskId from task_start/task_spawn, not the legacy id (terminalId). For resumed terminals select currentSessionIds[terminalId]."}).to_string())
+}
+// Bound both provider tool output and inbox text without changing stored evidence.
+pub(super) fn bounded_read(value: Value) -> Value {
+    fn visit(v: &mut Value, budget: &mut usize, nodes: &mut usize, truncated: &mut bool) {
+        if *nodes == 0 {
+            *v = Value::Null;
+            *truncated = true;
+            return;
+        }
+        *nodes -= 1;
+        match v {
+            Value::String(s) => {
+                let limit = 2048.min(*budget);
+                if s.len() > limit {
+                    let mut end = limit;
+                    while !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    s.truncate(end);
+                    s.push_str("…[truncated]");
+                    *truncated = true;
+                }
+                *budget = budget.saturating_sub(s.len());
+            }
+            Value::Array(a) => {
+                if a.len() > 128 {
+                    a.truncate(128);
+                    *truncated = true;
+                }
+                let mut keep = 0;
+                for v in a.iter_mut() {
+                    if *nodes == 0 {
+                        *truncated = true;
+                        break;
+                    }
+                    visit(v, budget, nodes, truncated);
+                    keep += 1;
+                }
+                a.truncate(keep);
+            }
+            Value::Object(o) => {
+                let original = std::mem::take(o);
+                for (key, mut v) in original {
+                    if *nodes == 0 || key.len() > 128 {
+                        *truncated = true;
+                        continue;
+                    }
+                    // Keep IDs/states usable for exact ack and instruction CAS.
+                    if [
+                        "id",
+                        "taskId",
+                        "terminalId",
+                        "turnId",
+                        "sourceTaskId",
+                        "sourceTurnId",
+                        "sourceTerminalId",
+                        "state",
+                        "status",
+                        "type",
+                        "channelState",
+                    ]
+                    .contains(&key.as_str())
+                        && v.as_str().is_some_and(|s| s.len() <= 128)
+                    {
+                        *nodes -= 1;
+                    } else {
+                        visit(&mut v, budget, nodes, truncated);
+                    }
+                    o.insert(key, v);
+                }
+            }
+            _ => {}
+        }
+    }
+    let cursor = value
+        .get("history")
+        .and_then(|h| h.get("nextCursor"))
+        .cloned();
+    // Provider cursors must fit the API's input limit to be usable at all.
+    if cursor
+        .as_ref()
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.encode_utf16().count() > 4096)
+    {
+        return json!({"error":"invalid_history_cursor","truncated":true});
+    }
+    let mut node_limit = 1024;
+    loop {
+        let mut page = value.clone();
+        let mut truncated = false;
+        let mut nodes = node_limit;
+        visit(&mut page, &mut (32 * 1024), &mut nodes, &mut truncated);
+        if let Some(cursor) = &cursor {
+            page["history"]["nextCursor"] = cursor.clone();
+        }
+        page["truncated"] = json!(truncated);
+        if page.to_string().len() <= 64 * 1024 {
+            return page;
+        }
+        node_limit /= 2;
     }
 }

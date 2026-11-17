@@ -537,3 +537,68 @@ async fn binding_deltas_cover_rebind_resume_filter_and_workspace_tombstones() {
     assert_eq!(deleted["removedSessionTerminalIds"], json!([second]));
     assert_eq!(deleted["currentSessionIds"], json!({}));
 }
+
+#[tokio::test]
+async fn stalled_channel_is_visible_without_probe_and_recovers() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    a.send(&task, "do work", "queue", None).await.unwrap();
+    a.expire_channel_fixture(&terminal).await;
+    a.reconcile_channels().await.unwrap();
+    a.reconcile_channels().await.unwrap();
+    let row = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(row["agents"][0]["channelState"], "unavailable");
+    assert!(row["agents"][0]["deliveryWarning"]
+        .as_str()
+        .unwrap()
+        .contains("Channels startup"));
+    assert_eq!(a.get(&task).await.unwrap().pending.len(), 1);
+    // Reconciliation did not consume the probe intended for the MCP transport.
+    confirm(&a, &terminal, &task).await;
+    assert!(a.get(&task).await.unwrap().delivery_warning.is_none());
+}
+
+#[tokio::test]
+async fn terminal_ids_have_actionable_errors_and_read_modes_do_not_fetch_history() {
+    let (_store, a) = fixture().await;
+    let (terminal, task) = claude(&a, None).await;
+    for error in [
+        a.watch(&terminal, &[]).await.unwrap_err(),
+        a.query(json!({"taskIds":[terminal]})).await.unwrap_err(),
+    ] {
+        let error: Value = serde_json::from_str(&error).unwrap();
+        assert_eq!(error["error"], "task_id_required");
+        assert_eq!(error["taskIds"][0], task);
+    }
+    for mode in ["reports", "summary"] {
+        let result = a.read_mode(&task, None, mode).await.unwrap();
+        assert_eq!(result["agent"]["id"], task);
+        assert!(result.get("history").is_none());
+    }
+    assert!(a.read_mode(&task, None, "invalid").await.is_err());
+}
+
+#[test]
+fn conversation_output_is_bounded_and_cursor_survives() {
+    let original = json!({"agent":{"reports":[{"id":"report-id","text":"界".repeat(150_000)}]},"history":{"data":(0..5).map(|i| json!({"id":i,"items":[{"type":"toolOutput","text":"x".repeat(250_000)}]})).collect::<Vec<_>>(),"nextCursor":"opaque-cursor"}});
+    let result = crate::providers::agents::bounded_read(original.clone());
+    assert!(result.to_string().len() < 64 * 1024);
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["history"]["nextCursor"], "opaque-cursor");
+    assert_eq!(result["agent"]["reports"][0]["id"], "report-id");
+    assert!(original.to_string().len() > 1_250_000);
+}
+
+#[test]
+fn structured_tool_output_cannot_escape_read_response_budget() {
+    let items: Vec<_> = (0..200).map(|i| json!({"id":i,"payload":(0..100).map(|j| (format!("field{j}"),json!("界".repeat(100)))).collect::<serde_json::Map<_,_>>() })).collect();
+    let result = crate::providers::agents::bounded_read(
+        json!({"agent":{"id":"task"},"history":{"data":items,"nextCursor":"next"}}),
+    );
+    assert!(result.to_string().len() <= 64 * 1024);
+    assert_eq!(result["history"]["nextCursor"], "next");
+    assert_eq!(result["truncated"], true);
+}

@@ -725,7 +725,9 @@ async fn probe(program: &str, arg: &str) -> Result<String> {
         .stdout
         .take()
         .ok_or("provider probe stdout")?;
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    // Cold CLI startup can exceed the previous 3s budget. Keep this bounded,
+    // retain process-tree cleanup, and cache only successful capability probes.
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
         let read = async {
             let mut bytes = Vec::new();
             stdout
