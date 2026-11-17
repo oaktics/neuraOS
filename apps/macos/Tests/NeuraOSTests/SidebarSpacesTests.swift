@@ -6,6 +6,40 @@ final class SidebarSpacesTests: XCTestCase {
     private let projects = ["a", "b", "c", "d"].map {
         Project(id: $0, name: $0, path: "", isGit: false)
     }
+    func testSharedDropBoundarySurvivesDelayedExitAndReplacesMissedExit() {
+        var selection = SidebarProjectDropSelection()
+        let a = UUID(), b = UUID(), c = UUID()
+        let betweenAB = SidebarProjectBoundary(spaceId: "main", beforeProjectId: "b")
+        let betweenBC = SidebarProjectBoundary(spaceId: "main", beforeProjectId: "c")
+        // A's lower half and B's upper half resolve to the same boundary.
+        selection.select(betweenAB, owner: a)
+        selection.select(betweenAB, owner: b)
+        selection.clear(owner: a)
+        XCTAssertEqual(selection.boundary, betweenAB)
+        XCTAssertEqual(selection.owner, b)
+        // If B never sends exit, entering C replaces (rather than adds) a line.
+        selection.select(betweenBC, owner: c)
+        selection.clear(owner: b)
+        XCTAssertEqual(selection.boundary, betweenBC)
+        XCTAssertEqual(selection.owner, c)
+        selection.clear(owner: c)
+        XCTAssertNil(selection.boundary)
+        XCTAssertNil(selection.owner)
+    }
+    func testFirstAndTrailingBoundariesRemainSpaceScoped() {
+        var selection = SidebarProjectDropSelection()
+        let owner = UUID()
+        let first = SidebarProjectBoundary(spaceId: "main", beforeProjectId: "a")
+        let end = SidebarProjectBoundary(spaceId: "main", beforeProjectId: nil)
+        selection.select(first, owner: owner)
+        XCTAssertEqual(selection.boundary, first)
+        selection.select(end, owner: owner)
+        XCTAssertEqual(selection.boundary, end)
+        XCTAssertNotEqual(selection.boundary, SidebarProjectBoundary(spaceId: "other", beforeProjectId: nil))
+        selection = SidebarProjectDropSelection()
+        XCTAssertNil(selection.boundary)
+    }
+
     func testProjectDragKeepsItsPayloadSeparateFromFilesAndText() {
         let provider = SidebarProjectDrag(projectId: "project", spaceId: "space").provider
         XCTAssertEqual(provider.registeredTypeIdentifiers, [SidebarProjectDrag.typeIdentifier])

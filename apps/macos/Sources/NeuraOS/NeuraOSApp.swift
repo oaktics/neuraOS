@@ -226,6 +226,7 @@ struct Sidebar: View {
     @State private var collapsed: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "sidebar.collapsedProjects") ?? [])
     @State private var setupProject: Project?
     @State private var removingProject: Project?
+    @State private var projectDropSelection = SidebarProjectDropSelection()
     private var deleting: Workspace? {
         get {model.pendingWorkspaceDeletion}
         nonmutating set {model.pendingWorkspaceDeletion = newValue}
@@ -412,7 +413,8 @@ struct Sidebar: View {
         let projects = model.sidebarSpaces.projects(in: space.id, from: model.state.projects)
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
-                ForEach(projects) {project in
+                ForEach(Array(projects.enumerated()), id: \.element.id) {index, project in
+                    let next = projects.dropFirst(index + 1).first?.id
                     VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
                         projectRow(project, space: space)
                         if !collapsed.contains(project.id) {
@@ -421,10 +423,12 @@ struct Sidebar: View {
                             }
                         }
                     }
-                    .modifier(SidebarProjectDropTarget {providers, after in
-                        guard let index = projects.firstIndex(where: {$0.id == project.id}) else {return false}
-                        let next = projects.dropFirst(index + 1).first?.id
-                        return dropProject(providers, before: after ? next : project.id, in: space)
+                    .modifier(SidebarProjectDropTarget(
+                        before: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: project.id),
+                        after: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: next),
+                        selection: $projectDropSelection, spacing: SidebarMetrics.rowSpacing
+                    ) {providers, boundary in
+                        dropProject(providers, before: boundary.beforeProjectId, in: space)
                     })
                 }
                 if !projects.isEmpty {
@@ -432,7 +436,11 @@ struct Sidebar: View {
                         .contentShape(Rectangle())
                         .accessibilityHidden(true)
                         .contextMenu {addProjectButtons}
-                        .modifier(SidebarProjectDropTarget(allowsAfter: false) {providers, _ in
+                        .modifier(SidebarProjectDropTarget(
+                            before: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: nil),
+                            after: SidebarProjectBoundary(spaceId: space.id, beforeProjectId: nil),
+                            selection: $projectDropSelection, spacing: SidebarMetrics.rowSpacing
+                        ) {providers, _ in
                             dropProject(providers, before: nil, in: space)
                         })
                 } else {
@@ -444,6 +452,8 @@ struct Sidebar: View {
                 }
             }.padding(.horizontal, SidebarMetrics.gutter).padding(.top, SidebarMetrics.sectionSpacing - 10)
         }
+        .onChange(of: model.sidebarSpaces.active.id) {_, _ in projectDropSelection = SidebarProjectDropSelection()}
+        .onChange(of: projects.map(\.id)) {_, _ in projectDropSelection = SidebarProjectDropSelection()}
     }
     private func workspaceRow(_ workspace: Workspace, space: SidebarSpace) -> some View {
         // A fixed tab on screen leaves the worktree underneath marked, but not as the front item.
