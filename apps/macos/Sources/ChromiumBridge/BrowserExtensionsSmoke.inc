@@ -14,6 +14,24 @@ int NCRunExtensionsSmoke(NSString *url, NSString *dataDirectory, int port, NSVie
     @autoreleasepool {
         [view loadURL:url]; [window.contentView addSubview:view]; [window makeKeyAndOrderFront:nil];
     }
+    // Drain temporary AppKit/layout references before entering NSApp.run;
+    // otherwise a resized CEF host view can remain retained until this function
+    // returns, while the shutdown barrier is waiting for that view's dealloc.
+    @autoreleasepool {
+        if ([accessory conformsToProtocol:@protocol(NCExtensionsSmokeToolbarProviding)]) {
+            NSView *toolbar = [(id<NCExtensionsSmokeToolbarProviding>)accessory toolbarForBrowser:view URL:url];
+            if (toolbar) {
+                view.frame = NSMakeRect(0, 0, 850, 566);
+                toolbar.translatesAutoresizingMaskIntoConstraints = NO;
+                [window.contentView addSubview:toolbar];
+                [NSLayoutConstraint activateConstraints:@[
+                    [toolbar.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:8],
+                    [toolbar.topAnchor constraintEqualToAnchor:window.contentView.topAnchor constant:2],
+                    [toolbar.heightAnchor constraintEqualToConstant:30]
+                ]];
+            }
+        }
+    }
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular]; [NSApp activateIgnoringOtherApps:YES];
     NSWindow *setupWindow;
     if ([NSFileManager.defaultManager fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"setup-ui"]] && accessory) {
@@ -21,12 +39,29 @@ int NCRunExtensionsSmoke(NSString *url, NSString *dataDirectory, int port, NSVie
         setupWindow.title = @"1Password setup — isolated test";
         setupWindow.contentView = accessory; [setupWindow makeKeyAndOrderFront:nil];
     }
+    NCExtensionPopover *extensionPopover = [NCExtensionPopover new];
     __block BOOL stopping = NO;
     __block NSDictionary *baseline;
     NSDate *started = [NSDate date];
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:900];
     NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *) {
-        if (stopping) return;
+        if (stopping) {
+            NSMutableArray *remaining = [NSMutableArray array];
+            for (auto entry : browsers) [remaining addObject:@(entry.first)];
+            NSDictionary *state = @{@"remaining":remaining, @"pumpBlocked":@(PumpBlocked()), @"initialized":@(initialized)};
+            [[NSJSONSerialization dataWithJSONObject:state options:0 error:nil] writeToFile:[dataDirectory stringByAppendingPathComponent:@"shutdown-evidence.json"] atomically:YES];
+            return;
+        }
+        NSString *request = [dataDirectory stringByAppendingPathComponent:@"open-extension"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:request]) {
+            NSString *identifier = [[NSString stringWithContentsOfFile:request encoding:NSUTF8StringEncoding error:nil] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            [NSFileManager.defaultManager removeItemAtPath:request error:nil];
+            NSMutableArray *catalog = [NSMutableArray array];
+            for (NCExtensionAction *action in NCExtensionActions()) [catalog addObject:@{@"id":action.identifier, @"title":action.title, @"popup":action.popupURL ?: @"", @"icon":@(action.icon != nil)}];
+            NSString *failure = [extensionPopover showExtension:identifier fromView:view source:view];
+            NSDictionary *result = @{@"catalog":catalog, @"error":failure ?: @""};
+            [[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil] writeToFile:[dataDirectory stringByAppendingPathComponent:@"popover-evidence.json"] atomically:YES];
+        }
         NSString *modal = [dataDirectory stringByAppendingPathComponent:@"native-sheet"];
         if ([NSFileManager.defaultManager fileExistsAtPath:modal]) {
             [NSFileManager.defaultManager removeItemAtPath:modal error:nil];
@@ -50,7 +85,9 @@ int NCRunExtensionsSmoke(NSString *url, NSString *dataDirectory, int port, NSVie
         }
         if ([NSFileManager.defaultManager fileExistsAtPath:[dataDirectory stringByAppendingPathComponent:@"stop"]] || deadline.timeIntervalSinceNow < 0) {
             stopping = YES;
-            NCShutdownChromium(^{[NSApp stop:nil]; [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];});
+            NCShutdownChromium(^{
+                [@"{\"remaining\":[],\"initialized\":false,\"completed\":true}" writeToFile:[dataDirectory stringByAppendingPathComponent:@"shutdown-evidence.json"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                [NSApp stop:nil]; [NSApp postEvent:[NSEvent otherEventWithType:NSEventTypeApplicationDefined location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil subtype:0 data1:0 data2:0] atStart:NO];});
         }
     }];
     [NSApp run]; [timer invalidate]; [window orderOut:nil];

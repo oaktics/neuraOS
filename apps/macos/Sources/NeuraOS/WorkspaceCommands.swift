@@ -285,7 +285,7 @@ struct WorkspaceCommands: Commands {
                 Divider()
                 Button("URLをコピー") {browser(.copyURL)}.keyboardShortcut("c", modifiers: [.command, .shift])
                 Button("ピン留め／解除") {browser(.togglePin)}.keyboardShortcut("d")
-                Button("デフォルトのブラウザで開く") {browser(.openExternally)}
+                Button("外部のブラウザで開く") {browser(.openExternally)}
                 Button("開発者ツール") {browser(.devTools)}.keyboardShortcut("i", modifiers: [.command, .option])
             }
             .disabled(!browserActive)

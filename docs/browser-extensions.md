@@ -10,7 +10,22 @@ saving or filling; see the [deferred investigation](1password-browser.md).
 
 ## Using extensions
 
-Open the puzzle-piece menu beside the browser address field:
+Open the puzzle-piece menu beside the browser address field. Enabled MV3
+extensions appear with their manifest icon and localized title; use **ピン留め**
+to keep an icon beside the address field. Pins are neuraOS preferences, shared
+across workspace toolbars and retained across restarts (separate from Chrome's
+own pin list). Clicking an icon or extension menu item opens its declared popup
+in an anchored native popover on the same Chromium profile.
+
+**This is an extension document, not a Chrome action invocation.** The popover
+is not associated with the embedded tab. An extension querying the active tab
+can target a different Chrome-style window, even while the embedded tab has
+focus. The popover labels this limitation and offers **このページを拡張対応ウィンドウで開く**.
+Use that window's real Chrome action when the extension needs the current page,
+`activeTab`, or an action without a declared popup. The handoff opens the URL;
+it does not move the original document, unsaved form state or its history.
+
+Management remains in Chromium's own UI:
 
 - **拡張機能を追加・管理…** opens Chromium's extension manager in a separate neuraOS window. Use its enable/disable, reload, details and remove controls.
 - For an unpacked extension, turn on Developer mode in that manager, choose Load unpacked, and select the folder containing `manifest.json`. Keep that folder in place: Chromium loads its files there on subsequent launches.
@@ -19,7 +34,7 @@ Open the puzzle-piece menu beside the browser address field:
 
 The windows share the existing Chromium profile with embedded tabs, across workspaces. Installation and grants therefore apply to that profile, not just the current workspace. Review Chromium's permission prompts. The separate windows are not workspace tabs and are not exposed through neuraOS browser MCP. Downloads there use Chromium's UI; embedded tabs retain neuraOS's downloads UI.
 
-## Why a separate window?
+## Why retain a separate window?
 
 Embedded macOS NSViews force CEF's Alloy style. The [CEF window-info definition](https://github.com/chromiumembedded/cef/blob/47dbc1d/include/internal/cef_types_mac.h) documents this restriction. The [CEF maintainer's extension guidance](https://github.com/chromiumembedded/cef/issues/3859) distinguishes profile-level extension features from Chrome UI features and directs embedders to use a Chrome-style window for `chrome://extensions`. [CEF #3763](https://github.com/chromiumembedded/cef/issues/3763) explains the related WebUI restrictions.
 
@@ -28,10 +43,78 @@ The existing embedded view, popup handling, browser MCP and download callbacks r
 ## Compatibility boundaries
 
 - Manifest V3 is the target. Content scripts, runtime messaging, service workers and `storage.local` are covered by the bundled sample. This does not certify every extension/API.
-- Toolbar actions/popups and APIs depending on a Chrome window or active tab should be used in the separate window. Embedded Alloy tabs do not acquire a Chrome toolbar or full `tabs`/`windows` UI semantics.
+- Manifest-declared popup documents can run in the embedded toolbar popover. Chrome action invocation, dynamic per-tab action state, badges, `onClicked`, and active-tab/window semantics still require the separate Chrome-style window. Embedded tabs do not become Chrome window tabs.
 - Google account sync, `identity` OAuth, vendor-specific native messaging trust, enterprise policy extensions, DRM and paid/store-restricted extensions are not validated. A supported external Chrome browser remains the alternative for extensions that require those integrations.
 - Manifest V2 is not a supported target. No compatibility flags, permission bypasses, CRX download workarounds or Chromium security overrides are added to the normal app.
 - Unpacked files are not copied or automatically updated. Use Chromium's reload control after updating them, or the publisher's official distribution when available.
+
+## Native catalog and popup implementation
+
+The pinned CEF 156 SDK has no `CefExtension`/`GetExtensions`/`GetExtension` or
+extension-action dispatch API. Its `cef_request_context_t` inherits the public
+`cef_preference_manager_t`, however. neuraOS reads a **copy of the live global
+request context's `extensions.settings` preference** using `get_preference`,
+and reads the installation's manifest, locale messages and icon files. This
+avoids stale on-disk `Preferences`/`Secure Preferences` snapshots and never
+writes either file. Chromium 156 treats missing/empty `disable_reasons` as
+enabled; the catalog also excludes disabled and blocklisted entries. The
+preference schema is Chromium implementation detail and must be rechecked
+when upgrading CEF. It is not a live extension-registry API: an enabled entry
+can still fail to load, and Chromium remains responsible for permission checks.
+
+Only MV3 entries are listed. Declared title/popup/icon defaults are supported,
+including locale fallback, unpacked installations and installed version paths.
+Dynamic `chrome.action.setPopup/setTitle/setIcon`, badges and per-tab overrides
+are not reflected. Resource resolution rejects escapes outside an installation,
+including symlinks. Visible toolbars refresh every three seconds and when the
+menu opens; opening an action rechecks the live catalog. No extension bindings,
+active-tab IDs, permission overrides or Chrome-private action calls are injected.
+
+The popover uses `NCChromiumView`, the global request context, and the existing
+Alloy lifecycle/download callbacks. It is outside browser MCP's registered tab
+list. CEF's native auto-resize callback sizes its content within 400–600 ×
+100–600 points, plus the fallback footer. Dismissal closes its CEF browser;
+normal tabs, popup children, Chrome windows and these popovers all participate
+in the same shutdown barrier. Normal tab sizing and the external pump are
+unchanged.
+
+## Measured embedded behavior (2026-11-17)
+
+Measured with CEF 156.0.7 / Chromium 156.0.8078.17, the bundled MV3 fixture,
+an ad-hoc signed `com.neuraos.extensions-test.embedded` bundle, disposable
+profile and mock keychain. These results do **not** establish 1Password
+account/vault usability; no real sign-in, trust-list change or default-browser
+change was performed.
+
+| Probe | Observed result |
+| --- | --- |
+| Native catalog | Enabled fixture ID, localized/default title, PNG icon and popup URL found; standard Load unpacked installation survives restart |
+| Toolbar UI | Fixture icon pin controls, persisted pin after restart, pinned-button popup opening and same-URL Chrome-window handoff exercised in isolated app |
+| Native NSPopover document | `chrome-extension://…/popup.html` renders, with `chrome.runtime` and extension APIs available |
+| `chrome.runtime.getContexts` | Popover is a `TAB` context with `windowId: -1`, not a Chrome `POPUP` action context |
+| `tabs.query({active:true,currentWindow:true})` | Returns the Chrome-style manager's tab, **not** the embedded page |
+| `tabs.query({})` | In the diagnostic probe, excludes the embedded page |
+| `tabs.get(embeddedId)` | Succeeds; reports `active:false`, `index:-1`, `windowId:-1` |
+| `scripting.executeScript` with explicit embedded ID | Succeeds on `127.0.0.1`, covered by the fixture's existing host permission |
+| Query-selected tab scripting | Fails with `Cannot access a chrome:// URL` when the separate manager is the active Chrome tab |
+| Same embedded ID after navigation to `localhost` | Rejected: extension manifest must request host permission; no synthetic activeTab grant |
+| Content script / worker / storage / native messaging | Pass before and after clean CEF shutdown/restart; native host is disposable fixture-only |
+
+An extension that obtains its tab ID through its own content-script messaging
+and already has host access can operate on the embedded page. This is a useful
+CEF capability, but it does not fix an unmodified extension that relies on
+Chrome's active-window query or action-click grant. There is no supported public
+CEF call to attach an Alloy tab to Chrome's tab strip or invoke an arbitrary
+extension action against it. A deeper solution needs an upstream CEF/Chromium
+integration that preserves browser-window association and normal permission
+semantics; patching JavaScript API results or granting permissions in the host
+would not be a sound substitute. The explicit same-URL Chrome-window handoff is
+the supported mitigation here.
+
+1Password (`aeblfdkhhhdcdjpifhhbdiojplfjncoa`) can be enumerated like any installed
+MV3 extension with a declared action, but its real popup, native messaging trust,
+account-ready, save/fill and unlock behavior were not tested in this change.
+[Issue #134](https://github.com/oaktics/neuraOS/issues/134) remains open.
 
 ## Reproducible isolated verification
 
@@ -41,7 +124,14 @@ NEURA_SIGN_IDENTITY=- NEURA_APP_ID=com.neuraos.extensions-test \
 node scripts/native/chromium/extensions-smoke.mjs
 ```
 
-The test entry point refuses production bundle IDs, uses an isolated profile and mock keychain, and never starts the daemon. Only that entry point exposes a loopback DevTools port and enables extension debugging for the local fixture. On the first run, select the printed sample directory in Chromium's native Load unpacked chooser (the harness waits 90 seconds); later runs reuse it. The ordinary UI installation is deliberate: CDP `Extensions.loadUnpacked` alone is a temporary installation and cannot prove persistence. The test records evidence in its temporary profile directory, verifies MV3 execution in an embedded tab, shuts CEF down, and reopens the same profile without reinstalling. The bundled [sample](../tests/fixtures/chromium-extension) also has an action popup for manual `activeTab`/`scripting` verification. See [Chrome's unpacked-extension guide](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world) for the native management workflow.
+The test entry point refuses production bundle IDs, uses an isolated profile and mock keychain, and never starts the daemon. Only that entry point exposes a loopback DevTools port and enables extension debugging for the local fixture. On the first run, select the printed sample directory in Chromium's native Load unpacked chooser (the harness waits 90 seconds); later runs reuse it. The ordinary UI installation is deliberate: CDP `Extensions.loadUnpacked` alone is a temporary installation and cannot prove persistence. The test records evidence in its temporary profile directory, verifies MV3 execution in an embedded tab, shuts CEF down, and reopens the same profile without reinstalling. The bundled [sample](../tests/fixtures/chromium-extension) includes an action icon
+and popup. The harness now asks the native fixture to open the actual NSPopover,
+waits for its extension context to load, and records catalog, context, tab-query,
+explicit-ID scripting and ungranted-host results in `evidence.json`. Both phases
+assert clean shutdown, with a popover still open. `NEURA_EXTENSION_TEST_HOLD=1`
+pauses each phase for UI inspection; create `continue` in the printed isolated
+data directory to resume. The fixture also mounts the production toolbar for pin/menu testing, without
+registering a BrowserModel or MCP tab. Pins belong to the isolated test bundle. See [Chrome's unpacked-extension guide](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world) for the native management workflow.
 
 ## External pump and host architecture
 
