@@ -22,6 +22,12 @@ packaged `.app` can be registered.
   connecting) — no worktree selected, deletion in progress, main window closed —
   they open in the Chrome-style extension window instead.
 
+## Opening a page outside neuraOS
+
+The browser menu item 「外部のブラウザで開く」 (formerly 「デフォルトのブラウザで開く」)
+uses the system default unless that is neuraOS itself; then it opens Safari, or
+another registered browser if Safari is absent, so the page is not handed back.
+
 ## Verification (2026-11-17)
 
 Isolated build (`NEURA_APP_ID=com.neuraos.default-browser-test`, separate data

@@ -47,6 +47,15 @@ enum DefaultBrowser {
         }
     }
 
+    /// "Open in another browser": while neuraOS is the default, the system default would hand the page straight back.
+    static func openOutside(_ url: URL, workspace: NSWorkspace = .shared) {
+        let own = Bundle.main.bundleIdentifier
+        guard handler(for: url.scheme ?? "https").flatMap({Bundle(url: $0)?.bundleIdentifier}) == own else {workspace.open(url); return}
+        let others = workspace.urlsForApplications(toOpen: url).filter {Bundle(url: $0)?.bundleIdentifier != own}
+        guard let app = others.first(where: {Bundle(url: $0)?.bundleIdentifier == "com.apple.Safari"}) ?? others.first else {return}
+        workspace.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+    }
+
     private static func isDefault(scheme: String) -> Bool {
         guard let own = Bundle.main.bundleIdentifier else {return false}
         return handler(for: scheme).flatMap {Bundle(url: $0)?.bundleIdentifier} == own
