@@ -87,11 +87,21 @@ struct NeuraOSApp: App {
                 Toggle("ブラウザ表示中は右サイドバーを自動で隠す", isOn: Binding(get: {model.autoHideInspector}, set: {model.autoHideInspector = $0}))
             }
         }
-        Settings {AgentSleepSettings(controller: model.agentSleep)}
+        Settings {
+            TabView {
+                AgentSleepSettings(controller: model.agentSleep).tabItem {Label("スリープ", systemImage: "moon")}
+                DefaultBrowserSettings().tabItem {Label("ブラウザ", systemImage: "globe")}
+            }
+        }
     }
 }
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)}
+    /// Links from other apps when neuraOS is the default browser; RootView routes them.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        NSApp.activate(ignoringOtherApps: true)
+        ExternalLinks.shared.receive(urls)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {false}
     func applicationWillTerminate(_ notification: Notification) {DraftCache.shared.flush(); Diagnostics.shared.stop()}
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -107,6 +117,7 @@ enum Palette {
 }
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
@@ -186,13 +197,21 @@ struct RootView: View {
             }
         }
         .background(Palette.surface)
-        .onAppear {KeyboardRouter.install(model)}
+        .onAppear {KeyboardRouter.install(model); ExternalLinks.shared.showMain = {openWindow(id: "main")}}
         .task(id: model.connected && model.state.features?.contains("provider.usage") == true) {
             guard model.connected, model.state.features?.contains("provider.usage") == true else {return}
             while !Task.isCancelled {
                 await model.refreshUsage()
                 do {try await Task.sleep(for: .seconds(60))} catch {return}
             }
+        }
+        .task(id: ExternalLinks.shared.pending) {
+            // Links from other apps: the selected worktree opens them as tabs (see WorkspaceView).
+            guard !ExternalLinks.shared.pending.isEmpty else {return}
+            if model.selected != nil {model.fixedId = nil}
+            // Nothing took them (no worktree on screen, daemon away, window closed): use a separate window.
+            do {try await Task.sleep(for: .seconds(model.connected ? 2 : 8))} catch {return}
+            if let error = ExternalLinks.shared.openInExtensionWindow() {model.error = error}
         }
         .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $model.showNewProject) {NewProjectSheet()}

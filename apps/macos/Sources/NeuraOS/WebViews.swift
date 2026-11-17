@@ -127,7 +127,7 @@ import ChromiumBridge
             flash("URLをコピーしました")
         case .devTools: view.showDevTools()
         case .openExternally:
-            if let url = Self.navigationURL(address), url.scheme != "about" {NSWorkspace.shared.open(url)}
+            if let url = Self.navigationURL(address), url.scheme != "about" {DefaultBrowser.openOutside(url)}
         case .togglePin: break
         }
     }
@@ -262,7 +262,7 @@ struct BrowserPane: View {
                 Button("縮小") {browser.perform(.zoomOut)}
                 Button("実際のサイズ") {browser.perform(.zoomReset)}
                 Divider()
-                Button("デフォルトのブラウザで開く") {browser.perform(.openExternally)}
+                Button("外部のブラウザで開く") {browser.perform(.openExternally)}
                 Button("開発者ツール") {browser.perform(.devTools)}
                 Divider()
                 Button("拡張機能を追加・管理…") {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
