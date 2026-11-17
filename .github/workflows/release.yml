@@ -56,7 +56,12 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/rust-cache
+        with:
+          profile: debug
       - run: cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib --tests
+      - uses: ./.github/actions/rust-cache
+        with:
+          profile: release
       - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
         env:
           # Embed the same number that pnpm build uses before reusing this binary.

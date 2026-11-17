@@ -6,7 +6,7 @@ import test from 'node:test';
 const workflow = readFileSync(new URL('../../.github/workflows/check.yml', import.meta.url), 'utf8');
 const gate = workflow.split('  macos:\n')[1].split('        run: |\n')[1]
   .split('\n').map(line => line.replace(/^          /, '')).join('\n');
-const results = ['RUST_RESULT', 'NODE_RESULT', 'SWIFT_RESULT', 'PACKAGE_RESULT'];
+const results = ['RUST_TEST_RESULT', 'RUST_RELEASE_RESULT', 'PROTOCOL_RESULT', 'NODE_RESULT', 'SWIFT_RESULT', 'PACKAGE_RESULT'];
 function passes(overrides = {}) {
   return spawnSync('bash', ['-e', '-c', gate], {env: {
     ...process.env, CHANGES_RESULT: 'success', REQUIRED: 'true', EVENT_NAME: 'pull_request',
@@ -22,10 +22,10 @@ test('aggregate rejects every unsuccessful required job and change detection', (
   }
   assert.equal(passes({REQUIRED: ''}), false);
 });
-test('push requires Rust and Node but intentionally skips packaging and Swift', () => {
+test('push requires both Rust jobs, protocol and Node but intentionally skips packaging and Swift', () => {
   const push = {EVENT_NAME: 'push', SWIFT_RESULT: 'skipped', PACKAGE_RESULT: 'skipped'};
   assert.ok(passes(push));
-  for (const key of ['RUST_RESULT', 'NODE_RESULT']) assert.equal(passes({...push, [key]: 'cancelled'}), false);
+  for (const key of ['RUST_TEST_RESULT', 'RUST_RELEASE_RESULT', 'PROTOCOL_RESULT', 'NODE_RESULT']) assert.equal(passes({...push, [key]: 'cancelled'}), false);
   assert.equal(passes({...push, PACKAGE_RESULT: 'failure'}), false);
 });
 test('documentation-only changes pass only with all validation jobs skipped', () => {

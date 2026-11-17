@@ -19,6 +19,6 @@ runs:
     - uses: actions/cache@v4
       with:
         path: apps/macos/.build
-        key: swift-v2-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-${{ hashFiles('apps/macos/Sources/**', 'apps/macos/Tests/**') }}
+        key: swift-v3-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-${{ hashFiles('apps/macos/Sources/**', 'apps/macos/Tests/**') }}
         restore-keys: |
-          swift-v2-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-
+          swift-v3-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('apps/macos/Package.swift', 'apps/macos/Package.resolved', 'scripts/native/chromium/version.json') }}-

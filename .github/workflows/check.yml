@@ -23,8 +23,37 @@ jobs:
           fetch-depth: 0
       - id: changes
         run: node scripts/ci/changes.mjs
-  rust:
+  rust-test:
     needs: changes
+    if: needs.changes.outputs.required == 'true'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-cache
+        with:
+          profile: debug
+      - run: cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib --tests
+  rust-release:
+    needs: changes
+    if: needs.changes.outputs.required == 'true'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-cache
+        with:
+          profile: release
+      - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
+      - name: Upload release daemon
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-daemon
+          path: crates/native-core/target/release/neura-native-core
+          if-no-files-found: error
+          retention-days: 1
+  protocol:
+    needs: [changes, rust-release]
     if: needs.changes.outputs.required == 'true'
     runs-on: macos-15
     steps:
@@ -36,18 +65,12 @@ jobs:
         with:
           node-version: '24.13.0'
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: ./.github/actions/rust-cache
-      - run: cargo test --locked --manifest-path crates/native-core/Cargo.toml --lib --tests
-      - run: cargo build --release --locked --manifest-path crates/native-core/Cargo.toml
-      - name: Upload release daemon
-        if: github.event_name != 'push'
-        uses: actions/upload-artifact@v4
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
         with:
           name: native-daemon
-          path: crates/native-core/target/release/neura-native-core
-          retention-days: 1
-      - run: pnpm install --frozen-lockfile
+          path: crates/native-core/target/release
+      - run: chmod +x crates/native-core/target/release/neura-native-core
       - name: Verify native HTTP protocol and native provider MCP
         run: node --test tests/native-rust/protocol.test.mjs tests/native-rust/setup-lifecycle.test.mjs tests/native-rust/pty-crash.test.mjs tests/native-rust/migration.test.mjs tests/native/provider-native-mcp.test.mjs tests/native/provider-process-tree.test.mjs tests/native/provider-daemon-parallel.test.mjs tests/native/provider-probe-retry.test.mjs tests/native/task-control.test.mjs
         env:
@@ -93,7 +116,7 @@ jobs:
           profile: debug
       - run: pnpm test:macos --force-resolved-versions
   package:
-    needs: [changes, rust]
+    needs: [changes, rust-release]
     if: needs.changes.outputs.required == 'true' && github.event_name != 'push'
     runs-on: macos-15
     env:
@@ -160,14 +183,16 @@ jobs:
           retention-days: 1
   macos:
     if: always()
-    needs: [changes, rust, node, swift, package]
+    needs: [changes, rust-test, rust-release, protocol, node, swift, package]
     runs-on: ubuntu-latest
     steps:
       - name: Require all applicable validations
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           REQUIRED: ${{ needs.changes.outputs.required }}
-          RUST_RESULT: ${{ needs.rust.result }}
+          RUST_TEST_RESULT: ${{ needs.rust-test.result }}
+          RUST_RELEASE_RESULT: ${{ needs.rust-release.result }}
+          PROTOCOL_RESULT: ${{ needs.protocol.result }}
           NODE_RESULT: ${{ needs.node.result }}
           SWIFT_RESULT: ${{ needs.swift.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
@@ -175,7 +200,9 @@ jobs:
         run: |
           test "$CHANGES_RESULT" = success
           if [ "$REQUIRED" = true ]; then
-            test "$RUST_RESULT" = success
+            test "$RUST_TEST_RESULT" = success
+            test "$RUST_RELEASE_RESULT" = success
+            test "$PROTOCOL_RESULT" = success
             test "$NODE_RESULT" = success
             if [ "$EVENT_NAME" = push ]; then
               test "$SWIFT_RESULT" = skipped
@@ -186,7 +213,7 @@ jobs:
             fi
           else
             test "$REQUIRED" = false
-            for result in "$RUST_RESULT" "$NODE_RESULT" "$SWIFT_RESULT" "$PACKAGE_RESULT"; do
+            for result in "$RUST_TEST_RESULT" "$RUST_RELEASE_RESULT" "$PROTOCOL_RESULT" "$NODE_RESULT" "$SWIFT_RESULT" "$PACKAGE_RESULT"; do
               test "$result" = skipped
             done
           fi

@@ -1,5 +1,9 @@
 name: Rust build cache
-description: Refresh both debug and release compilation caches on each revision
+description: Refresh a Rust compilation profile cache on each revision
+inputs:
+  profile:
+    description: Cargo output profile (debug or release)
+    required: true
 runs:
   using: composite
   steps:
@@ -13,9 +17,9 @@ runs:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          crates/native-core/target
+          crates/native-core/target/${{ inputs.profile }}
         # Immutable entries must advance with the source, not only Cargo.lock.
         # Restore the last compatible revision; Cargo checks source freshness.
-        key: rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-${{ github.sha }}
+        key: rust-v3-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-${{ github.sha }}
         restore-keys: |
-          rust-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-
+          rust-v3-${{ inputs.profile }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('crates/native-core/Cargo.lock') }}-
