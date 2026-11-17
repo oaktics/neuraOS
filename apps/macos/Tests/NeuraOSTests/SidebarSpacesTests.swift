@@ -1,7 +1,77 @@
 import XCTest
+import UniformTypeIdentifiers
 @testable import NeuraOS
 
 final class SidebarSpacesTests: XCTestCase {
+    private let projects = ["a", "b", "c", "d"].map {
+        Project(id: $0, name: $0, path: "", isGit: false)
+    }
+    func testProjectDragKeepsItsPayloadSeparateFromFilesAndText() {
+        let provider = SidebarProjectDrag(projectId: "project", spaceId: "space").provider
+        XCTAssertEqual(provider.registeredTypeIdentifiers, [SidebarProjectDrag.typeIdentifier])
+        XCTAssertFalse(provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier))
+        XCTAssertFalse(provider.hasItemConformingToTypeIdentifier(UTType.text.identifier))
+        let loaded = expectation(description: "Project payload")
+        provider.loadDataRepresentation(forTypeIdentifier: SidebarProjectDrag.typeIdentifier) {data, error in
+            XCTAssertNil(error)
+            let value = data.flatMap {try? JSONDecoder().decode(SidebarProjectDrag.self, from: $0)}
+            XCTAssertEqual(value?.projectId, "project")
+            XCTAssertEqual(value?.spaceId, "space")
+            loaded.fulfill()
+        }
+        wait(for: [loaded], timeout: 2)
+    }
+
+    func testProjectFirstMiddleLastAndPersistence() throws {
+        var layout = SidebarSpaces()
+        let space = layout.active.id
+        layout.remember("selected-worktree")
+        XCTAssertTrue(layout.insertProject("d", before: "a", in: space, projects: projects))
+        XCTAssertEqual(layout.projects(in: space, from: projects).map(\.id), ["d", "a", "b", "c"])
+        XCTAssertTrue(layout.insertProject("d", before: "c", in: space, projects: projects))
+        XCTAssertEqual(layout.projects(in: space, from: projects).map(\.id), ["a", "b", "d", "c"])
+        XCTAssertTrue(layout.insertProject("a", before: nil, in: space, projects: projects))
+        layout.create(name: "Second")
+        let second = layout.active.id
+        layout.projectSpaces["b"] = second
+        layout.activeId = space
+        let restored = try JSONDecoder().decode(SidebarSpaces.self, from: JSONEncoder().encode(layout))
+        XCTAssertEqual(restored.projects(in: space, from: projects).map(\.id), ["d", "c", "a"])
+        XCTAssertEqual(restored.projects(in: second, from: projects).map(\.id), ["b"])
+        XCTAssertEqual(restored.active.selectedWorkspaceId, "selected-worktree")
+    }
+    func testProjectInvalidSelfAdjacentAndDeletedDropsDoNotMutate() throws {
+        var layout = SidebarSpaces()
+        let space = layout.active.id
+        let original = try JSONEncoder().encode(layout)
+        for (source, target) in [("a", "a"), ("a", "b"), ("missing", "b"), ("a", "missing")] {
+            XCTAssertFalse(layout.insertProject(source, before: target, in: space, projects: projects))
+        }
+        XCTAssertFalse(layout.insertProject("d", before: nil, in: space, projects: projects))
+        XCTAssertFalse(layout.insertProject("a", before: nil, in: "missing", projects: projects))
+        XCTAssertEqual(try JSONDecoder().decode(SidebarSpaces.self, from: original).projectOrder, layout.projectOrder)
+        // The drop uses the current server snapshot, not the drag-start list.
+        let remaining = Array(projects.dropFirst())
+        XCTAssertFalse(layout.insertProject("a", before: "b", in: space, projects: remaining))
+        XCTAssertFalse(layout.insertProject("b", before: "a", in: space, projects: remaining))
+        XCTAssertTrue(layout.insertProject("d", before: "b", in: space, projects: remaining))
+        XCTAssertEqual(layout.projects(in: space, from: remaining).map(\.id), ["d", "b", "c"])
+    }
+    func testProjectSpaceIsolationAndStaleSavedOrder() {
+        var layout = SidebarSpaces()
+        let main = layout.active.id
+        layout.projectOrder = [main: ["deleted", "c", "c", "a"]]
+        layout.create(name: "Other")
+        let other = layout.active.id
+        layout.projectSpaces["d"] = other
+        XCTAssertFalse(layout.insertProject("d", before: "a", in: main, projects: projects))
+        XCTAssertFalse(layout.insertProject("a", before: "d", in: main, projects: projects))
+        XCTAssertTrue(layout.insertProject("b", before: "c", in: main, projects: projects))
+        XCTAssertEqual(layout.projectOrder?[main], ["b", "c", "a"])
+        XCTAssertEqual(layout.active.id, other)
+        XCTAssertEqual(layout.projects(in: other, from: projects).map(\.id), ["d"])
+    }
+
     func testExistingProjectsStayInMainAndSelectionsSurviveReload() throws {
         var layout = SidebarSpaces()
         let main = layout.active.id

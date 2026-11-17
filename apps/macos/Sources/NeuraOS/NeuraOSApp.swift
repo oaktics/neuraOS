@@ -413,19 +413,26 @@ struct Sidebar: View {
         return ScrollView {
             LazyVStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
                 ForEach(projects) {project in
-                    projectRow(project, space: space)
-                    if !collapsed.contains(project.id) {
-                        ForEach(model.state.workspaces.filter {$0.projectId == project.id}) {workspace in
-                            workspaceRow(workspace, space: space)
+                    VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
+                        projectRow(project, space: space)
+                        if !collapsed.contains(project.id) {
+                            ForEach(model.state.workspaces.filter {$0.projectId == project.id}) {workspace in
+                                workspaceRow(workspace, space: space)
+                            }
                         }
                     }
+                    .modifier(SidebarProjectDropTarget {providers, after in
+                        guard let index = projects.firstIndex(where: {$0.id == project.id}) else {return false}
+                        let next = projects.dropFirst(index + 1).first?.id
+                        return dropProject(providers, before: after ? next : project.id, in: space)
+                    })
                 }
                 if !projects.isEmpty {
                     Color.clear.frame(height: 48)
                         .contentShape(Rectangle())
                         .accessibilityHidden(true)
                         .contextMenu {addProjectButtons}
-                        .modifier(SidebarProjectDropTarget {providers in
+                        .modifier(SidebarProjectDropTarget(allowsAfter: false) {providers, _ in
                             dropProject(providers, before: nil, in: space)
                         })
                 } else {
@@ -523,14 +530,16 @@ struct Sidebar: View {
             .onTapGesture {toggleCollapsed(project.id)}
         }
         .padding(.top, 10)
-        .onDrag {SidebarProjectDrag(projectId: project.id, spaceId: space.id).provider}
+        .onDrag {
+            SidebarProjectDrag(projectId: project.id, spaceId: space.id).provider
+        } preview: {
+            Label(project.name, systemImage: "folder")
+                .padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        }
         .help("クリックで折りたたみ、ドラッグで並び替え、右クリックで設定")
         .accessibilityLabel("\(project.name)、\(folded ? "折りたたみ中" : "展開中")")
         .accessibilityAddTraits(.isButton)
         .contextMenu {projectActions(project, space: space)}
-        .modifier(SidebarProjectDropTarget {providers in
-            dropProject(providers, before: project.id, in: space)
-        })
     }
 
     private func dropProject(_ providers: [NSItemProvider], before targetId: String?, in space: SidebarSpace) -> Bool {
