@@ -537,3 +537,78 @@ async fn binding_deltas_cover_rebind_resume_filter_and_workspace_tombstones() {
     assert_eq!(deleted["removedSessionTerminalIds"], json!([second]));
     assert_eq!(deleted["currentSessionIds"], json!({}));
 }
+
+#[tokio::test]
+async fn sleep_history_summary_separates_provider_connection_from_turn_status() {
+    let (store, a) = fixture().await;
+    let task = id();
+    a.register_codex(
+        "t",
+        &json!({"id":"w","path":"/tmp/w","name":"work"}),
+        &codex_thread(&task),
+        None,
+    )
+    .await
+    .unwrap();
+    let page = a
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["agents"][0]["providerConnection"], "connected");
+    assert!(page["agents"][0].get("summary").is_none());
+    assert!(page["agents"][0].get("pending").is_none());
+    a.codex_event("t", &json!({"id":"w","path":"/tmp/w"}), &json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":"turn1","status":"completed"}}})).await.unwrap();
+    // Persisted completion is independent of the live transport after restart.
+    let restored = Agents::new(store, Arc::new(RuntimeStub::default()))
+        .await
+        .unwrap();
+    let page = restored
+        .query(json!({"taskIds":[task],"summaryOnly":true}))
+        .await
+        .unwrap();
+    assert_eq!(page["agents"][0]["providerConnection"], "disconnected");
+    assert_eq!(page["agents"][0]["lastTurnStatus"], "completed");
+}
+
+#[tokio::test]
+async fn provider_connection_binding_changes_invalidate_summary_deltas() {
+    let (_, a) = fixture().await;
+    let task = id();
+    let workspace = json!({"id":"w","path":"/tmp/w"});
+    a.register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    a.close("t").await.unwrap();
+    let before = a.query(json!({"summaryOnly":true})).await.unwrap();
+    // Re-registering the same session can leave its interrupted status intact.
+    a.register_codex("t", &workspace, &codex_thread(&task), None)
+        .await
+        .unwrap();
+    let delta = a.query(json!({"summaryOnly":true,"sinceRevision":before["revision"],"sinceEpoch":before["epoch"],"sinceFilter":before["filter"]})).await.unwrap();
+    assert_eq!(delta["agents"][0]["providerConnection"], "connected");
+    let before = a.query(json!({"summaryOnly":true})).await.unwrap();
+    a.close("t").await.unwrap();
+    let delta = a.query(json!({"summaryOnly":true,"sinceRevision":before["revision"],"sinceEpoch":before["epoch"],"sinceFilter":before["filter"]})).await.unwrap();
+    assert_eq!(delta["agents"][0]["providerConnection"], "disconnected");
+}
+
+#[tokio::test]
+async fn provider_retry_metadata_omits_error_text_and_preserves_turn_state() {
+    let (_, a) = fixture().await;
+    let task = id();
+    let workspace = json!({"id":"w","path":"/tmp/w"});
+    a.register_codex("t", &workspace, &codex_thread(&task), None).await.unwrap();
+    a.codex_event("t", &workspace, &json!({"method":"turn/started","params":{"threadId":task,"turn":{"id":"turn1"}}})).await.unwrap();
+    a.codex_event("t", &workspace, &json!({"method":"error","params":{"threadId":task,"turnId":"turn1","willRetry":true,"error":{"message":"SECRET-provider-response"}}})).await.unwrap();
+    let result = a.query(json!({"summaryOnly":true})).await.unwrap();
+    let row = &result["agents"][0];
+    assert_eq!(row["status"], "working");
+    assert_eq!(row["runtimeIssue"]["willRetry"], true);
+    assert_eq!(row["runtimeIssue"]["turnId"], "turn1");
+    assert!(!result.to_string().contains("SECRET"));
+    let issue = row["runtimeIssue"].clone();
+    a.codex_event("t", &workspace, &json!({"method":"turn/completed","params":{"threadId":task,"turn":{"id":"turn1","status":"completed"}}})).await.unwrap();
+    let result = a.query(json!({"summaryOnly":true})).await.unwrap();
+    assert_eq!(result["agents"][0]["runtimeIssue"], issue);
+    assert_eq!(result["agents"][0]["status"], "idle");
+}
