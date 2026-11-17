@@ -341,3 +341,21 @@ final class SleepHistoryTests: XCTestCase {
         XCTAssertEqual(disconnected.map(\.kind), [.providerDown])
     }
 }
+
+final class SleepConversationPageTests: XCTestCase {
+    func testIncompleteHistoryRecordsAreSkippedInsteadOfFailingThePage() throws {
+        let json = """
+        {"history":{"nextCursor":"older","data":[
+          {"id":"turn-1","status":"completed","items":[{"id":"a","text":"first"},{},null,{"text":"no id"},{"id":"b","command":"ls","aggregatedOutput":"x"}]},
+          {"status":"completed","items":[]},
+          null,
+          {"id":"turn-2","status":"inProgress"}
+        ]}}
+        """
+        let page = try JSONDecoder().decode(SleepConversationPage.self, from: Data(json.utf8))
+        XCTAssertEqual(page.history.nextCursor, "older")
+        XCTAssertEqual(page.history.data.map(\.id), ["turn-1", "turn-2"])
+        XCTAssertEqual(page.history.data[0].items.map(\.id), ["a", "b"])
+        XCTAssertEqual(page.history.data[1].items.count, 0)
+    }
+}

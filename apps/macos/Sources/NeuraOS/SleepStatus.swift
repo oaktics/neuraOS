@@ -199,13 +199,46 @@ struct SleepHistoryConversation: View {
 }
 
 
-private struct SleepConversationPage: Decodable {
+struct SleepConversationPage: Decodable {
     let history: History
-    struct History: Decodable {let data: [Turn]; let nextCursor: String?}
-    struct Turn: Decodable, Identifiable {let id: String; let status: String; let items: [Item]}
+    struct History: Decodable {
+        let data: [Turn]; let nextCursor: String?
+        private enum CodingKeys: String, CodingKey {case data, nextCursor}
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            data = try c.decode(LossyArray<Turn>.self, forKey: .data).elements
+            nextCursor = try c.decodeIfPresent(String.self, forKey: .nextCursor)
+        }
+    }
+    struct Turn: Decodable, Identifiable {
+        let id: String; let status: String; let items: [Item]
+        private enum CodingKeys: String, CodingKey {case id, status, items}
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            status = try c.decode(String.self, forKey: .status)
+            items = try c.decodeIfPresent(LossyArray<Item>.self, forKey: .items)?.elements ?? []
+        }
+    }
     struct Item: Decodable, Identifiable {
         let id: String; let text: String?; let command: String?; let aggregatedOutput: String?; let content: [Input]?
         struct Input: Decodable {let text: String?}
         var display: String {text ?? command.map {$0 + (aggregatedOutput.map {"\n" + $0} ?? "")} ?? content?.compactMap(\.text).joined(separator: "\n") ?? ""}
+    }
+}
+
+/// A bounded history page may omit or truncate records; show what decodes instead of failing the whole page.
+struct LossyArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+    // Always succeeds without reading, so the unkeyed container advances past any value (including null).
+    private struct Skip: Decodable {init(from decoder: Decoder) throws {}}
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var elements: [Element] = []
+        while !container.isAtEnd {
+            if let element = try? container.decode(Element.self) {elements.append(element)}
+            else {_ = try? container.decode(Skip.self)}
+        }
+        self.elements = elements
     }
 }

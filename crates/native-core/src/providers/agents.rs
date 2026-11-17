@@ -1790,11 +1790,27 @@ pub(super) fn bounded_read(mut value: Value) -> Value {
 }
 
 fn bounded_history(value: Value) -> Value {
-    fn visit(v: &mut Value, budget: &mut usize, nodes: &mut usize, truncated: &mut bool) {
+    const IDENTITY: [&str; 11] = [
+        "id",
+        "taskId",
+        "terminalId",
+        "turnId",
+        "sourceTaskId",
+        "sourceTurnId",
+        "sourceTerminalId",
+        "state",
+        "status",
+        "type",
+        "channelState",
+    ];
+    // Returns false when the node budget ran out partway through `v`. Arrays
+    // drop such elements as whole units, so callers never receive a record
+    // that lost required fields (e.g. an item without its id).
+    fn visit(v: &mut Value, budget: &mut usize, nodes: &mut usize, truncated: &mut bool) -> bool {
         if *nodes == 0 {
             *v = Value::Null;
             *truncated = true;
-            return;
+            return false;
         }
         *nodes -= 1;
         match v {
@@ -1810,6 +1826,7 @@ fn bounded_history(value: Value) -> Value {
                     *truncated = true;
                 }
                 *budget = budget.saturating_sub(s.len());
+                true
             }
             Value::Array(a) => {
                 if a.len() > 128 {
@@ -1822,43 +1839,45 @@ fn bounded_history(value: Value) -> Value {
                         *truncated = true;
                         break;
                     }
-                    visit(v, budget, nodes, truncated);
+                    if !visit(v, budget, nodes, truncated) {
+                        *truncated = true;
+                        break;
+                    }
                     keep += 1;
                 }
                 a.truncate(keep);
+                true
             }
             Value::Object(o) => {
                 let original = std::mem::take(o);
-                for (key, mut v) in original {
-                    if *nodes == 0 || key.len() > 128 {
+                // Identity/state fields first: they must survive whenever the record does.
+                let (identity, rest): (Vec<_>, Vec<_>) = original
+                    .into_iter()
+                    .partition(|(key, v)| IDENTITY.contains(&key.as_str()) && v.as_str().is_some_and(|s| s.len() <= 128));
+                let mut complete = true;
+                for (key, v) in identity.into_iter().chain(rest) {
+                    if key.len() > 128 {
                         *truncated = true;
                         continue;
                     }
-                    // Keep IDs/states usable for exact ack and instruction CAS.
-                    if [
-                        "id",
-                        "taskId",
-                        "terminalId",
-                        "turnId",
-                        "sourceTaskId",
-                        "sourceTurnId",
-                        "sourceTerminalId",
-                        "state",
-                        "status",
-                        "type",
-                        "channelState",
-                    ]
-                    .contains(&key.as_str())
-                        && v.as_str().is_some_and(|s| s.len() <= 128)
-                    {
+                    if *nodes == 0 {
+                        *truncated = true;
+                        complete = false;
+                        break;
+                    }
+                    let mut v = v;
+                    if IDENTITY.contains(&key.as_str()) && v.as_str().is_some_and(|s| s.len() <= 128) {
                         *nodes -= 1;
-                    } else {
-                        visit(&mut v, budget, nodes, truncated);
+                    } else if !visit(&mut v, budget, nodes, truncated) {
+                        complete = false;
+                        o.insert(key, v);
+                        break;
                     }
                     o.insert(key, v);
                 }
+                complete
             }
-            _ => {}
+            _ => true,
         }
     }
     let cursor = value
