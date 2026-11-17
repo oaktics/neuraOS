@@ -1,16 +1,109 @@
-# 1Password in neuraOS: deferred acceptance
+# 1Password in neuraOS
 
-**1Password usability is deferred from this release at the user's request.**
-Track the remaining work in [Issue #134](https://github.com/oaktics/neuraOS/issues/134).
-This release covers native runtime performance work, general Chromium extension
-support and signing infrastructure. It does not claim working 1Password account
-sync, saving, filling or desktop unlocking. These deferred acceptance gates do
-not block this release; general extension and signing regressions still do.
+Account-ready, embedded save/fill, unlock/re-lock and restart acceptance remain
+tracked in [Issue #134](https://github.com/oaktics/neuraOS/issues/134). Registering
+the native host and passing the account-free Origin probe do not certify those
+real-account workflows.
 
-The dedicated 1Password setup entry is excluded from the release scope. Use
-[browser extensions](browser-extensions.md) for general extension management;
-this document preserves investigation results and future acceptance criteria,
-not a supported 1Password setup workflow.
+## Desktop integration setup
+
+With the official 1Password MV3 extension enabled, open the puzzle-piece menu
+beside the browser address field → **1Password のデスクトップ連携を設定…** →
+**デスクトップ連携を準備**. The app verifies the official helper's Apple-anchored
+signature, identifier and team before registering it. An identical existing
+manifest is success; a differing file is never overwritten, and profile/host
+folder/manifest symlinks are rejected.
+
+Registration is at `<data>/Chromium/NativeMessagingHosts/com.1password.1password.json`,
+where `<data>/Chromium` is `NCChromiumProfileDirectory()` (Chromium's user-data-dir),
+**not** its `Default` child. Only this browser's host manifest is written. The
+1Password trust list, accounts and other browsers' profiles are never changed.
+If necessary, the user adds the signed neuraOS app in 1Password → Settings →
+Browser → Add Browser, then reloads the extension. Existing trust need not be
+registered again. See the official [additional-browser procedure](https://support.1password.com/additional-browsers/).
+
+## Root cause and fix (2026-11-17)
+
+The production observations supplied by the user identify two independent
+failures. First, removing the setup menu left the native messaging manifest
+missing; manual registration at the user-data-dir level restored the signed
+helper connection and desktop account delegation. Second, granted extension
+fetches carried the literal header `Origin: null` and the account API returned
+500. Those production observations are user-reported, not a real-account test
+performed by this change.
+
+The second failure is [CEF #4309](https://github.com/chromiumembedded/cef/issues/4309).
+CEF's `InterceptedRequest::Restart()` synthesized Origin by running an extension
+initiator through `Referrer::SanitizeOriginForRequest`. `chrome-extension` is not
+a referrer scheme, so this produced an opaque origin. This was not a missing
+neuraOS scheme registration, helper setting or host permission. neuraOS has no
+Origin rewrite or custom extension-scheme registration.
+
+The pinned SDK is now **stable CEF 156.0.30+g6028375, Chromium 156.0.8078.96**,
+for arm64 and x64, using the official Spotify build manifest checksums. The
+[build history comparison](https://github.com/chromiumembedded/cef/compare/3d34cc3...6028375)
+is ahead by 17 commits and behind by zero: fix
+[`3d34cc3f7cbf30088e085eaa1b63089c9dba06a1`](https://github.com/chromiumembedded/cef/commit/3d34cc3f7cbf30088e085eaa1b63089c9dba06a1)
+is an ancestor. The fix leaves extension Origin generation to Chromium's network
+service, preserving normal permission/CORS handling. No header spoofing,
+permission override, disabled web security or application-side backport is used.
+
+### Account-free comparison
+
+`extension-origin-smoke.mjs` loads a minimal MV3 extension into throwaway
+profiles and captures only Origin and Sec-Fetch metadata at a loopback echo
+server. It covers the service worker, actual action popup (Chrome) / native
+popover (neuraOS), and an extension tab, with GET and POST to granted 127.0.0.1
+and ungranted localhost. No 1Password account, host, trust list or service is used.
+
+Baseline [header captures](architecture-evidence/extension-origin-156.0.7.json)
+show CEF 156.0.7 sends literal `"null"` for granted GET and POST in all three
+contexts. Chrome for Testing **153.0.8010.12**, the installed comparison binary,
+omits Origin for granted GET and sends `chrome-extension://<id>` for POST.
+Both send the extension origin for ungranted CORS requests. JSON `null` in the
+evidence means the header is absent; the string `"null"` means the faulty header.
+The Chrome version differs from CEF and is recorded explicitly.
+
+The [156.0.30 captures](architecture-evidence/extension-origin-156.0.30.json)
+match the comparison Chrome in all 12 cases (three contexts × two hosts × two
+methods), including Sec-Fetch metadata. Granted requests use `Sec-Fetch-Site:
+none`, ungranted requests `cross-site`, and all use mode `cors`, destination
+`empty`. Thus `Sec-Fetch-Site: none` alone was not the defect. No C API/struct
+adaptation was needed for this stable patch upgrade.
+
+| Browser | Granted GET Origin | Granted POST Origin | Ungranted GET/POST Origin |
+| --- | --- | --- | --- |
+| Chrome for Testing 153.0.8010.12 | absent | extension origin | extension origin |
+| neuraOS / CEF 156.0.7 | literal `null` | literal `null` | extension origin |
+| neuraOS / CEF 156.0.30 | absent | extension origin | extension origin |
+
+### Upgrade regression verification
+
+The [sanitized verification record](architecture-evidence/cef-156.0.30-verification.json)
+covers local macOS arm64 runs:
+
+- `swift test --package-path apps/macos`: 205 passed, zero failures.
+- Isolated `pnpm build`: release configuration, test bundle ID, ad-hoc signed.
+- `extensions-smoke.mjs`: both phases passed, including installed extension
+  persistence, content/worker/storage, disposable native messaging, real native
+  popover, ungranted-host scripting rejection and clean shutdown.
+- `smoke.mjs`: both phases passed (render/history/popup opener/storage/restart).
+- `download-smoke.mjs`: bytes/progress/cancel/network failure/destination cancel passed.
+- `pump-smoke.mjs`: two fixed10/adaptive pairs, zero reentries; fixed wakes
+  409/413 versus adaptive 160/147. These are short app-process measurements.
+- `browser-smoke.ts` with the built native daemon: three isolated runs passed,
+  including scoping, snapshots/password exclusion, screenshots, actions, hidden
+  tabs, popups, navigation, disconnect/crash cancellation and restart recovery.
+- `extension-origin-smoke.mjs`: all 12 cases match Chrome and the SW POST
+  Origin assertion passes. The fixture owns the fetch code in `probe.js`.
+
+The x64 pin is updated but x64 runtime was not exercised on this arm64 Mac.
+These are isolated ad-hoc builds, not Developer ID/notarization or installed
+production acceptance. The toolbar setup entry's real 1Password workflow still
+needs the user's production check: confirm the existing identical manifest is
+accepted, reload the extension, then verify account-ready, popup/tab UI,
+embedded save/update/fill, unlock/re-lock and restart persistence. Do not close
+#134 merely because the local Origin regression passes.
 
 ## Investigation record (2026-10-29)
 
@@ -22,8 +115,7 @@ desktop connection. These are not a completed installed-release acceptance test.
   enabled after restart. The tested version was 8.12.42.36 (MV3), stable ID
   `aeblfdkhhhdcdjpifhhbdiojplfjncoa`.
 - The earlier setup view verified the official desktop helper and registered its
-  standard native messaging host in the test profile. This historical check does
-  not mean the dedicated setup UI is part of the current release.
+  standard native messaging host in the test profile. This preceded the later removal and restoration of the setup entry.
 - Developer ID/static verification and main/helper dynamic validity checks using
   raw and Foundation-serialized plist data returned status 0 after Info.plist
   normalization. See [signing scope](macos-signing.md). Signing success does not
@@ -46,8 +138,8 @@ desktop connection. These are not a completed installed-release acceptance test.
   a disposable native host. Its success establishes those fixture paths, not
   1Password compatibility.
 
-The failure could involve account handoff, a particular remote request, CEF
-behavior or extension compatibility; the cause remains undetermined. No general
+At that time the cause was undetermined; the later account-free investigation
+above identifies the CEF Origin defect. No general
 Alloy incompatibility has been established. Local diagnostic extracts and images
 have not been published as attachments and are not publicly viewable evidence.
 Issue #134 contains the non-sensitive findings and the follow-up plan.
@@ -73,5 +165,4 @@ an **embedded neuraOS tab**, recording Chrome-style results separately:
 The Chrome-style extension window is outside browser MCP. Embedded tabs remain
 automatable, so disconnect MCP for any tab containing vault-filled information.
 Do not include account/tenant names, authentication headers or bodies, secrets,
-vault items or full profiles in a public report. Reintroduce dedicated 1Password
-setup guidance only after these acceptance checks succeed.
+vault items or full profiles in a public report. Keep real-account acceptance open until these checks succeed.
