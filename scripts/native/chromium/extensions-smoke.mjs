@@ -1,6 +1,6 @@
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
-import {mkdtemp,writeFile,rm,mkdir,chmod} from 'node:fs/promises';
+import {mkdtemp,writeFile,readFile,rm,mkdir,chmod} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve,join} from 'node:path';
 import assert from 'node:assert/strict';
@@ -69,7 +69,41 @@ sys.stdout.buffer.flush()
    const worker=await connect(workerTarget.webSocketDebuggerUrl);clients.push(worker);
    const native=await worker.call('Runtime.evaluate',{expression:`chrome.runtime.sendNativeMessage('com.neuraos.extension_smoke',{probe:'native-message-passed'})`,awaitPromise:true,returnByValue:true});
    assert.equal(native.result.value?.echo,'native-message-passed',JSON.stringify(native));
-   evidence.push({phase,extensionId,installed,embeddedContentWorkerStorageVisits:state,nativeMessaging:native.result.value});
+   // Exercise the actual native NSPopover, not a CDP-created extension tab.
+   await rm(join(data,'popover-evidence.json'),{force:true});
+   await writeFile(join(data,'open-extension'),extensionId);
+   const catalog=await until(async()=>JSON.parse(await readFile(join(data,'popover-evidence.json'),'utf8')));
+   assert.equal(catalog.error,''); assert(catalog.catalog.some(e=>e.id===extensionId && e.icon));
+   const popupTarget=await until(async()=>{const ts=await fetch(`http://127.0.0.1:${port}/json/list`).then(r=>r.json());return ts.find(t=>t.url===`chrome-extension://${extensionId}/popup.html`);});
+   const popup=await connect(popupTarget.webSocketDebuggerUrl);clients.push(popup);
+   await until(async()=>{const r=await popup.call('Runtime.evaluate',{expression:"typeof chrome.tabs?.query === 'function' && document.body?.innerText.includes('neuraOS extension popup')",returnByValue:true});return r.result.value===true;});
+   const tabIdResult=await tab.call('Runtime.evaluate',{expression:'Number(document.body.dataset.extensionTab)',returnByValue:true});
+   const tabId=tabIdResult.result.value;assert(Number.isInteger(tabId));
+   const probe=await popup.call('Runtime.evaluate',{expression:`(async()=>{
+     const capture=async f=>{try{return await f()}catch(e){return {error:e.message}}};
+     const active=await chrome.tabs.query({active:true,currentWindow:true});
+     const embedded=await capture(()=>chrome.tabs.get(${tabId}));
+     const explicit=await capture(()=>chrome.scripting.executeScript({target:{tabId:${tabId}},func:()=>{document.body.dataset.extensionAction='passed';return location.href}}));
+     const currentAction=await capture(()=>chrome.scripting.executeScript({target:{tabId:active[0]?.id},func:()=>location.href}));
+     return {active,embedded,explicit,currentAction,contexts:await chrome.runtime.getContexts({}),body:document.body.innerText};
+   })()`,awaitPromise:true,returnByValue:true});
+   assert(!probe.exceptionDetails,JSON.stringify(probe));
+   const embeddedAction=probe.result.value;
+   assert(embeddedAction.body.includes('neuraOS extension popup'));
+   assert.equal(embeddedAction.embedded.id,tabId);
+   assert.equal(embeddedAction.embedded.active,false);
+   assert.equal(embeddedAction.embedded.windowId,-1);
+   assert(!embeddedAction.active.some(t=>t.id===tabId));
+   assert.equal(embeddedAction.explicit[0]?.result,url,JSON.stringify(embeddedAction));
+   assert(embeddedAction.currentAction.error);
+   // The fixture only has a permanent 127.0.0.1 grant. localhost is the same
+   // disposable server, but a different host with no permission/activeTab grant.
+   await tab.call('Page.navigate',{url:url.replace('127.0.0.1','localhost')});
+   await until(async()=>{const r=await tab.call('Runtime.evaluate',{expression:'location.hostname',returnByValue:true});return r.result.value==='localhost';});
+   const denied=await popup.call('Runtime.evaluate',{expression:`chrome.scripting.executeScript({target:{tabId:${tabId}},func:()=>location.href}).then(()=>({unexpectedSuccess:true}),e=>({error:e.message}))`,awaitPromise:true,returnByValue:true});
+   assert(denied.result.value?.error,JSON.stringify(denied));
+   await tab.call('Page.navigate',{url});
+   evidence.push({phase,extensionId,installed,embeddedContentWorkerStorageVisits:state,nativeMessaging:native.result.value,catalog,embeddedAction,ungrantedHost:denied.result.value});
    console.log(JSON.stringify(evidence.at(-1)));
    if(process.env.NEURA_EXTENSION_TEST_HOLD==='1'){
     console.log(`UI inspection ready; profile=${data}, port=${port}`);

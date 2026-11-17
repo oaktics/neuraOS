@@ -3,6 +3,7 @@
 #include "include/capi/cef_client_capi.h"
 #include "include/capi/cef_devtools_message_observer_capi.h"
 #include "include/capi/cef_image_capi.h"
+#include "include/capi/cef_parser_capi.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
@@ -16,6 +17,7 @@
 API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
 API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_userfree_utf16_free);
 API(cef_string_list_size); API(cef_string_list_value);
+API(cef_request_context_get_global_context); API(cef_write_json);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
 static NSString *chromiumProfile;
@@ -148,6 +150,7 @@ static NSString *StartChromiumImpl() {
     LOAD(cef_initialize); LOAD(cef_shutdown); LOAD(cef_do_message_loop_work);
     LOAD(cef_browser_host_create_browser_sync); LOAD(cef_api_hash); LOAD(cef_string_userfree_utf16_free);
     LOAD(cef_string_list_size); LOAD(cef_string_list_value);
+    LOAD(cef_request_context_get_global_context); LOAD(cef_write_json);
 #undef LOAD
     const char *apiHash = p_cef_api_hash(CEF_API_VERSION, 0);
     if (!apiHash || strcmp(apiHash, CEF_API_HASH_PLATFORM) != 0) return @"ChromiumのAPIバージョンが一致しません。";
@@ -249,6 +252,11 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     c->api.get_download_handler = [](cef_client_t *self) -> cef_download_handler_t * {return MakeDownloadHandler(View(self));};
     c->api.get_display_handler = [](cef_client_t *self) -> cef_display_handler_t * {
         auto h = new Handler<cef_display_handler_t>(View(self));
+        h->api.on_auto_resize = [](cef_display_handler_t *s, cef_browser_t *browser, const cef_size_t *size) -> int {
+            CallbackRef browserRef(browser); NCChromiumView *v = View(s);
+            if (!v.onPreferredSize) return 0;
+            v.onPreferredSize(size->width, size->height); return 1;
+        };
         h->api.on_address_change = [](cef_display_handler_t *s, cef_browser_t *browser, cef_frame_t *frame, const cef_string_t *url) {
             CallbackRef browserRef(browser); CallbackRef frameRef(frame);
             if (!frame->is_main(frame)) return;
@@ -440,6 +448,11 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     auto info = WindowInfo(self); cef_browser_settings_t settings = {}; settings.size = sizeof(settings);
     auto client = MakeClient(self); NCString url(_pendingURL);
     auto browser = p_cef_browser_host_create_browser_sync(&info, client, &url.value, &settings, nullptr, nullptr);
+    if (browser && self.onPreferredSize) {
+        auto host = browser->get_host(browser);
+        cef_size_t minimum = {400, 100}, maximum = {600, 600};
+        host->set_auto_resize_enabled(host, 1, &minimum, &maximum); Release(host);
+    }
     // Creation consumes the client reference; the returned browser is owned.
     Release(browser);
     _creating = NO;

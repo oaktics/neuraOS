@@ -16,7 +16,10 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "neuraOS smoke"
+    "default_title": "neuraOS smoke",
+    "default_icon": {
+      "32": "icon.png"
+    }
   },
   "content_scripts": [
     {
