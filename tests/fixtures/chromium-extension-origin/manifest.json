@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "neuraOS extension origin probe",
+  "version": "1.0",
+  "background": {"service_worker": "worker.js"},
+  "host_permissions": ["http://127.0.0.1/*"],
+  "action": {"default_popup": "popup.html"}
+}
