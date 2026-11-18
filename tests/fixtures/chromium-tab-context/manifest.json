@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "neuraOS Tab Context Probe",
+  "version": "1.0",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "background": {"service_worker": "worker.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Tab context probe"}
+}

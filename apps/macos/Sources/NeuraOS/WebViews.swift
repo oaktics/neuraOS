@@ -46,7 +46,7 @@ import ChromiumBridge
         automationEnabled = automation && !UserDefaults.standard.bool(forKey: "browser.mcpDisabled." + storageId)
         address = Self.savedAddress(storageId: storageId, workspaceId: workspaceId)
         loaded = eager || view != nil
-        self.view = view ?? NCChromiumView(frame: .zero)
+        self.view = view ?? NCChromiumView(frame: .zero, chromeTab: true)
         self.view.onState = { [weak self] url, title, back, forward, loading in
             DispatchQueue.main.async {
                 guard let self else {return}
@@ -160,6 +160,7 @@ struct BrowserPane: View {
     let actions: BrowserPaneActions
     @StateObject private var browser: BrowserModel
     @FocusState private var findFocused: Bool
+    @State private var showingOnePasswordSetup = false
     init(storageId: String, workspaceId: String, projectId: String, visible: Bool, title: Binding<String?>, url: Binding<String?>,
          pin: BrowserPin? = nil, split: Bool = false, fixed: Bool = false, eager: Bool = true, automation: Bool = true, view: NCChromiumView? = nil, actions: BrowserPaneActions) {
         self.visible = visible; self._title = title; self._url = url; self.pin = pin; self.split = split; self.fixed = fixed; self.actions = actions
@@ -199,6 +200,7 @@ struct BrowserPane: View {
                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .sheet(isPresented: $showingOnePasswordSetup) {OnePasswordSetupView(onClose: {showingOnePasswordSetup = false})}
         .onAppear {if visible {browser.loaded = true}; browser.browserVisible = visible; url = browser.address}
         .onChange(of: visible) {_, value in if value {browser.loaded = true}; browser.browserVisible = value}
         .onChange(of: browser.title) {_, _ in publish()}
@@ -211,6 +213,7 @@ struct BrowserPane: View {
     }
     private func toolbar(compact: Bool) -> some View {
         HStack(spacing: compact ? 2 : 6) {
+            if !browser.view.chromeTab {
             Group {
                 Button {browser.perform(.back)} label: {Image(systemName: "chevron.left").frame(width: 24, height: 24)}
                     .help("戻る（⌘[）").disabled(!browser.canGoBack)
@@ -236,6 +239,11 @@ struct BrowserPane: View {
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
                 .contentShape(Rectangle())
             }.help("アドレスを入力・検索（⌘L）\n\(browser.address)").accessibilityLabel("アドレス: \(browser.address)")
+            } else {
+                Text(browser.notice ?? BrowserInput.displayHost(browser.address)).lineLimit(1).truncationMode(.middle)
+                    .foregroundStyle(browser.notice == nil ? Color.secondary : Color.accentColor)
+                Spacer(minLength: 0)
+            }
             if !compact {
                 Button {browser.perform(.copyURL)} label: {Image(systemName: "link").frame(width: 24, height: 24)}.help("URLをコピー（⇧⌘C）")
                 Button {actions.togglePin(browser.address, browser.title)} label: {
@@ -249,7 +257,7 @@ struct BrowserPane: View {
                 }
                 BrowserDownloadsButton()
             }
-            BrowserExtensionToolbar(browser: browser).fixedSize()
+            if !browser.view.chromeTab {BrowserExtensionToolbar(browser: browser).fixedSize()}
             Menu {
                 if compact {
                     Button("URLをコピー") {browser.perform(.copyURL)}
@@ -265,6 +273,9 @@ struct BrowserPane: View {
                 Button("外部のブラウザで開く") {browser.perform(.openExternally)}
                 Button("開発者ツール") {browser.perform(.devTools)}
                 Divider()
+                if browser.view.chromeTab && NCExtensionActions().contains(where: {$0.identifier == OnePasswordIntegration.extensionID}) {
+                    Button("1Password のデスクトップ連携を設定…") {showingOnePasswordSetup = true}
+                }
                 Button("拡張機能を追加・管理…") {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
                 Button("Chrome ウェブストアを開く…") {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
                 Button("このページを拡張対応ウィンドウで開く") {
