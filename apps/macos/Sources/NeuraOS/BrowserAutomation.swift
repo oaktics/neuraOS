@@ -36,9 +36,9 @@ struct BrowserAutomationError: Error {let code: String}
                     guard let self else {return}
                     for entry in self.entries.values {
                         guard let model = entry.model, !model.automationOwner.isEmpty else {continue}
-                        if NCChromiumOwnerForWindow(event.window) === model.view {self.stop(model); continue}
+                        if NCChromiumOwnerForWindow(event.window) === model.view {self.cancel(model); continue}
                         guard model.view.window === event.window else {continue}
-                        if event.type == .keyDown || model.view.convert(model.view.bounds, to: nil).contains(event.locationInWindow) {self.stop(model)}
+                        if event.type == .keyDown || model.view.convert(model.view.bounds, to: nil).contains(event.locationInWindow) {self.cancel(model)}
                     }
                 }
                 return event
@@ -72,11 +72,15 @@ struct BrowserAutomationError: Error {let code: String}
         }
     }
     func unregister(_ view: NCChromiumView) {
-        for (key, entry) in entries where entry.model?.view === view {if let model = entry.model {stop(model, reason:"browser_tab_closed")}; entries.removeValue(forKey: key)}
+        for (key, entry) in entries where entry.model?.view === view {if let model = entry.model {cancel(model, reason:"browser_tab_closed")}; entries.removeValue(forKey: key)}
         pulse.signal()
     }
     func stop(_ model: BrowserModel, reason: String = "browser_cancelled") {
         model.automationEnabled = false
+        cancel(model, reason: reason)
+    }
+    // Lifecycle failures and human input end work, not the user's saved permission.
+    func cancel(_ model: BrowserModel, reason: String = "browser_cancelled") {
         for (id, key) in owners where key == model.storageId {failures[id] = reason; jobs[id]?.cancel()}
         model.view.cancelDevTools()
         pulse.signal()

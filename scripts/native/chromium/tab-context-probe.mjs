@@ -57,6 +57,14 @@ try {
  console.log('CLICK 1: Open Extensions > neuraOS Tab Context Probe on Tab 1.');
  const first=await until(async()=>{const s=await evaluate(worker,'chrome.storage.local.get("popup")');return s.popup;},'real popup action',180000);
  assert.equal(first.tab.id,tabs[0].id);assert.equal(first.execution.url,tabs[0].url);assert.equal(first.execution.draft,'draft-/0');assert(first.contexts.some(c=>c.contextType==='POPUP'));evidence.checks.push({name:'popup-action',result:first});
+ console.log('POPUP: Type popup-draft into Popup draft and click Open test item.');
+ const interaction=await until(async()=>{const s=await evaluate(worker,'chrome.storage.local.get("interaction")');return s.interaction;},'popup item interaction',180000);
+ assert.equal(interaction.draft,'popup-draft');assert.equal(interaction.clicks,1);assert.equal(interaction.detail,'Test item detail');
+ await sleep(10000);
+ console.log('POPUP: Click Open test item again, without closing/reopening the popup.');
+ const repeated=await until(async()=>{const s=await evaluate(worker,'chrome.storage.local.get("interaction")');return s.interaction?.clicks===2?s.interaction:null;},'stable popup item interaction',180000);
+ assert.equal(repeated.instance,interaction.instance);assert.equal(repeated.draft,interaction.draft);assert(repeated.elapsed-interaction.elapsed>=10000);
+ evidence.checks.push({name:'popup-item-clicks-and-draft-survive-ten-seconds',first:interaction,second:repeated});
  const otherDenied=await evaluate(worker,`probeTab(${tabs[1].id})`);assert(otherDenied.error);evidence.checks.push({name:'other-tab-denied',...otherDenied});
  // Change runtime action metadata through the fixture's normal API.
  await evaluate(worker,'chrome.action.setPopup({popup:""})');

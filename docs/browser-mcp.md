@@ -23,11 +23,12 @@ by both daemon workspace ownership checks and the native registry.
 While an agent operates a tab, a bar under the toolbar shows the active terminal
 ID. **停止して接続解除** cancels work and disables that tab; only the user can allow
 it again, from the toolbar's ⋯ menu (**エージェント（MCP）からの操作を許可**). Real mouse,
-keyboard or scroll input on an actively operated view also disconnects it before
-delivering the human input. One request owns a tab at a time, including reads.
+keyboard or scroll input on an actively operated view cancels the current work before
+delivering the human input, without changing the saved permission. One request owns a tab at a time, including reads.
 A competing CLI receives `browser_busy`, rather than interleaving input.
-Disconnect persists across app restart. A renderer crash also disconnects the tab;
-reload and explicitly resume access in the app to recover.
+Explicit disconnect persists across app restart. Renderer crashes, DevTools detach
+and view teardown cancel pending work without changing the saved permission.
+Failed commands are not replayed; reload a crashed page before issuing new work.
 
 ## Tools
 

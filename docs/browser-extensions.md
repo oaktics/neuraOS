@@ -74,6 +74,8 @@ or grant access. The runner writes `evidence.json` and `stderr.log` under the
 printed temporary directory and verifies:
 
 - access denied before a click and for the other tab after a click;
+- item detail clicks and a typed popup draft surviving at least ten seconds
+  in the same document (follow the additional POPUP prompts);
 - a real `POPUP` context targeting the current page, then a runtime popup
   override and a real `onClicked` event on the second tab;
 - input and document state preserved through switching, movement and resize;
@@ -246,3 +248,18 @@ its evidence marks that limitation and retains all browser behavior assertions.
 The external launch path was first checked against the Node daemon in a child
 process; run it against the finished Rust executable and integrated native app
 before treating native-daemon compatibility as verified.
+
+## native-98 interaction report follow-up
+
+The installed native-98 1Password document popover was observed with a populated
+item list but no detail change after an accessibility click. A coordinate-click
+comparison was interrupted by concurrent browser operation; this is not yet
+proof of the extension's root cause. The legacy three-second catalog timer does
+not reload a document: it closes the popover only when metadata changes or the
+source disappears. No periodic popup navigation was found in that host.
+
+Workspace tabs on staging already use Chrome's action popup via PR #204, which
+avoids the legacy document popover and its catalog timer. The expanded disposable
+fixture now verifies real item clicks and a typed draft across a ten-second
+interval without replacing the document, plus the existing action/lifecycle
+checks. This is generic host evidence, not real 1Password vault/save/fill acceptance.
