@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ChromiumBridge
 
 /// One row of the command bar and what choosing it does.
 struct CommandBarItem: Identifiable, Equatable {
@@ -294,10 +295,12 @@ private final class CommandBarWindow: NSPanel {
     private let model = CommandBarModel()
     private var panel: CommandBarWindow?
     private weak var parent: NSWindow?
+    private weak var browserFocus: NCChromiumView?
     private var closing = false
     var isVisible: Bool {panel?.isVisible == true}
 
     func show(over window: NSWindow, context: CommandBarContext, commit: @escaping (CommandBarItem.Action, Bool) -> Void) {
+        if !isVisible {browserFocus = NCChromiumOwnerForWindow(NSApp.keyWindow)}
         let panel = self.panel ?? makePanel()
         self.panel = panel
         if let parent, parent !== window {parent.removeChildWindow(panel)}
@@ -319,7 +322,9 @@ private final class CommandBarWindow: NSPanel {
         closing = true; defer {closing = false}
         parent?.removeChildWindow(panel)
         panel.orderOut(nil)
-        parent?.makeKey()
+        if let browserFocus, browserFocus.window === parent, !browserFocus.isHidden {browserFocus.focusContent()}
+        else {parent?.makeKey()}
+        browserFocus = nil
     }
 
     func windowDidResignKey(_ notification: Notification) {close()}

@@ -11,6 +11,10 @@ FOUNDATION_EXPORT NSString * _Nullable NCChromiumProfileDirectory(void);
 FOUNDATION_EXPORT NSString * _Nullable NCOpenExtensionWindow(NSString *url);
 FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 @interface NCChromiumView : NSView
+// Chrome Views surface: a native child window with Chrome-owned tab/action context.
+// Keeps the Chrome toolbar and extension permissions associated with this page.
+- (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab;
+@property(nonatomic, readonly) BOOL chromeTab;
 @property(nonatomic, copy, nullable) void (^onState)(NSString *url, NSString *title, BOOL back, BOOL forward, BOOL loading);
 @property(nonatomic, copy, nullable) void (^onError)(NSString *message);
 @property(nonatomic, copy, nullable) BOOL (^onPopup)(NCChromiumView *view, NSString *url);
@@ -50,6 +54,8 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 - (void)stop;
 - (void)close;
 @end
+// Exact hosted Chrome window only; extension popups/DevTools retain their own keys.
+FOUNDATION_EXPORT NCChromiumView * _Nullable NCChromiumOwnerForWindow(NSWindow * _Nullable window);
 NS_ASSUME_NONNULL_END
 // Packaged, isolated integration check. Requires a loopback fixture URL.
 FOUNDATION_EXPORT int NCRunChromiumSmoke(NSString * _Nonnull url, NSString * _Nonnull dataDirectory);

@@ -639,9 +639,12 @@ struct WorkspaceView: View {
         guard clickMonitor == nil else {return}
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {event in
             MainActor.assumeIsolated {
-                guard model.frontId == workspace.id, layout.split != nil, let content = event.window?.contentView,
-                      event.window?.identifier?.rawValue.hasPrefix("main") == true else {return}
-                let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+                let owner = NCChromiumOwnerForWindow(event.window)
+                let window = owner?.window ?? event.window
+                guard model.frontId == workspace.id, layout.split != nil, let content = window?.contentView,
+                      window?.identifier?.rawValue.hasPrefix("main") == true else {return}
+                let location = owner == nil ? event.locationInWindow : window!.convertPoint(fromScreen: event.window!.convertPoint(toScreen: event.locationInWindow))
+                let point = CGPoint(x: location.x, y: content.bounds.height - location.y)
                 guard contentFrame.contains(point) else {return}
                 let boundary: CGFloat = contentFrame.minX + (contentFrame.width - Self.splitGutter) * CGFloat(layout.fraction)
                 let right = point.x > boundary + Self.splitGutter

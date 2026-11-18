@@ -35,7 +35,9 @@ struct BrowserAutomationError: Error {let code: String}
                 MainActor.assumeIsolated {
                     guard let self else {return}
                     for entry in self.entries.values {
-                        guard let model = entry.model, !model.automationOwner.isEmpty, model.view.window === event.window else {continue}
+                        guard let model = entry.model, !model.automationOwner.isEmpty else {continue}
+                        if NCChromiumOwnerForWindow(event.window) === model.view {self.stop(model); continue}
+                        guard model.view.window === event.window else {continue}
                         if event.type == .keyDown || model.view.convert(model.view.bounds, to: nil).contains(event.locationInWindow) {self.stop(model)}
                     }
                 }

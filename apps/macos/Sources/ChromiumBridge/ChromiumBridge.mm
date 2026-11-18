@@ -4,6 +4,9 @@
 #include "include/capi/cef_devtools_message_observer_capi.h"
 #include "include/capi/cef_image_capi.h"
 #include "include/capi/cef_parser_capi.h"
+#include "include/capi/views/cef_browser_view_capi.h"
+#include "include/capi/views/cef_window_capi.h"
+#include "include/capi/views/cef_box_layout_capi.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
@@ -18,11 +21,16 @@ API(cef_initialize); API(cef_shutdown); API(cef_do_message_loop_work);
 API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_userfree_utf16_free);
 API(cef_string_list_size); API(cef_string_list_value);
 API(cef_request_context_get_global_context); API(cef_write_json);
+API(cef_browser_view_create); API(cef_window_create_top_level);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
 static NSString *chromiumProfile;
 static bool pumping = false;
 static std::map<int, cef_browser_t *> browsers;
+// Views windows can outlive OnBeforeClose; their delegates must finish before CEF shutdown.
+static std::set<const void *> chromeTabWindows;
+static NSMapTable<NSWindow *, NCChromiumView *> *chromeWindowOwners;
+NCChromiumView *NCChromiumOwnerForWindow(NSWindow *window) {return window ? [chromeWindowOwners objectForKey:window] : nil;}
 static void (^shutdownCompletion)(void);
 // Page address for each favicon download in flight. CEF UI thread (the AppKit main thread) only.
 static NSMutableDictionary<NSValue *, NSString *> *faviconPages;
@@ -93,6 +101,12 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
     NSString *_url, *_title, *_pendingURL;
     BOOL _creating, _closed, _back, _forward, _loading, _automationCapture, _requestedHidden;
     NSString *_faviconURL;
+    BOOL _chromeTab, _chromeSheetPending;
+    cef_browser_view_t *_chromeView;
+    cef_window_t *_chromeWindow;
+    NSWindow *_chromeNativeWindow;
+    NSMutableArray *_chromeObservers;
+
 }
 @property(nonatomic, readwrite) BOOL openedInBackground;
 - (void)emitState;
@@ -101,14 +115,22 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 - (void)createBrowser;
 @end
 
+@interface NCChromiumView (ChromeTabs)
+- (void)createChromeTab;
+- (void)adoptChromeView:(cef_browser_view_t *)view;
+- (void)synchronizeChromeTab;
+- (void)detachChromeTab;
+
+@end
+
 #include "BrowserDownloads.inc"
 
 static void CompleteShutdown() {
-    if (!shuttingDown || !browsers.empty()) return;
+    if (!shuttingDown || !browsers.empty() || !chromeTabWindows.empty()) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         // Dispatch blocks may themselves be drained from inside CEF's external pump.
         // Do not free that loop while cef_do_message_loop_work is still on the stack.
-        if (!browsers.empty() || !initialized || pumping) return;
+        if (!browsers.empty() || !chromeTabWindows.empty() || !initialized || pumping) return;
         [pump invalidate]; pump = nil;
         p_cef_shutdown(); initialized = false;
         if (shutdownCompletion) {auto completion = shutdownCompletion; shutdownCompletion = nil; completion();}
@@ -152,6 +174,7 @@ static NSString *StartChromiumImpl() {
     LOAD(cef_browser_host_create_browser_sync); LOAD(cef_api_hash); LOAD(cef_string_userfree_utf16_free);
     LOAD(cef_string_list_size); LOAD(cef_string_list_value);
     LOAD(cef_request_context_get_global_context); LOAD(cef_write_json);
+    LOAD(cef_browser_view_create); LOAD(cef_window_create_top_level);
 #undef LOAD
     const char *apiHash = p_cef_api_hash(CEF_API_VERSION, 0);
     if (!apiHash || strcmp(apiHash, CEF_API_HASH_PLATFORM) != 0) return @"ChromiumのAPIバージョンが一致しません。";
@@ -398,11 +421,12 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             NCChromiumView *v = View(s);
             CallbackRef browserRef(browser); CallbackRef frameRef(frame);
             if (shuttingDown || !v.onPopup) return 1;
-            NCChromiumView *child = [[NCChromiumView alloc] initWithFrame:v.bounds];
+            NCChromiumView *child = [[NCChromiumView alloc] initWithFrame:v.bounds chromeTab:v->_chromeTab];
             child->_creating = YES;
             child.openedInBackground = disposition == CEF_WOD_NEW_BACKGROUND_TAB;
             if (!v.onPopup(child, String(url))) return 1;
             child.hidden = YES;
+            if (v->_chromeTab) {Release(*client); *client = MakeClient(child); return 0;}
             [v.window.contentView addSubview:child];
             auto childInfo = WindowInfo(child);
             info->parent_view = childInfo.parent_view; info->bounds = childInfo.bounds;
@@ -417,6 +441,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
             NCChromiumView *v = View(s);
             if (v) v->_closed = YES;
             [v invalidateAutomation:browser];
+            if (v && v->_chromeTab) {[v detachChromeTab]; return 0;}
             dispatch_async(dispatch_get_main_queue(), ^{
                 @autoreleasepool {
                     [v setHidden:YES];
@@ -439,14 +464,20 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     return &c->api;
 }
 
+#include "BrowserChromeTabs.inc"
+
 @implementation NCChromiumView
 - (instancetype)initWithFrame:(NSRect)frame {if ((self = [super initWithFrame:frame])) {_url = @""; _title = @""; _pendingURL = @"about:blank"; self.wantsLayer = YES;} return self;}
-- (void)viewDidMoveToWindow {[super viewDidMoveToWindow]; if (self.window) [self createBrowser];}
+- (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab {if ((self = [self initWithFrame:frame])) _chromeTab = chromeTab; return self;}
+- (BOOL)chromeTab {return _chromeTab;}
+- (void)viewDidMoveToWindow {[super viewDidMoveToWindow]; if (self.window) [self createBrowser]; if (_chromeTab) [self synchronizeChromeTab];}
+- (void)viewDidMoveToSuperview {[super viewDidMoveToSuperview]; if (_chromeTab) [self synchronizeChromeTab];}
 - (void)createBrowser {
     if (_browser || _creating || _closed || shuttingDown) return;
     NSString *error = StartChromium();
     if (error) {if (self.onError) self.onError(error); return;}
     _creating = YES;
+    if (_chromeTab) {[self createChromeTab]; return;}
     auto info = WindowInfo(self); cef_browser_settings_t settings = {}; settings.size = sizeof(settings);
     auto client = MakeClient(self); NCString url(_pendingURL);
     auto browser = p_cef_browser_host_create_browser_sync(&info, client, &url.value, &settings, nullptr, nullptr);
@@ -468,11 +499,13 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
         if ([responder isKindOfClass:NSView.class] && [(NSView *)responder isDescendantOf:self]) [self.window makeFirstResponder:nil];
     }
     [super setHidden:_automationCapture ? NO : hidden];
+    if (_chromeTab) [self synchronizeChromeTab];
 }
 - (void)beginAutomationCapture {_requestedHidden = self.hidden; _automationCapture = YES; [super setHidden:NO]; [self setNeedsDisplay:YES];}
 - (void)endAutomationCapture {_automationCapture = NO; [self setHidden:_requestedHidden];}
 - (void)setFrameSize:(NSSize)size {[super setFrameSize:size]; [self setNeedsLayout:YES];}
-- (void)layout {[super layout]; for (NSView *child in self.subviews) {child.frame = self.bounds; child.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;}}
+- (void)setFrameOrigin:(NSPoint)origin {[super setFrameOrigin:origin]; if (_chromeTab) [self synchronizeChromeTab];}
+- (void)layout {[super layout]; if (_chromeTab) {[self synchronizeChromeTab]; return;} for (NSView *child in self.subviews) {child.frame = self.bounds; child.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;}}
 - (void)emitState {if (self.onState) self.onState(_url ?: @"", _title ?: @"", _back, _forward, _loading);}
 - (void)loadURL:(NSString *)url {
     _pendingURL = [url copy];
@@ -561,6 +594,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 }
 - (void)focusContent {
     if (!_browser || self.hidden) return;
+    if (_chromeTab) {[_chromeNativeWindow makeKeyWindow];}
     NSView *content = self.subviews.firstObject;
     if (content) [self.window makeFirstResponder:content];
     auto host = _browser->get_host(_browser); host->set_focus(host, 1); Release(host);
@@ -568,13 +602,14 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 - (void)stop {if (_browser) _browser->stop_load(_browser);}
 - (void)close {
     if (_closed && !_browser) return; _closed = YES; [self failDevTools:@"browser_tab_closed"];
+    if (_chromeTab) [self detachChromeTab];
     if (_browser) CloseDownloads(_browser->get_identifier(_browser));
     // The view may deallocate before on_before_close (handlers hold it weakly).
     // Release our registration here; the later callback safely sees nullptr.
     Release(_devRegistration); _devRegistration = nullptr; _devOutstanding.clear();
     if (_browser) {auto host = _browser->get_host(_browser); host->close_browser(host, 1); Release(host);}
 }
-- (void)dealloc {[self close];}
+- (void)dealloc {[self close]; ChromeRelease(_chromeWindow); ChromeRelease(_chromeView);}
 @end
 
 void NCShutdownChromium(void (^completion)(void)) {
