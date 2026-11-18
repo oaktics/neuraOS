@@ -20,7 +20,7 @@ static void PumpWork() {
     ++pumpWakes;
     if (!initialized) return;
     if (pumping) {++pumpReentries; pumpDeferred = true; return;}
-    if (shuttingDown && browsers.empty()) {CompleteShutdown(); return;}
+    if (shuttingDown && browsers.empty() && chromeTabWindows.empty()) {CompleteShutdown(); return;}
     if (PumpBlocked()) {++pumpBlocked; ArmPump(pumpFixed10Test ? 10 : pumpFallbackMS); return;}
     pumping = true;
     ++pumpWorks;

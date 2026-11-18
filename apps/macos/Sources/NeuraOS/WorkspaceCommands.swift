@@ -49,7 +49,8 @@ extension AppModel {
 
 enum WorkspaceCommandContext {
     static func allowsCommands(in window: NSWindow?) -> Bool {
-        guard let window else {return false}
+        guard let original = window else {return false}
+        let window = NCChromiumOwnerForWindow(original)?.window ?? original
         return window.sheetParent == nil && window.attachedSheet == nil
     }
 }
@@ -184,6 +185,7 @@ extension AppModel {
 
     /// True when the key window's first responder is inside a Chromium page.
     static func pageHasFocus(in window: NSWindow?) -> Bool {
+        if NCChromiumOwnerForWindow(window) != nil {return true}
         var view = window?.firstResponder as? NSView
         while let current = view {
             if current is NCChromiumView {return true}
@@ -198,7 +200,7 @@ extension AppModel {
             let type = event.type, keyCode = event.keyCode, flags = event.modifierFlags
             let characters = type == .keyDown ? event.charactersIgnoringModifiers : nil
             let plain = type == .keyDown ? (event.characters(byApplyingModifiers: []) ?? characters ?? "").lowercased() : ""
-            let window = event.window
+            let window = NCChromiumOwnerForWindow(event.window)?.window ?? event.window
             let handled = MainActor.assumeIsolated {() -> Bool in
                 let route = route(type: type, keyCode: keyCode, characters: characters, flags: flags, hasActiveTab: model.activeTabKind != nil)
                 if route == .finishRecent {
@@ -215,7 +217,7 @@ extension AppModel {
                 case .recent(let offset): model.sendWorkspaceCommand(.recent(offset)); return true
                 case .finishRecent, nil: break
                 }
-                guard pageHasFocus(in: window), let shortcut = AppShortcut.match(key: plain, keyCode: keyCode, flags: flags) else {return false}
+                guard pageHasFocus(in: event.window), let shortcut = AppShortcut.match(key: plain, keyCode: keyCode, flags: flags) else {return false}
                 return model.perform(shortcut)
             }
             return handled ? nil : event

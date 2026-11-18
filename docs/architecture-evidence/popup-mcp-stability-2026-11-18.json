@@ -1,0 +1,70 @@
+{
+  "date": "2026-11-18",
+  "chromium": "Chrome/156.0.8078.96",
+  "checks": [
+    {
+      "name": "before-click-denied"
+    },
+    {
+      "name": "before-click-denied"
+    },
+    {
+      "name": "popup-action"
+    },
+    {
+      "name": "popup-item-clicks-and-draft-survive-ten-seconds",
+      "first": {
+        "clicks": 1,
+        "detail": "Test item detail",
+        "draft": "popup-draft",
+        "elapsed": 12960.09999999404,
+        "instance": "26042fd2-97a9-4901-b6fe-16d51331a89e"
+      },
+      "second": {
+        "clicks": 2,
+        "detail": "Test item detail",
+        "draft": "popup-draft",
+        "elapsed": 30074.59999999404,
+        "instance": "26042fd2-97a9-4901-b6fe-16d51331a89e"
+      }
+    },
+    {
+      "name": "other-tab-denied"
+    },
+    {
+      "name": "switch-move-resize"
+    },
+    {
+      "name": "no-popup-action"
+    },
+    {
+      "name": "same-document-preserved"
+    },
+    {
+      "name": "same-document-preserved"
+    },
+    {
+      "name": "cross-origin-grant-revoked"
+    },
+    {
+      "name": "window-open-context-and-opener"
+    },
+    {
+      "name": "native-sheet-isolation"
+    }
+  ],
+  "exit": {
+    "code": 0,
+    "signal": null
+  },
+  "shutdown": "completed",
+  "swiftTests": {
+    "count": 240,
+    "failures": 0
+  },
+  "limits": [
+    "Disposable fixture uses real toolbar clicks; no synthetic extension action or activeTab grant.",
+    "native-98 real 1Password detail failure observed via accessibility click only; coordinate check interrupted by concurrent UI operation.",
+    "No installed-app replacement, real vault save/fill or production release."
+  ]
+}

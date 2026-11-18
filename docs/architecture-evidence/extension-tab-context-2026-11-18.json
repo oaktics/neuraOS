@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-18",
+  "scope": "Disposable local fixture; no installed-app or real-extension acceptance",
+  "runs": [
+    {
+      "scope": "interactive-development",
+      "chromium": "Chrome/156.0.8078.96",
+      "checks": [
+        "before-click-denied",
+        "before-click-denied",
+        "popup-action",
+        "other-tab-denied",
+        "switch-move-resize",
+        "no-popup-action",
+        "same-document-preserved",
+        "same-document-preserved",
+        "cross-origin-grant-revoked",
+        "native-sheet-isolation"
+      ],
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "shutdown": "completed"
+    },
+    {
+      "scope": "final-lifecycle",
+      "chromium": "Chrome/156.0.8078.96",
+      "checks": [
+        "before-click-denied",
+        "before-click-denied",
+        "switch-move-resize",
+        "same-document-preserved",
+        "same-document-preserved",
+        "cross-origin-denied",
+        "window-open-context-and-opener",
+        "native-sheet-isolation"
+      ],
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "shutdown": "completed"
+    }
+  ],
+  "limitations": [
+    "Interactive run preceded window.open adoption and final app focus integration changes; final lifecycle run does not assert real action clicks or grants.",
+    "Final workspace UI checks unavailable because computer display capture failed.",
+    "No real 1Password account/save/fill, browser MCP integration, installed-app or release verification.",
+    "Swift native build system passed; default Xcode build stopped at dependency CompileMetalFile."
+  ]
+}

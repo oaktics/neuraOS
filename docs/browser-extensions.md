@@ -10,75 +10,110 @@ saving or filling; see the [setup instructions and investigation](1password-brow
 
 ## Using extensions
 
-Open the puzzle-piece menu beside the browser address field. Enabled MV3
-extensions appear with their manifest icon and localized title; use **ピン留め**
-to keep an icon beside the address field. Pins are neuraOS preferences, shared
-across workspace toolbars and retained across restarts (separate from Chrome's
-own pin list). Clicking an icon or extension menu item opens its declared popup
-in an anchored native popover on the same Chromium profile.
+Workspace browser tabs now use CEF Chrome Views. Use the **puzzle-piece button
+in the Chrome address bar** to open an extension, and pin extensions there for
+one-click access. Chromium owns action dispatch, popup selection, badges,
+`onClicked`, and the normal `activeTab` grant. The popup belongs to the page
+where its button was clicked; no page reload or separate-window handoff is
+needed. The project controls (pin, split, downloads, and the neuraOS menu)
+remain above that address bar.
 
-**This is an extension document, not a Chrome action invocation.** The popover
-is not associated with the embedded tab. An extension querying the active tab
-can target a different Chrome-style window, even while the embedded tab has
-focus. The popover labels this limitation and offers **このページを拡張対応ウィンドウで開く**.
-Use that window's real Chrome action when the extension needs the current page,
-`activeTab`, or an action without a declared popup. The handoff opens the URL;
-it does not move the original document, unsaved form state or its history.
+The previous neuraOS extension-pin preferences are retained but are not copied
+into Chromium's private preferences. Pin extensions in the Chrome toolbar.
+The old “このポップアップは現在のタブに紐づいていません” document popover is
+no longer the action path for workspace browser tabs.
 
-Management remains in Chromium's own UI:
+From the neuraOS **⋯** menu:
 
-- **拡張機能を追加・管理…** opens Chromium's extension manager in a separate neuraOS window. Use its enable/disable, reload, details and remove controls.
-- For an unpacked extension, turn on Developer mode in that manager, choose Load unpacked, and select the folder containing `manifest.json`. Keep that folder in place: Chromium loads its files there on subsequent launches.
-- **Chrome ウェブストアを開く…** opens the official store in the same window style. Installation availability depends on the extension and the store's Chromium support; this is not a promise of Chrome compatibility.
-- **このページを拡張対応ウィンドウで開く** opens the current URL with Chromium's full toolbar. Use the puzzle-piece menu there to pin extensions and open their popups.
+- **拡張機能を追加・管理…** opens Chromium's extension manager. Use its enable,
+  disable, details, remove and Load unpacked controls.
+- **Chrome ウェブストアを開く…** opens the official store. Availability and
+  compatibility remain subject to Chromium and each extension's requirements.
+- **1Password のデスクトップ連携を設定…** remains available when its extension
+  is installed. This does not establish real-account save/fill acceptance.
+- **このページを拡張対応ウィンドウで開く** is still an explicit option to open
+  the URL in a separate, full Chrome-style window. It does not transfer the
+  original document, form draft or navigation history.
 
-The windows share the existing Chromium profile with embedded tabs, across workspaces. Installation and grants therefore apply to that profile, not just the current workspace. Review Chromium's permission prompts. The separate windows are not workspace tabs and are not exposed through neuraOS browser MCP. Downloads there use Chromium's UI; embedded tabs retain neuraOS's downloads UI.
+## Chrome tab hosting
 
-## Why retain a separate window?
+macOS `parent_view` forces CEF Alloy style. Instead of changing extension APIs
+or synthesizing permissions, `BrowserChromeTabs.inc` creates a Chrome-style
+`CefBrowserView` and frameless `CefWindow`, installs its real Chrome toolbar,
+and attaches the native window to the workspace window as an AppKit child.
+Its native view is never reparented away from Chromium. Size, position,
+visibility and native-sheet presentation follow the host `NCChromiumView`.
+Switching tabs hides/shows the same browser instance and preserves drafts.
 
-Embedded macOS NSViews force CEF's Alloy style. The [CEF window-info definition](https://github.com/chromiumembedded/cef/blob/6028375/include/internal/cef_types_mac.h) documents this restriction. The [CEF maintainer's extension guidance](https://github.com/chromiumembedded/cef/issues/3859) distinguishes profile-level extension features from Chrome UI features and directs embedders to use a Chrome-style window for `chrome://extensions`. [CEF #3763](https://github.com/chromiumembedded/cef/issues/3763) explains the related WebUI restrictions.
+Each neuraOS page has its own Chrome window identity. Consequently,
+`tabs.query({active:true,currentWindow:true})` selects that page in its popup,
+but `currentWindow` does **not** enumerate every neuraOS workspace tab as one
+Chrome tab strip. Extensions managing whole windows or tab groups need separate
+acceptance. Manager, DevTools and extension-created top-level windows remain
+outside workspace browser MCP unless explicitly mounted as workspace pages.
 
-The existing embedded view, popup handling, browser MCP and download callbacks remain Alloy style. The new top-level Chrome windows use the same default request context and persistent `Chromium/Default` profile. Their tabs, popups and default-client windows participate in the existing CEF shutdown barrier.
+Window-opened pages retain their opener and are adopted into the same Chrome
+Views hosting path. Keyboard commands and split-pane selection map hosted
+native windows back to the owning workspace view. Human input in that window
+also cancels browser automation. Extension popups and DevTools retain their
+own keyboard context. The shutdown barrier waits for both browser close
+callbacks and Views-window destruction before calling `cef_shutdown`.
 
-## Compatibility boundaries
+Chrome tabs, management windows and the legacy Alloy fixtures share the normal
+persistent Chromium profile. Chromium handles permission checks; there are no
+host grants, API-result patches, MV2 flags or private action calls in the app.
+Isolated tests use their own profile and mock keychain.
 
-- Manifest V3 is the target. Content scripts, runtime messaging, service workers and `storage.local` are covered by the bundled sample. This does not certify every extension/API.
-- Manifest-declared popup documents can run in the embedded toolbar popover. Chrome action invocation, dynamic per-tab action state, badges, `onClicked`, and active-tab/window semantics still require the separate Chrome-style window. Embedded tabs do not become Chrome window tabs.
-- Google account sync, `identity` OAuth, vendor-specific native messaging trust, enterprise policy extensions, DRM and paid/store-restricted extensions are not validated. A supported external Chrome browser remains the alternative for extensions that require those integrations.
-- Manifest V2 is not a supported target. No compatibility flags, permission bypasses, CRX download workarounds or Chromium security overrides are added to the normal app.
-- Unpacked files are not copied or automatically updated. Use Chromium's reload control after updating them, or the publisher's official distribution when available.
+## Verification
 
-## Native catalog and popup implementation
+`node scripts/native/chromium/tab-context-probe.mjs` builds a disposable,
+ad-hoc-signed app and serves two local fixture pages. At its two prompts, click
+**neuraOS Tab Context Probe** in the real Chrome extension toolbar. The fixture
+has no host permissions. CDP observes the results; it does not invoke actions
+or grant access. The runner writes `evidence.json` and `stderr.log` under the
+printed temporary directory and verifies:
 
-The pinned CEF 156.0.30 SDK has no `CefExtension`/`GetExtensions`/`GetExtension` or
-extension-action dispatch API. Its `cef_request_context_t` inherits the public
-`cef_preference_manager_t`, however. neuraOS reads a **copy of the live global
-request context's `extensions.settings` preference** using `get_preference`,
-and reads the installation's manifest, locale messages and icon files. This
-avoids stale on-disk `Preferences`/`Secure Preferences` snapshots and never
-writes either file. Chromium 156 treats missing/empty `disable_reasons` as
-enabled; the catalog also excludes disabled and blocklisted entries. The
-preference schema is Chromium implementation detail and must be rechecked
-when upgrading CEF. It is not a live extension-registry API: an enabled entry
-can still fail to load, and Chromium remains responsible for permission checks.
+- access denied before a click and for the other tab after a click;
+- item detail clicks and a typed popup draft surviving at least ten seconds
+  in the same document (follow the additional POPUP prompts);
+- a real `POPUP` context targeting the current page, then a runtime popup
+  override and a real `onClicked` event on the second tab;
+- input and document state preserved through switching, movement and resize;
+- cross-origin navigation revoking the action's temporary access;
+- `window.open` retaining opener access and gaining a hosted Chrome context;
+- native sheets hiding/restoring surfaces, followed by clean CEF shutdown.
 
-Only MV3 entries are listed. Declared title/popup/icon defaults are supported,
-including locale fallback, unpacked installations and installed version paths.
-Dynamic `chrome.action.setPopup/setTitle/setIcon`, badges and per-tab overrides
-are not reflected. Resource resolution rejects escapes outside an installation,
-including symlinks. Visible toolbars refresh every three seconds and when the
-menu opens; opening an action rechecks the live catalog. No extension bindings,
-active-tab IDs, permission overrides or Chrome-private action calls are injected.
+`--lifecycle-only` skips interactive action assertions. It is useful when the
+computer display cannot be controlled, but is **not** evidence for action
+clicks or successful `activeTab` grants. Neither mode certifies 1Password
+account, vault, save/fill, unlock or native messaging behavior.
 
-The popover uses `NCChromiumView`, the global request context, and the existing
-Alloy lifecycle/download callbacks. It is outside browser MCP's registered tab
-list. CEF's native auto-resize callback sizes its content within 400–600 ×
-100–600 points, plus the fallback footer. Dismissal closes its CEF browser;
-normal tabs, popup children, Chrome windows and these popovers all participate
-in the same shutdown barrier. Normal tab sizing and the external pump are
-unchanged.
+### Development evidence (2026-11-18)
 
-## Measured embedded behavior (2026-11-17 baseline)
+[Recorded check summary](architecture-evidence/extension-tab-context-2026-11-18.json)
+distinguishes the interactive development run from the final lifecycle run.
+The interactive run passed real popup/onClicked and per-tab grant assertions
+on Chromium 156.0.8078.96. After the popup-adoption and app focus changes,
+the final lifecycle run passed window.open/opener, switch/move/resize, sheets
+and clean exit. A display-capture failure prevented repeating the interactive
+checks and checking the complete workspace UI at that point.
+
+`swift test --package-path apps/macos --build-system native` passed all 238
+tests. The native build also passed. The default Xcode build stopped at
+SwiftTerm's `CompileMetalFile`; this does not establish a release build.
+Real-extension account workflows, integrated browser MCP and installed-app
+acceptance remain unverified. No production release was performed.
+
+## Legacy Alloy fixtures
+
+`NCChromiumView(frame:)` and the old extension-document popover remain available
+for historical smoke fixtures. Workspace `BrowserModel` opts into Chrome tab
+hosting with `initWithFrame:chromeTab:`. The legacy catalog still reads live
+`extensions.settings` plus MV3 manifests without modifying preferences, and
+validates resource paths against the extension installation. It is not a live
+extension-registry or action-dispatch API.
+
+## Historical Alloy behavior (2026-11-17 baseline)
 
 The pre-upgrade baseline used CEF 156.0.7 / Chromium 156.0.8078.17, the bundled MV3 fixture,
 an ad-hoc signed `com.neuraos.extensions-test.embedded` bundle, disposable
@@ -108,8 +143,8 @@ CEF call to attach an Alloy tab to Chrome's tab strip or invoke an arbitrary
 extension action against it. A deeper solution needs an upstream CEF/Chromium
 integration that preserves browser-window association and normal permission
 semantics; patching JavaScript API results or granting permissions in the host
-would not be a sound substitute. The explicit same-URL Chrome-window handoff is
-the supported mitigation here.
+would not be a sound substitute. The explicit same-URL Chrome-window handoff was the mitigation for that
+Alloy-only implementation. Workspace pages now use the Chrome Views path above.
 
 1Password (`aeblfdkhhhdcdjpifhhbdiojplfjncoa`) can be enumerated like any installed
 MV3 extension with a declared action, but its real popup, native messaging trust,
@@ -213,3 +248,18 @@ its evidence marks that limitation and retains all browser behavior assertions.
 The external launch path was first checked against the Node daemon in a child
 process; run it against the finished Rust executable and integrated native app
 before treating native-daemon compatibility as verified.
+
+## native-98 interaction report follow-up
+
+The installed native-98 1Password document popover was observed with a populated
+item list but no detail change after an accessibility click. A coordinate-click
+comparison was interrupted by concurrent browser operation; this is not yet
+proof of the extension's root cause. The legacy three-second catalog timer does
+not reload a document: it closes the popover only when metadata changes or the
+source disappears. No periodic popup navigation was found in that host.
+
+Workspace tabs on staging already use Chrome's action popup via PR #204, which
+avoids the legacy document popover and its catalog timer. The expanded disposable
+fixture now verifies real item clicks and a typed draft across a ten-second
+interval without replacing the document, plus the existing action/lifecycle
+checks. This is generic host evidence, not real 1Password vault/save/fill acceptance.
