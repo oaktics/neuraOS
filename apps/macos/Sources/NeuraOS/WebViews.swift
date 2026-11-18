@@ -65,7 +65,7 @@ import ChromiumBridge
         }
         self.view.onError = { [weak self] message in DispatchQueue.main.async {self?.message = message} }
         self.view.onAutomationInvalidated = { [weak self] reason in
-            DispatchQueue.main.async {if let self {BrowserAutomation.shared.stop(self, reason: reason)}}
+            DispatchQueue.main.async {if let self {BrowserAutomation.shared.cancel(self, reason: reason)}}
         }
         self.view.onProgress = { [weak self] value in DispatchQueue.main.async {self?.progress = value} }
         self.view.onFavicon = {png, page in

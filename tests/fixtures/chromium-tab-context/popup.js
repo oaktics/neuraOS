@@ -1,3 +1,12 @@
+const instance = crypto.randomUUID();
+let clicks = 0;
+document.querySelector('#item').addEventListener('click', async () => {
+  document.querySelector('#detail').hidden = false;
+  await chrome.storage.local.set({interaction: {
+    instance, clicks: ++clicks, draft: document.querySelector('#draft').value,
+    elapsed: performance.now(), detail: document.querySelector('#detail').textContent
+  }});
+});
 (async () => {
   const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
   let execution;
