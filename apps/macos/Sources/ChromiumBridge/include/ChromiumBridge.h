@@ -15,6 +15,10 @@ FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
 // Keeps the Chrome toolbar and extension permissions associated with this page.
 - (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab;
 @property(nonatomic, readonly) BOOL chromeTab;
+// Chrome tabs carry one neuraOS button at the end of Chromium's toolbar row.
+// Its menu is built when the button is pressed; the symbol is an SF Symbol name.
+@property(nonatomic, copy, nullable) NSMenu * _Nullable (^onToolbarMenu)(void);
+@property(nonatomic, copy, nullable) NSString *toolbarSymbol;
 @property(nonatomic, copy, nullable) void (^onState)(NSString *url, NSString *title, BOOL back, BOOL forward, BOOL loading);
 @property(nonatomic, copy, nullable) void (^onError)(NSString *message);
 @property(nonatomic, copy, nullable) BOOL (^onPopup)(NCChromiumView *view, NSString *url);

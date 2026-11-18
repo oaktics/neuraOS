@@ -7,6 +7,9 @@
 #include "include/capi/views/cef_browser_view_capi.h"
 #include "include/capi/views/cef_window_capi.h"
 #include "include/capi/views/cef_box_layout_capi.h"
+#include "include/capi/views/cef_menu_button_capi.h"
+#include "include/capi/views/cef_panel_capi.h"
+#include "include/cef_color_ids.h"
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
@@ -22,6 +25,7 @@ API(cef_browser_host_create_browser_sync); API(cef_api_hash); API(cef_string_use
 API(cef_string_list_size); API(cef_string_list_value);
 API(cef_request_context_get_global_context); API(cef_write_json);
 API(cef_browser_view_create); API(cef_window_create_top_level);
+API(cef_panel_create); API(cef_menu_button_create); API(cef_image_create);
 static bool initialized = false, shuttingDown = false;
 static NSTimer *pump;
 static NSString *chromiumProfile;
@@ -104,6 +108,7 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
     BOOL _chromeTab, _chromeSheetPending;
     cef_browser_view_t *_chromeView;
     cef_window_t *_chromeWindow;
+    cef_menu_button_t *_chromeMenuButton;
     NSWindow *_chromeNativeWindow;
     NSMutableArray *_chromeObservers;
 
@@ -120,7 +125,8 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 - (void)adoptChromeView:(cef_browser_view_t *)view;
 - (void)synchronizeChromeTab;
 - (void)detachChromeTab;
-
+- (void)installChromeMenuButton:(cef_panel_t *)row;
+- (void)styleChromeMenuButton;
 @end
 
 #include "BrowserDownloads.inc"
@@ -175,6 +181,7 @@ static NSString *StartChromiumImpl() {
     LOAD(cef_string_list_size); LOAD(cef_string_list_value);
     LOAD(cef_request_context_get_global_context); LOAD(cef_write_json);
     LOAD(cef_browser_view_create); LOAD(cef_window_create_top_level);
+    LOAD(cef_panel_create); LOAD(cef_menu_button_create); LOAD(cef_image_create);
 #undef LOAD
     const char *apiHash = p_cef_api_hash(CEF_API_VERSION, 0);
     if (!apiHash || strcmp(apiHash, CEF_API_HASH_PLATFORM) != 0) return @"ChromiumのAPIバージョンが一致しません。";
@@ -470,6 +477,10 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 - (instancetype)initWithFrame:(NSRect)frame {if ((self = [super initWithFrame:frame])) {_url = @""; _title = @""; _pendingURL = @"about:blank"; self.wantsLayer = YES;} return self;}
 - (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab {if ((self = [self initWithFrame:frame])) _chromeTab = chromeTab; return self;}
 - (BOOL)chromeTab {return _chromeTab;}
+- (void)setToolbarSymbol:(NSString *)symbol {
+    if ([_toolbarSymbol isEqualToString:symbol]) return;
+    _toolbarSymbol = [symbol copy]; [self styleChromeMenuButton];
+}
 - (void)viewDidMoveToWindow {[super viewDidMoveToWindow]; if (self.window) [self createBrowser]; if (_chromeTab) [self synchronizeChromeTab];}
 - (void)viewDidMoveToSuperview {[super viewDidMoveToSuperview]; if (_chromeTab) [self synchronizeChromeTab];}
 - (void)createBrowser {
@@ -609,7 +620,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     Release(_devRegistration); _devRegistration = nullptr; _devOutstanding.clear();
     if (_browser) {auto host = _browser->get_host(_browser); host->close_browser(host, 1); Release(host);}
 }
-- (void)dealloc {[self close]; ChromeRelease(_chromeWindow); ChromeRelease(_chromeView);}
+- (void)dealloc {[self close]; ChromeRelease(_chromeMenuButton); ChromeRelease(_chromeWindow); ChromeRelease(_chromeView);}
 @end
 
 void NCShutdownChromium(void (^completion)(void)) {

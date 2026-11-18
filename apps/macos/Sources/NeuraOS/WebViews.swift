@@ -168,6 +168,14 @@ struct BrowserPane: View {
     }
     var body: some View {
         VStack(spacing: 0) {
+            if browser.view.chromeTab {
+                // Chromium's toolbar row is the header; neuraOS actions are a button at its end.
+                Rectangle().fill(Palette.line).frame(height: 1)
+                if let notice = browser.notice {
+                    Text(notice).font(.system(size: 11)).foregroundStyle(Color.accentColor)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).frame(height: 22)
+                }
+            } else {
             // In a narrow pane the address keeps its room; the extra buttons move into the ⋯ menu.
             GeometryReader {geometry in toolbar(compact: geometry.size.width < 520)}.frame(height: 34)
             ZStack(alignment: .top) {
@@ -180,6 +188,7 @@ struct BrowserPane: View {
                     }.frame(height: 2)
                 }
             }.frame(height: 2)
+            }
             if browser.finding {findBar}
             if !browser.automationOwner.isEmpty {
                 HStack(spacing: 8) {
@@ -193,7 +202,7 @@ struct BrowserPane: View {
                 Text(message).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
             if browser.loaded {
-                BrowserWebView(browser: browser, visible: visible, actions: actions)
+                BrowserWebView(browser: browser, visible: visible, actions: actions, menu: chromeMenu)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 // Restored tabs wait here until first shown, so reopening the app does not load every page.
@@ -210,6 +219,61 @@ struct BrowserPane: View {
         // An unloaded tab has no title yet; keep the one saved with it.
         if !browser.title.isEmpty || browser.view.hasBrowser {title = browser.title.isEmpty ? nil : browser.title}
         url = browser.address
+    }
+    /// The menu of the neuraOS button in Chromium's toolbar. Find and zoom are in Chromium's own menu there.
+    private func chromeMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        func add(_ title: String, to target: NSMenu? = nil, checked: Bool = false, enabled: Bool = true, _ run: @escaping () -> Void) {
+            let item = BrowserMenuItem(title: title, run: run)
+            item.state = checked ? .on : .off; item.isEnabled = enabled
+            (target ?? menu).addItem(item)
+        }
+        add("URLをコピー") {browser.perform(.copyURL)}
+        add(fixed ? "このページを固定タブの行き先にする" : pin == nil ? "このプロジェクトにピン留め" : "ピン留めを解除") {actions.togglePin(browser.address, browser.title)}
+        if !fixed {add(split ? "分割を解除" : "右に並べて表示") {actions.toggleSplit()}}
+        menu.addItem(.separator())
+        let downloads = NSMenuItem(title: "ダウンロード", action: nil, keyEquivalent: "")
+        let list = NSMenu()
+        list.autoenablesItems = false
+        for item in BrowserDownloads.shared.items.prefix(12) {
+            let title = item.detail.isEmpty ? item.name : "\(item.name) — \(item.detail)"
+            if ["choosing", "running"].contains(item.status) {
+                let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                entry.submenu = NSMenu()
+                entry.submenu?.addItem(BrowserMenuItem(title: "ダウンロードをキャンセル") {item.cancel()})
+                list.addItem(entry)
+            } else {
+                add(title, to: list, enabled: item.status == "complete") {item.reveal()}
+                list.items.last?.toolTip = item.status == "complete" ? "Finderで表示" : nil
+            }
+        }
+        if list.items.isEmpty {add("ダウンロードはありません", to: list, enabled: false) {}}
+        downloads.submenu = list
+        menu.addItem(downloads)
+        menu.addItem(.separator())
+        add("外部のブラウザで開く") {browser.perform(.openExternally)}
+        add("開発者ツール") {browser.perform(.devTools)}
+        let extensions = NSMenuItem(title: "拡張機能", action: nil, keyEquivalent: "")
+        let extensionList = NSMenu()
+        extensionList.autoenablesItems = false
+        add("拡張機能を追加・管理…", to: extensionList) {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
+        add("Chrome ウェブストアを開く…", to: extensionList) {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
+        add("このページを拡張対応ウィンドウで開く", to: extensionList) {
+            if let url = BrowserModel.navigationURL(browser.address) {browser.message = NCOpenExtensionWindow(url.absoluteString)}
+        }
+        if NCExtensionActions().contains(where: {$0.identifier == OnePasswordIntegration.extensionID}) {
+            add("1Password のデスクトップ連携を設定…", to: extensionList) {showingOnePasswordSetup = true}
+        }
+        extensions.submenu = extensionList
+        menu.addItem(extensions)
+        if browser.automationAvailable {
+            menu.addItem(.separator())
+            add("エージェント（MCP）からの操作を許可", checked: browser.automationEnabled) {
+                if browser.automationEnabled {BrowserAutomation.shared.stop(browser)} else {browser.automationEnabled = true}
+            }
+        }
+        return menu
     }
     private func toolbar(compact: Bool) -> some View {
         HStack(spacing: compact ? 2 : 6) {
@@ -336,10 +400,24 @@ struct BrowserPaneActions {
     var toggleSplit: () -> Void = {}
 }
 
+/// A menu entry that runs a closure; AppKit menus otherwise need a target object.
+final class BrowserMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(title: String, run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(choose), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) {fatalError("init(coder:) is not supported")}
+    @objc private func choose() {run()}
+}
+
 struct BrowserWebView: NSViewRepresentable {
     @ObservedObject var browser: BrowserModel
+    @ObservedObject private var downloads = BrowserDownloads.shared
     let visible: Bool
     let actions: BrowserPaneActions
+    let menu: () -> NSMenu
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NCChromiumView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 800, height: proposal.height ?? 600)
     }
@@ -349,6 +427,10 @@ struct BrowserWebView: NSViewRepresentable {
         view.isHidden = !visible
         view.onPopup = actions.popup
         view.onOpenTab = actions.openTab
+        view.onToolbarMenu = menu
+        // The one neuraOS button in Chromium's toolbar also reports what its menu holds.
+        view.toolbarSymbol = downloads.items.contains {["choosing", "running"].contains($0.status)} ? "arrow.down.circle.fill"
+            : browser.automationAvailable && !browser.automationEnabled ? "ellipsis.circle.fill" : "ellipsis.circle"
         let closed = actions.closed
         view.onClosed = {DispatchQueue.main.async {closed()}}
     }

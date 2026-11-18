@@ -22,21 +22,70 @@ template<class T> struct ChromeDelegate {
     }
 };
 
+// CEF can hide or disable entries of Chrome's own menus but cannot add to them.
+// The Views window is ours to lay out, so neuraOS actions get one button in the
+// toolbar row and an AppKit menu.
+static cef_image_t *ChromeSymbolImage(NSString *symbol, cef_color_t color) {
+    auto image = p_cef_image_create();
+    NSImage *source = [[NSImage imageWithSystemSymbolName:symbol accessibilityDescription:nil]
+        imageWithSymbolConfiguration:[NSImageSymbolConfiguration configurationWithPointSize:15 weight:NSFontWeightRegular]];
+    if (!image || !source) return image;
+    NSColor *tint = [NSColor colorWithSRGBRed:CefColorGetR(color) / 255.0 green:CefColorGetG(color) / 255.0 blue:CefColorGetB(color) / 255.0 alpha:CefColorGetA(color) / 255.0];
+    const CGFloat side = 20;
+    for (int scale = 1; scale <= 2; scale++) {
+        NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:side * scale pixelsHigh:side * scale
+            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+        bitmap.size = NSMakeSize(side, side);
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext.currentContext = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+        NSSize size = source.size;
+        [source drawInRect:NSMakeRect((side - size.width) / 2, (side - size.height) / 2, size.width, size.height)];
+        [tint set]; NSRectFillUsingOperation(NSMakeRect(0, 0, side, side), NSCompositingOperationSourceIn);
+        [NSGraphicsContext restoreGraphicsState];
+        NSData *png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        image->add_png(image, scale, png.bytes, png.length);
+    }
+    return image;
+}
+// `corner` is the button's bottom-right in its window, from the top-left.
+static void ShowChromeMenu(NCChromiumView *owner, NSPoint corner, cef_menu_button_pressed_lock_t *lock) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Menu tracking is a nested event loop; never start it inside CEF's own work.
+        if (pumping) {ShowChromeMenu(owner, corner, lock); return;}
+        NSWindow *window = owner ? owner->_chromeNativeWindow : nil;
+        NSMenu *menu = window && owner.onToolbarMenu ? owner.onToolbarMenu() : nil;
+        if (menu) {
+            NSRect frame = window.frame;
+            [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(NSMinX(frame) + corner.x - menu.size.width, NSMaxY(frame) - corner.y) inView:nil];
+        }
+        ChromeRelease(lock); // Keeps the button pressed while its menu is open.
+    });
+}
+
 static cef_browser_view_delegate_t *ChromeBrowserDelegate(NCChromiumView *owner) {
     auto delegate = new ChromeDelegate<cef_browser_view_delegate_t>(owner);
     delegate->api.get_browser_runtime_style = [](cef_browser_view_delegate_t *) {return CEF_RUNTIME_STYLE_CHROME;};
     delegate->api.get_chrome_toolbar_type = [](cef_browser_view_delegate_t *, cef_browser_view_t *browser) {
         ChromeRelease(browser); return CEF_CTT_NORMAL;
     };
-    delegate->api.base.on_window_changed = [](cef_view_delegate_t *, cef_view_t *view, int added) {
+    delegate->api.base.on_window_changed = [](cef_view_delegate_t *s, cef_view_t *view, int added) {
         if (added) {
+            NCChromiumView *owner = reinterpret_cast<ChromeDelegate<cef_browser_view_delegate_t> *>(s)->view;
             auto browser = view->as_browser_view(view);
             auto window = view->get_window(view);
             auto toolbar = browser ? browser->get_chrome_toolbar(browser) : nullptr;
             if (toolbar && window) {
                 // Chrome creates the toolbar hidden until its embedder installs it.
                 toolbar->set_visible(toolbar, 1);
-                window->base.add_child_view_at(&window->base, ChromeRetain(toolbar), 0);
+                auto row = p_cef_panel_create(nullptr);
+                cef_box_layout_settings_t settings = {}; settings.size = sizeof(settings);
+                settings.horizontal = 1; settings.cross_axis_alignment = CEF_AXIS_ALIGNMENT_STRETCH;
+                auto layout = row->set_to_box_layout(row, &settings);
+                row->add_child_view(row, ChromeRetain(toolbar));
+                layout->set_flex_for_view(layout, ChromeRetain(toolbar), 1);
+                ChromeRelease(layout);
+                [owner installChromeMenuButton:row];
+                window->base.add_child_view_at(&window->base, &row->base, 0);
                 window->base.layout(&window->base);
             }
             ChromeRelease(toolbar); ChromeRelease(window); ChromeRelease(browser);
@@ -71,6 +120,42 @@ static cef_browser_view_delegate_t *ChromeBrowserDelegate(NCChromiumView *owner)
     if (!view) {_creating = NO; if (self.onError) self.onError(@"Chromiumのタブを作成できませんでした。"); return;}
     [self adoptChromeView:view];
 }
+- (void)installChromeMenuButton:(cef_panel_t *)row {
+    auto delegate = new ChromeDelegate<cef_menu_button_delegate_t>(self);
+    delegate->api.on_menu_button_pressed = [](cef_menu_button_delegate_t *s, cef_menu_button_t *button, const cef_point_t *, cef_menu_button_pressed_lock_t *lock) {
+        NCChromiumView *owner = reinterpret_cast<ChromeDelegate<cef_menu_button_delegate_t> *>(s)->view;
+        auto view = &button->base.base.base;
+        cef_size_t size = view->get_size(view);
+        cef_point_t corner = {size.width, size.height};
+        view->convert_point_to_window(view, &corner);
+        ChromeRelease(button);
+        ShowChromeMenu(owner, NSMakePoint(corner.x, corner.y), lock);
+    };
+    // Also runs when the button enters its window, once theme colors exist.
+    delegate->api.base.base.on_theme_changed = [](cef_view_delegate_t *s, cef_view_t *view) {
+        [reinterpret_cast<ChromeDelegate<cef_menu_button_delegate_t> *>(s)->view styleChromeMenuButton];
+        ChromeRelease(view);
+    };
+    NCString text(@""), name(@"neuraOS メニュー");
+    auto button = p_cef_menu_button_create(&delegate->api, &text.value);
+    if (!button) return;
+    button->base.base.set_tooltip_text(&button->base.base, &name.value);
+    button->base.base.set_accessible_name(&button->base.base, &name.value);
+    cef_size_t minimum = {40, 0}; button->base.set_minimum_size(&button->base, &minimum);
+    ChromeRelease(_chromeMenuButton); _chromeMenuButton = button;
+    row->add_child_view(row, ChromeRetain(&button->base.base.base));
+}
+- (void)styleChromeMenuButton {
+    if (!_chromeMenuButton) return;
+    auto label = &_chromeMenuButton->base; auto view = &label->base.base;
+    auto window = view->get_window(view);
+    if (!window) return;
+    ChromeRelease(window);
+    auto image = ChromeSymbolImage(self.toolbarSymbol ?: @"ellipsis.circle", view->get_theme_color(view, CEF_ColorToolbarButtonIcon));
+    if (!image) return;
+    for (auto state : {CEF_BUTTON_STATE_NORMAL, CEF_BUTTON_STATE_HOVERED, CEF_BUTTON_STATE_PRESSED}) label->set_image(label, state, ChromeRetain(image));
+    ChromeRelease(image);
+}
 - (void)adoptChromeView:(cef_browser_view_t *)view {
     _chromeView = view;
     auto windowDelegate = new ChromeDelegate<cef_window_delegate_t>(self);
@@ -100,6 +185,7 @@ static cef_browser_view_delegate_t *ChromeBrowserDelegate(NCChromiumView *owner)
         NCChromiumView *owner = reinterpret_cast<ChromeDelegate<cef_window_delegate_t> *>(s)->view;
         if (owner) {
             [owner detachChromeTab];
+            ChromeRelease(owner->_chromeMenuButton); owner->_chromeMenuButton = nullptr;
             ChromeRelease(owner->_chromeWindow); owner->_chromeWindow = nullptr;
             ChromeRelease(owner->_chromeView); owner->_chromeView = nullptr;
             [chromeWindowOwners removeObjectForKey:owner->_chromeNativeWindow];
