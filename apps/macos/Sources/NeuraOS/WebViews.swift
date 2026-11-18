@@ -434,5 +434,10 @@ struct BrowserWebView: NSViewRepresentable {
         let closed = actions.closed
         view.onClosed = {DispatchQueue.main.async {closed()}}
     }
-    static func dismantleNSView(_ view: NCChromiumView, coordinator: ()) {BrowserAutomation.shared.unregister(view); view.onClosed = nil; view.close()}
+    static func dismantleNSView(_ view: NCChromiumView, coordinator: ()) {
+        BrowserAutomation.shared.unregister(view); view.onClosed = nil
+        // The menu closure holds the pane, whose model owns this view.
+        view.onToolbarMenu = nil
+        view.close()
+    }
 }
