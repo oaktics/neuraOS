@@ -49,8 +49,10 @@ static cef_image_t *ChromeSymbolImage(NSString *symbol, cef_color_t color) {
 }
 // `corner` is the button's bottom-right in its window, from the top-left.
 static void ShowChromeMenu(NCChromiumView *owner, NSPoint corner, cef_menu_button_pressed_lock_t *lock) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // Menu tracking is a nested event loop; never start it inside CEF's own work.
+    // Menu tracking is a nested event loop. Start it from the run loop, not from a
+    // main-queue block: that queue is serial and would stall until the menu closed.
+    CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopDefaultMode, ^{
+        // Never start it inside CEF's own work either.
         if (pumping) {ShowChromeMenu(owner, corner, lock); return;}
         NSWindow *window = owner ? owner->_chromeNativeWindow : nil;
         NSMenu *menu = window && owner.onToolbarMenu ? owner.onToolbarMenu() : nil;
@@ -60,6 +62,7 @@ static void ShowChromeMenu(NCChromiumView *owner, NSPoint corner, cef_menu_butto
         }
         ChromeRelease(lock); // Keeps the button pressed while its menu is open.
     });
+    CFRunLoopWakeUp(CFRunLoopGetMain());
 }
 
 static cef_browser_view_delegate_t *ChromeBrowserDelegate(NCChromiumView *owner) {
