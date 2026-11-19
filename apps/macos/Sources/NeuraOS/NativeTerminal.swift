@@ -89,7 +89,8 @@ class NativeTerminalView: TerminalView {
             scheduleFrameCheck(after: Self.frameDeadline)
         case 1:
             let now = ProcessInfo.processInfo.systemUptime
-            guard now - lastRebuild > 10 else {return}
+            // The rate limit postpones a rebuild; it must not end recovery.
+            guard now - lastRebuild > 10 else {scheduleFrameCheck(after: 10 - (now - lastRebuild) + 0.1); return}
             lastRebuild = now
             Diagnostics.shared.record("terminal.renderer.rebuild", code: Self.stateCode(metalRendererStatus.state))
             do {try setUseMetal(false); try setUseMetal(true)}
