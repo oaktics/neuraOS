@@ -89,7 +89,13 @@ class NativeTerminalView: TerminalView {
         if terminal.synchronizedOutputActive {scheduleFrameCheck(after: Self.frameDeadline); return}
         guard let waited = unansweredFor else {frameStage = 0; return}
         // The open request is still within its deadline.
-        guard waited >= Self.frameDeadline else {scheduleFrameCheck(after: Self.frameDeadline - waited); return}
+        // Every older request was presented, so an earlier stall is over: a later one
+        // starts again with the mildest step.
+        guard waited >= Self.frameDeadline else {
+            frameStage = 0
+            scheduleFrameCheck(after: Self.frameDeadline - waited)
+            return
+        }
         switch frameStage {
         case 0:
             Diagnostics.shared.record("terminal.renderer.stalled", duration: waited, code: Self.stateCode(metalRendererStatus.state))
