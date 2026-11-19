@@ -236,9 +236,13 @@ struct BrowserPane: View {
         let downloads = NSMenuItem(title: "ダウンロード", action: nil, keyEquivalent: "")
         let list = NSMenu()
         list.autoenablesItems = false
-        for item in BrowserDownloads.shared.items.prefix(12) {
+        // Running downloads are always listed so they can be cancelled; finished ones only while recent.
+        let all = BrowserDownloads.shared.items
+        for (index, item) in all.enumerated() {
+            let active = ["choosing", "running"].contains(item.status)
+            guard active || index < 12 else {continue}
             let title = item.detail.isEmpty ? item.name : "\(item.name) — \(item.detail)"
-            if ["choosing", "running"].contains(item.status) {
+            if active {
                 let entry = NSMenuItem(title: title, action: nil, keyEquivalent: "")
                 entry.submenu = NSMenu()
                 entry.submenu?.addItem(BrowserMenuItem(title: "ダウンロードをキャンセル") {item.cancel()})
