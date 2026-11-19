@@ -50,6 +50,7 @@ class NativeTerminalView: TerminalView {
     // for a frame; a request that stays unanswered is a stall. Then redraw, rebuild
     // the layer, and finally draw without Metal.
     private var frameCheck: DispatchWorkItem?
+    private var windowObservers: [NSObjectProtocol] = []
     private var frameStage = 0
     private var lastRebuild: TimeInterval = -.infinity
     private var metalAbandoned = false
@@ -132,6 +133,16 @@ class NativeTerminalView: TerminalView {
             catch {Diagnostics.shared.record("terminal.renderer.fallback")}
         }
         updateMetalVisibility()
+        // SwiftTerm asks for a frame when the window is uncovered or restored;
+        // that frame is watched too, since a check ends while nothing can present.
+        windowObservers.forEach(NotificationCenter.default.removeObserver)
+        windowObservers = []
+        guard let window else {return}
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didDeminiaturizeNotification] {
+            windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {self?.expectFrame()}
+            })
+        }
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {

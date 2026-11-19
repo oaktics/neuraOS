@@ -268,11 +268,12 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Work counters of the Metal renderer, or nil when Metal is not in use.
     public var metalRenderStatistics: MetalRenderStatistics? { metalRenderer?.statistics }
     var pendingMetalDisplay: Bool = false
-    /// neuraOS: when the oldest Metal frame request that no presented frame has
-    /// answered yet was made; nil once a frame is presented. Later requests do
-    /// not move it, so continuous output cannot hide a renderer that is asked to
-    /// draw but no longer presents.
-    public internal(set) var unansweredMetalDisplayRequest: Date?
+    /// neuraOS: frame requests that no presented frame has answered yet.
+    public internal(set) var metalFrameRequests = MetalFrameRequestLedger()
+    /// neuraOS: when the oldest unanswered Metal frame request was made; nil when
+    /// none is open. Lets the host detect a renderer that is asked to draw but no
+    /// longer presents.
+    public var unansweredMetalDisplayRequest: Date? { metalFrameRequests.oldestUnanswered }
     /// neuraOS: asks the Metal view for a frame, recording the request.
     public func requestMetalFrame() { requestMetalDisplay() }
     /// The cursor position last submitted to the Metal renderer. Used to
@@ -462,6 +463,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         if enabled {
             try updateMetalRenderer(enabled: true)
             useMetalRenderer = true
+            metalFrameRequests = MetalFrameRequestLedger()
             automaticMetalRecoveryPolicy.reset()
             setMetalRendererStatus(MetalRendererStatus(
                 state: .waitingForFirstFrame,
@@ -667,9 +669,11 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
         return true
     }
 
-    func metalRenderer(_ renderer: MetalTerminalRenderer, didPresentAt date: Date) {
+    func metalRenderer(_ renderer: MetalTerminalRenderer, didPresentAt date: Date, requestGeneration: UInt64) {
         guard renderer === metalRenderer, useMetalRenderer else { return }
-        unansweredMetalDisplayRequest = nil
+        // neuraOS: after the guard, so a late callback from a replaced renderer
+        // cannot answer requests counted for its successor.
+        metalFrameRequests.presented(generation: requestGeneration)
         setMetalRendererStatus(MetalRendererStatus(
             state: .healthy,
             presentedFrameCount: metalRendererStatus.presentedFrameCount &+ 1,

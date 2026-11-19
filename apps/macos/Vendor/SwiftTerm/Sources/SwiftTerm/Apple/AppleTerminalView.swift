@@ -2561,7 +2561,7 @@ extension TerminalView {
             return
         }
 #if os(macOS)
-        if unansweredMetalDisplayRequest == nil { unansweredMetalDisplayRequest = Date() }
+        metalFrameRequests.request(at: Date())
 #endif
         metalView.setNeedsDisplay(metalView.bounds)
     }
@@ -2579,7 +2579,7 @@ extension TerminalView {
                     guard let self else { return }
                     self.pendingMetalDisplay = false
 #if os(macOS)
-                    if self.unansweredMetalDisplayRequest == nil { self.unansweredMetalDisplayRequest = Date() }
+                    self.metalFrameRequests.request(at: Date())
 #endif
                     self.metalView?.setNeedsDisplay(self.metalView?.bounds ?? .zero)
                 }
