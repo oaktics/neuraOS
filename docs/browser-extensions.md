@@ -15,15 +15,20 @@ in the Chrome address bar** to open an extension, and pin extensions there for
 one-click access. Chromium owns action dispatch, popup selection, badges,
 `onClicked`, and the normal `activeTab` grant. The popup belongs to the page
 where its button was clicked; no page reload or separate-window handoff is
-needed. The project controls (pin, split, downloads, and the neuraOS menu)
-remain above that address bar.
+needed. neuraOS no longer draws its own row above that address bar: the
+project controls (copy URL, pin, split, downloads, agent access) are in the
+menu of the single neuraOS button at the right end of the Chrome toolbar row.
+CEF can hide or disable entries of Chrome's own **⋮** menu but cannot add to
+it, so the button is a Views `MenuButton` placed beside the toolbar and its
+menu is a native AppKit menu. The button shows a download icon while a
+download is running, and a filled icon while agent access is switched off.
 
 The previous neuraOS extension-pin preferences are retained but are not copied
 into Chromium's private preferences. Pin extensions in the Chrome toolbar.
 The old “このポップアップは現在のタブに紐づいていません” document popover is
 no longer the action path for workspace browser tabs.
 
-From the neuraOS **⋯** menu:
+From the **拡張機能** submenu of that neuraOS menu:
 
 - **拡張機能を追加・管理…** opens Chromium's extension manager. Use its enable,
   disable, details, remove and Load unpacked controls.
