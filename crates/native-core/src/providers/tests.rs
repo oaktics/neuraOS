@@ -614,6 +614,32 @@ async fn codex_repeated_discovery_preserves_selection_and_explicit_selection_sti
     assert_eq!(notifications(&store).await, 0);
 }
 #[tokio::test]
+async fn codex_history_picker_terminal_is_missing_its_selection_until_bound() {
+    let (store, agents, workspace) = codex_fixture().await;
+    assert!(!agents.codex_selection_missing("t", "picked").await.unwrap());
+    agents
+        .discover_codex("t", &workspace, &codex_thread("picked"))
+        .await
+        .unwrap();
+    assert_eq!(terminal_binding(&store, "t").await, json!([null, null, null]));
+    assert!(agents.codex_selection_missing("t", "picked").await.unwrap());
+    assert!(!agents.codex_selection_missing("other", "picked").await.unwrap());
+    agents
+        .register_codex("t", &workspace, &codex_thread("picked"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        terminal_binding(&store, "t").await,
+        json!(["picked", "picked", "name picked"])
+    );
+    // A bound terminal keeps its conversation when another one runs beside it.
+    agents
+        .discover_codex("t", &workspace, &codex_thread("other"))
+        .await
+        .unwrap();
+    assert!(!agents.codex_selection_missing("t", "other").await.unwrap());
+}
+#[tokio::test]
 async fn codex_completion_notifies_only_newly_accepted_turns() {
     let (store, agents, workspace) = codex_fixture().await;
     agents

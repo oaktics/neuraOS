@@ -28,6 +28,43 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var isTerminal: Bool {["codex", "claude", "shell"].contains(kind)}
 }
 
+/// A page or file tab that was closed, kept so it can be opened again where it was.
+struct ClosedTab: Codable, Equatable {
+    var kind: String
+    /// The page address or the file path.
+    var target: String
+    /// Its place among the listed tabs.
+    var index: Int
+}
+
+/// A tab being dragged along the strip. The others close up as if it were lifted
+/// out, and it takes a neighbour's place once it has covered half of it.
+struct TabStripDrag: Equatable {
+    let id: String
+    /// Leading edge of the tab when the drag began, measured from the strip's start.
+    let origin: CGFloat
+    var translation: CGFloat = 0
+
+    /// Leading edge now, kept inside the strip. `widths` are in strip order; `index` is the tab's place.
+    func edge(widths: [CGFloat], index: Int) -> CGFloat {
+        min(max(0, origin + translation), max(0, widths.reduce(0, +) - widths[index]))
+    }
+    /// The place the tab belongs at.
+    func target(widths: [CGFloat], index: Int) -> Int {
+        let edge = edge(widths: widths, index: index)
+        var start: CGFloat = 0, count = 0
+        for (position, width) in widths.enumerated() where position != index {
+            if start + width / 2 < edge {count += 1}
+            start += width
+        }
+        return count
+    }
+    /// How far to draw the tab from where the layout puts it.
+    func offset(widths: [CGFloat], index: Int) -> CGFloat {
+        edge(widths: widths, index: index) - widths[..<index].reduce(0, +)
+    }
+}
+
 struct WorkspaceTabState: Codable {
     var tabs: [WorkspaceTab] = []
     var selectedId: String?
@@ -37,6 +74,8 @@ struct WorkspaceTabState: Codable {
     var splitFocused: Bool?
     // Most recently used first.
     var recent: [String]?
+    // Most recently closed last.
+    var closed: [ClosedTab]?
 
     /// The right pane's tab, when a split is really on screen.
     var split: WorkspaceTab? {
@@ -165,8 +204,9 @@ struct WorkspaceTabState: Codable {
     }
 
     /// Remove a tab and choose what the user sees next: where they came from, else a neighbour.
-    mutating func close(_ id: String) {
+    mutating func close(_ id: String, reopenable: Bool = true) {
         guard let index = tabs.firstIndex(where: {$0.id == id}) else {return}
+        if reopenable {remember(tabs[index])}
         let closed = tabs.remove(at: index)
         for position in tabs.indices where tabs[position].openerId == id {tabs[position].openerId = closed.openerId}
         recent?.removeAll {$0 == id}
@@ -183,6 +223,40 @@ struct WorkspaceTabState: Codable {
             }
         }
         normalize()
+    }
+
+    private mutating func remember(_ tab: WorkspaceTab) {
+        guard tab.pinId == nil, let index = listed.firstIndex(where: {$0.id == tab.id}) else {return}
+        let target: String?
+        switch tab.kind {
+        case "browser": target = tab.browserURL.flatMap {["http", "https"].contains(URL(string: $0)?.scheme?.lowercased() ?? "") ? $0 : nil}
+        case "file": target = tab.filePath
+        default: target = nil
+        }
+        guard let target else {return}
+        closed = Array(((closed ?? []) + [ClosedTab(kind: tab.kind, target: target, index: index)]).suffix(20))
+    }
+
+    var canReopen: Bool {closed?.isEmpty == false}
+
+    /// Open the most recently closed page or file again, where it was.
+    @MainActor mutating func reopenClosed(workspaceId: String, defaults: UserDefaults = .standard) {
+        while let entry = closed?.popLast() {
+            if entry.kind == "browser" {
+                guard let url = URL(string: entry.target), openBrowser(url, workspaceId: workspaceId, defaults: defaults) else {continue}
+            } else {
+                openFile(entry.target)
+            }
+            if let id = activeId {move(id, toListed: entry.index)}
+            return
+        }
+    }
+
+    /// Tabs after this one in the strip.
+    func listed(after id: String) -> [WorkspaceTab] {
+        let visible = listed
+        guard let index = visible.firstIndex(where: {$0.id == id}) else {return []}
+        return Array(visible[(index + 1)...])
     }
 
     mutating func reconcileTerminals(_ terminals: [TerminalRecord], seen: inout Set<String>, startingTabs: Set<String>) {
@@ -222,6 +296,16 @@ struct WorkspaceTabState: Codable {
         let tab = tabs.remove(at: source)
         let destination = targetId.flatMap {target in tabs.firstIndex(where: {$0.id == target})} ?? tabs.endIndex
         tabs.insert(tab, at: destination)
+    }
+
+    /// Put a tab at a place among the listed ones.
+    mutating func move(_ id: String, toListed position: Int) {
+        var visible = listed.map(\.id)
+        guard let source = visible.firstIndex(of: id) else {return}
+        visible.remove(at: source)
+        let position = min(max(0, position), visible.count)
+        guard position != source else {return}
+        move(id, before: position < visible.count ? visible[position] : nil)
     }
 }
 

@@ -6,3 +6,4 @@ export function appInfoPlist(options: {
   port?: string;
   sparkleKeys?: string;
 }): string;
+export const usageDescriptions: Record<string, string>;

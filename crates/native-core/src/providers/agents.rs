@@ -1038,6 +1038,26 @@ impl Agents {
             tokio::task::yield_now().await;
         }
     }
+    /// A terminal opened on Codex's history picker has no conversation until the
+    /// user picks one, and picking emits no `thread/started`. The first turn that
+    /// starts there shows which conversation it is.
+    pub async fn codex_selection_missing(&self, terminal: &str, task: &str) -> Result<bool> {
+        if !self
+            .state
+            .lock()
+            .await
+            .agents
+            .get(task)
+            .is_some_and(|a| a.provider == "codex" && a.terminal_id == terminal)
+        {
+            return Ok(false);
+        }
+        let t = self
+            .store
+            .call("get", json!({"table":"terminals","id":terminal}))
+            .await?;
+        Ok(t.is_object() && t["sessionId"].as_str().is_none_or(str::is_empty))
+    }
     pub async fn register_codex(
         &self,
         terminal: &str,

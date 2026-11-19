@@ -32,6 +32,10 @@ struct WorkspaceView: View {
     @State private var cycle = RecentTabCycle()
     @State private var contentFrame = CGRect.zero
     @State private var clickMonitor: Any?
+    @State private var tabDrag: TabStripDrag?
+    // Where each tab and the strip are on screen, for dragging and middle clicks.
+    @State private var tabFrames: [String: CGRect] = [:]
+    @State private var tabStripFrame = CGRect.zero
     @State private var gutterHover = false
     @ObservedObject private var pins = BrowserPins.shared
     /// Files, Git and GitHub have nothing to add while only web pages are on screen.
@@ -203,13 +207,18 @@ struct WorkspaceView: View {
                         ForEach(layout.listed) {item in tabItem(item)}
                     }
                 }.scrollIndicators(.hidden)
-                .onChange(of: layout.activeId) {_, id in if let id {proxy.scrollTo(id)}}
+                .onGeometryChange(for: CGRect.self) {$0.frame(in: .global)} action: {tabStripFrame = $0}
+                .onChange(of: layout.activeId) {_, id in if let id, tabDrag == nil {proxy.scrollTo(id)}}
             }
             if layout.split != nil {
                 Button {toggleSplit()} label: {Image(systemName: "rectangle").frame(width: 28, height: 32).contentShape(Rectangle())}
                     .buttonStyle(.plain).foregroundStyle(.secondary).help("分割を解除（⌘\\）").accessibilityLabel("分割を解除")
             }
-            Menu {addTabButtons} label: {Image(systemName: "plus").frame(width: 28, height: 32)}
+            Menu {
+                addTabButtons
+                Divider()
+                Button("閉じたタブを開き直す") {reopenClosed()}.disabled(!layout.canReopen)
+            } label: {Image(systemName: "plus").frame(width: 28, height: 32)}
                 .menuStyle(.borderlessButton).fixedSize().padding(.horizontal, 8).help("タブを追加。⌘Tで検索・URL・Terminalをまとめて開けます")
         }.frame(height: 32)
     }
@@ -238,20 +247,50 @@ struct WorkspaceView: View {
             if item.kind == "browser" {
                 Button("このプロジェクトにピン留め") {togglePin(item.id, address: item.browserURL ?? "", title: item.browserTitle ?? "")}
                     .disabled(BrowserModel.navigationURL(item.browserURL ?? "")?.host == nil)
+                Button("再読み込み") {BrowserModel.live("\(workspace.id).\(item.id)")?.perform(.reload)}
+                Button("タブを複製") {
+                    if let url = BrowserModel.navigationURL(item.browserURL ?? "") {openURL(url, opener: item.id, wanted: .tab)}
+                }.disabled(BrowserModel.navigationURL(item.browserURL ?? "")?.host == nil)
             }
             Divider()
             Button("サイドバーに固定") {fixToSidebar(item)}
                 .disabled(!(item.kind == "browser" ? BrowserModel.navigationURL(item.browserURL ?? "")?.host != nil : item.isTerminal && item.terminalId != nil))
             Divider()
             Button("タブを閉じる") {close(item)}.disabled(model.isTerminalStarting(item.id))
+            Button("他のタブを閉じる") {closeAll(layout.listed.filter {$0.id != item.id})}.disabled(layout.listed.count < 2)
+            Button("右側のタブを閉じる") {closeAll(layout.listed(after: item.id))}.disabled(layout.listed(after: item.id).isEmpty)
+            Button("閉じたタブを開き直す") {reopenClosed()}.disabled(!layout.canReopen)
         }
-        .draggable(item.id)
-        .dropDestination(for: String.self) {ids, _ in
-            guard let id = ids.first, layout.tabs.contains(where: {$0.id == id}) else {return false}
-            layout.move(id, before: item.id)
-            return true
-        }
+        .onGeometryChange(for: CGRect.self) {$0.frame(in: .global)} action: {tabFrames[item.id] = $0}
+        .offset(x: tabDragOffset(item.id))
+        .zIndex(tabDrag?.id == item.id ? 1 : 0)
+        // The dragged tab follows the pointer exactly while the others slide aside.
+        .transaction {if tabDrag?.id == item.id {$0.animation = nil}}
+        .simultaneousGesture(DragGesture(minimumDistance: 6, coordinateSpace: .global)
+            .onChanged {value in dragTab(item.id, by: value.translation.width)}
+            .onEnded {_ in withAnimation(.easeOut(duration: 0.15)) {tabDrag = nil}})
         .id(item.id)
+    }
+    private func tabWidths(_ order: [String]) -> [CGFloat] {order.map {tabFrames[$0]?.width ?? 0}}
+    private func tabDragOffset(_ id: String) -> CGFloat {
+        let order = layout.listed.map(\.id)
+        guard let drag = tabDrag, drag.id == id, let index = order.firstIndex(of: id) else {return 0}
+        return drag.offset(widths: tabWidths(order), index: index)
+    }
+    private func dragTab(_ id: String, by translation: CGFloat) {
+        let order = layout.listed.map(\.id)
+        guard !deletionBlocked, let index = order.firstIndex(of: id) else {return}
+        let widths = tabWidths(order)
+        var drag = tabDrag
+        if drag?.id != id {
+            drag = TabStripDrag(id: id, origin: widths[..<index].reduce(0, +))
+            layout.focus(id)
+        }
+        drag?.translation = translation
+        tabDrag = drag
+        if let target = drag?.target(widths: widths, index: index), target != index {
+            withAnimation(.easeOut(duration: 0.15)) {layout.move(id, toListed: target)}
+        }
     }
     private func pinButton(_ pin: BrowserPin) -> some View {
         let tab = layout.tabs.first {$0.pinId == pin.id}
@@ -532,9 +571,20 @@ struct WorkspaceView: View {
         Diagnostics.shared.record("action.close-tab")
         if model.terminal(id: item.terminalId)?.status == "running" {closingTab = item} else {remove(item)}
     }
-    private func remove(_ item: WorkspaceTab) {
+    private func remove(_ item: WorkspaceTab, reopenable: Bool = true) {
         popupViews.removeValue(forKey: item.id)
-        layout.close(item.id)
+        tabFrames.removeValue(forKey: item.id)
+        layout.close(item.id, reopenable: reopenable)
+    }
+    /// Close several tabs at once. A tab whose process is still running stays: stopping it is asked one tab at a time.
+    private func closeAll(_ items: [WorkspaceTab]) {
+        guard !deletionBlocked else {return}
+        Diagnostics.shared.record("action.close-tabs")
+        for item in items where !model.isTerminalStarting(item.id) && model.terminal(id: item.terminalId)?.status != "running" {remove(item)}
+    }
+    private func reopenClosed() {
+        guard !deletionBlocked else {return}
+        layout.reopenClosed(workspaceId: workspace.id)
     }
     /// Move a tab to the sidebar's fixed tabs. A terminal or agent keeps running; only its place changes.
     private func fixToSidebar(_ item: WorkspaceTab) {
@@ -548,7 +598,8 @@ struct WorkspaceView: View {
             fixed.workspaceId = workspace.id; fixed.terminalId = terminalId
         }
         let added = FixedTabs.shared.add(fixed)
-        remove(item)
+        // The page lives on in the sidebar; it was not closed.
+        remove(item, reopenable: false)
         model.openFixed(added.id)
     }
     /// Terminals of this workspace that belong among its tabs: fixed tabs show their own.
@@ -637,8 +688,9 @@ struct WorkspaceView: View {
     /// With two panes on screen, a click decides which one keyboard commands apply to.
     private func installClickMonitor() {
         guard clickMonitor == nil else {return}
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {event in
+        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseUp]) {event in
             MainActor.assumeIsolated {
+                if event.type == .otherMouseUp {closeMiddleClicked(event); return}
                 let owner = NCChromiumOwnerForWindow(event.window)
                 let window = owner?.window ?? event.window
                 guard model.frontId == workspace.id, layout.split != nil, let content = window?.contentView,
@@ -652,6 +704,16 @@ struct WorkspaceView: View {
             }
             return event
         }
+    }
+    /// A middle click on a tab closes it, as in a browser.
+    private func closeMiddleClicked(_ event: NSEvent) {
+        guard event.buttonNumber == 2, model.frontId == workspace.id, !deletionBlocked, closingTab == nil, tabDrag == nil,
+              let window = event.window, window.identifier?.rawValue.hasPrefix("main") == true, window.attachedSheet == nil,
+              let content = window.contentView else {return}
+        let point = CGPoint(x: event.locationInWindow.x, y: content.bounds.height - event.locationInWindow.y)
+        guard tabStripFrame.contains(point),
+              let item = layout.listed.first(where: {tabFrames[$0.id]?.contains(point) == true}) else {return}
+        close(item)
     }
     private func openRequestedTerminal() {
         guard let id = model.requestedTerminalId,
