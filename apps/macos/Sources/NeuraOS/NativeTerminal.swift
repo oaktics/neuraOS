@@ -46,12 +46,11 @@ class NativeTerminalView: TerminalView {
     var acceptsFileInput: () -> Bool = { true }
 
     // A shown terminal whose Metal layer stops presenting keeps its last frame on
-    // screen while input still reaches the process. After output is applied or the
-    // pane is shown, a frame must follow; otherwise redraw, then rebuild the layer.
+    // screen while input still reaches the process. SwiftTerm records each request
+    // for a frame; a request that stays unanswered is a stall. Then redraw, rebuild
+    // the layer, and finally draw without Metal.
     private var frameCheck: DispatchWorkItem?
-    private var frameBaseline: UInt64 = 0
     private var frameStage = 0
-    private var laterBaseline: UInt64?
     private var lastRebuild: TimeInterval = -.infinity
     private var metalAbandoned = false
     static var frameDeadline: TimeInterval = 1.0
@@ -61,23 +60,25 @@ class NativeTerminalView: TerminalView {
         return renderingVisible && window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
             && !isHiddenOrHasHiddenAncestor && bounds.width > 0 && bounds.height > 0
     }
+    /// Seconds the oldest unanswered frame request has waited, or nil when none is open.
+    /// Measured from the first such request, so steady output cannot keep extending it.
+    private var unansweredFor: TimeInterval? {
+        unansweredMetalDisplayRequest.map {Date().timeIntervalSince($0)}
+    }
+    /// Called when output was applied or the pane was shown: a check follows.
     func expectFrame() {
-        guard isUsingMetalRenderer, canPresent else {return}
-        // Output that arrives during a pending check needs a frame of its own.
-        guard frameCheck == nil else {laterBaseline = metalRendererStatus.presentedFrameCount; return}
-        frameBaseline = metalRendererStatus.presentedFrameCount
-        frameStage = 0
+        guard frameCheck == nil, isUsingMetalRenderer, canPresent else {return}
         scheduleFrameCheck(after: Self.frameDeadline)
     }
     private func scheduleFrameCheck(after delay: TimeInterval) {
         let item = DispatchWorkItem { [weak self] in self?.checkFrame() }
         frameCheck = item
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.05, delay), execute: item)
     }
     private func redrawEverything() {
         terminal.updateFullScreen()
         synchronizedOutputChanged(source: terminal, active: false)
-        for case let metal as MTKView in subviews {metal.setNeedsDisplay(metal.bounds)}
+        requestMetalFrame()
     }
     private func checkFrame() {
         frameCheck = nil
@@ -85,21 +86,12 @@ class NativeTerminalView: TerminalView {
         guard isUsingMetalRenderer, canPresent else {return}
         // A synchronized update is still open: its frame is not due yet.
         if terminal.synchronizedOutputActive {scheduleFrameCheck(after: Self.frameDeadline); return}
-        let later = laterBaseline
-        laterBaseline = nil
-        let presented = metalRendererStatus.presentedFrameCount
-        guard presented == frameBaseline else {
-            // Frames were presented, but none since the latest output arrived: watch that one.
-            if let later, presented == later {
-                frameBaseline = later
-                frameStage = 0
-                scheduleFrameCheck(after: Self.frameDeadline)
-            }
-            return
-        }
+        guard let waited = unansweredFor else {frameStage = 0; return}
+        // The open request is still within its deadline.
+        guard waited >= Self.frameDeadline else {scheduleFrameCheck(after: Self.frameDeadline - waited); return}
         switch frameStage {
         case 0:
-            Diagnostics.shared.record("terminal.renderer.stalled", code: Self.stateCode(metalRendererStatus.state))
+            Diagnostics.shared.record("terminal.renderer.stalled", duration: waited, code: Self.stateCode(metalRendererStatus.state))
             frameStage = 1
             updateMetalVisibility(); redrawEverything()
             scheduleFrameCheck(after: Self.frameDeadline)
@@ -108,17 +100,16 @@ class NativeTerminalView: TerminalView {
             // The rate limit postpones a rebuild; it must not end recovery.
             guard now - lastRebuild > 10 else {scheduleFrameCheck(after: 10 - (now - lastRebuild) + 0.1); return}
             lastRebuild = now
-            Diagnostics.shared.record("terminal.renderer.rebuild", code: Self.stateCode(metalRendererStatus.state))
+            Diagnostics.shared.record("terminal.renderer.rebuild", duration: waited, code: Self.stateCode(metalRendererStatus.state))
             do {try setUseMetal(false); try setUseMetal(true)}
             catch {metalAbandoned = true; Diagnostics.shared.record("terminal.renderer.fallback"); needsDisplay = true; return}
-            frameBaseline = metalRendererStatus.presentedFrameCount
             frameStage = 2
             updateMetalVisibility(); redrawEverything()
             scheduleFrameCheck(after: Self.frameDeadline * 2)
         default:
             // A fresh layer did not present either: a slower terminal beats a frozen one.
             metalAbandoned = true
-            Diagnostics.shared.record("terminal.renderer.fallback", code: Self.stateCode(metalRendererStatus.state))
+            Diagnostics.shared.record("terminal.renderer.fallback", duration: waited, code: Self.stateCode(metalRendererStatus.state))
             try? setUseMetal(false)
             needsDisplay = true
         }
@@ -373,12 +364,10 @@ struct NativeTerminal: NSViewRepresentable {
         func apply(_ output: TerminalOutput, to view: TerminalView) {
             updateStatus(output.status)
             applying = true
-            let before = view.getTerminal().getCursorLocation()
             for chunk in output.chunks {
                 if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
                 if !chunk.data.isEmpty {view.feed(text: chunk.data)}
             }
-            let drew = Self.displayChanged(view, since: before)
             applying = false; cursor = output.cursor
             if !caughtUp && !output.more {
                 caughtUp = true
@@ -386,20 +375,12 @@ struct NativeTerminal: NSViewRepresentable {
                 focusIfVisible()
             }
             requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
-            if visible, drew {(view as? NativeTerminalView)?.expectFrame()}
-        }
-        // Title updates and status queries arrive as output but draw nothing, so no
-        // frame follows them. SwiftTerm redraws for dirty rows or a moved cursor.
-        private static func displayChanged(_ view: TerminalView, since cursor: (x: Int, y: Int)) -> Bool {
-            let terminal = view.getTerminal()
-            let now = terminal.getCursorLocation()
-            return terminal.getUpdateRange() != nil || now.x != cursor.x || now.y != cursor.y
+            if visible, !output.chunks.isEmpty {(view as? NativeTerminalView)?.expectFrame()}
         }
         // Replay can span megabytes after a busy background session. Yield between
         // bounded UTF-8 feeds so input, connection updates and painting can run.
         func applyResponsive(_ output: TerminalOutput, to view: TerminalView) async {
             updateStatus(output.status)
-            var drew = false
             for chunk in output.chunks {
                 guard !Task.isCancelled else {return}
                 applying = true
@@ -411,10 +392,7 @@ struct NativeTerminal: NSViewRepresentable {
                     guard !Task.isCancelled else {return}
                     let end = min(offset + 8192, bytes.count)
                     applying = true
-                    let before = view.getTerminal().getCursorLocation()
                     view.feed(byteArray: bytes[offset..<end])
-                    // Checked per slice: a display pass during the yield clears the dirty range.
-                    drew = Self.displayChanged(view, since: before) || drew
                     applying = false
                     offset = end
                     await Task.yield()
@@ -424,7 +402,7 @@ struct NativeTerminal: NSViewRepresentable {
             apply(TerminalOutput(data: "", chunks: [], cursor: output.cursor, more: output.more,
                                  status: output.status, cols: output.cols, rows: output.rows), to: view)
             requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
-            if visible, drew {(view as? NativeTerminalView)?.expectFrame()}
+            if visible, !output.chunks.isEmpty {(view as? NativeTerminalView)?.expectFrame()}
         }
         private func pause(milliseconds: Int) async {
             guard !Task.isCancelled else {return}

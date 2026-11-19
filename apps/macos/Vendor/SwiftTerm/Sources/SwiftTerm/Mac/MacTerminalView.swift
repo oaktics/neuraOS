@@ -268,6 +268,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
     /// Work counters of the Metal renderer, or nil when Metal is not in use.
     public var metalRenderStatistics: MetalRenderStatistics? { metalRenderer?.statistics }
     var pendingMetalDisplay: Bool = false
+    /// neuraOS: when the oldest Metal frame request that no presented frame has
+    /// answered yet was made; nil once a frame is presented. Later requests do
+    /// not move it, so continuous output cannot hide a renderer that is asked to
+    /// draw but no longer presents.
+    public internal(set) var unansweredMetalDisplayRequest: Date?
+    /// neuraOS: asks the Metal view for a frame, recording the request.
+    public func requestMetalFrame() { requestMetalDisplay() }
     /// The cursor position last submitted to the Metal renderer. Used to
     /// detect pure cursor-only moves (no rows dirty) such as the
     /// CSI Ps C / CSI Ps D sequences shells emit in response to Option+Arrow
@@ -662,6 +669,7 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
 
     func metalRenderer(_ renderer: MetalTerminalRenderer, didPresentAt date: Date) {
         guard renderer === metalRenderer, useMetalRenderer else { return }
+        unansweredMetalDisplayRequest = nil
         setMetalRendererStatus(MetalRendererStatus(
             state: .healthy,
             presentedFrameCount: metalRendererStatus.presentedFrameCount &+ 1,
