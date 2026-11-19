@@ -51,7 +51,7 @@ class NativeTerminalView: TerminalView {
     private var frameCheck: DispatchWorkItem?
     private var frameBaseline: UInt64 = 0
     private var frameStage = 0
-    private var frameRearm = false
+    private var laterBaseline: UInt64?
     private var lastRebuild: TimeInterval = -.infinity
     private var metalAbandoned = false
     static var frameDeadline: TimeInterval = 1.0
@@ -64,7 +64,7 @@ class NativeTerminalView: TerminalView {
     func expectFrame() {
         guard isUsingMetalRenderer, canPresent else {return}
         // Output that arrives during a pending check needs a frame of its own.
-        guard frameCheck == nil else {frameRearm = true; return}
+        guard frameCheck == nil else {laterBaseline = metalRendererStatus.presentedFrameCount; return}
         frameBaseline = metalRendererStatus.presentedFrameCount
         frameStage = 0
         scheduleFrameCheck(after: Self.frameDeadline)
@@ -83,10 +83,16 @@ class NativeTerminalView: TerminalView {
         frameCheck = nil
         // Nothing can be presented while covered, minimized or hidden; that is not a stall.
         guard isUsingMetalRenderer, canPresent else {return}
-        let rearm = frameRearm
-        frameRearm = false
-        guard metalRendererStatus.presentedFrameCount == frameBaseline else {
-            if rearm {expectFrame()}
+        let later = laterBaseline
+        laterBaseline = nil
+        let presented = metalRendererStatus.presentedFrameCount
+        guard presented == frameBaseline else {
+            // Frames were presented, but none since the latest output arrived: watch that one.
+            if let later, presented == later {
+                frameBaseline = later
+                frameStage = 0
+                scheduleFrameCheck(after: Self.frameDeadline)
+            }
             return
         }
         switch frameStage {
