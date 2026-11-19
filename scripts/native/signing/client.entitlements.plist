@@ -4,4 +4,10 @@
     <!-- Ad-hoc CEF has no Team ID, so it cannot satisfy library validation.
          Keep DYLD environment injection and debugger attachment prohibited. -->
     <key>com.apple.security.cs.disable-library-validation</key><true/>
+    <!-- Hardened Runtime denies these to websites unless declared; keep in
+         step with certified-client so local builds behave like releases. -->
+    <key>com.apple.security.device.audio-input</key><true/>
+    <key>com.apple.security.device.camera</key><true/>
+    <key>com.apple.security.device.bluetooth</key><true/>
+    <key>com.apple.security.personal-information.location</key><true/>
 </dict></plist>
