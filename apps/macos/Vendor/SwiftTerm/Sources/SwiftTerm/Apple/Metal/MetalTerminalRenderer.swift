@@ -432,6 +432,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return
         }
 #if os(macOS)
+        // neuraOS: requests made after this point are not part of this frame.
+        let requestGeneration = terminalView.metalFrameRequests.drawBegan()
+#else
+        let requestGeneration: UInt64 = 0
+#endif
+#if os(macOS)
         rasterizer.fontSmoothing = terminalView.fontSmoothing
         let scale = terminalView.metalRenderingScaleFactor()
         if let layer = view.layer, layer.contentsScale != scale {
@@ -657,11 +663,11 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
         // Simulator Metal does not expose MTLDrawable.addPresentedHandler.
         // A scheduled presentation is the closest simulator-only signal.
         commandBuffer.addScheduledHandler { [weak self] _ in
-            self?.recordPresentedFrame()
+            self?.recordPresentedFrame(requestGeneration: requestGeneration)
         }
 #else
         drawable.addPresentedHandler { [weak self] _ in
-            self?.recordPresentedFrame()
+            self?.recordPresentedFrame(requestGeneration: requestGeneration)
         }
 #endif
         commandBuffer.present(drawable)
@@ -674,10 +680,10 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
 #endif
     }
 
-    private func recordPresentedFrame() {
+    private func recordPresentedFrame(requestGeneration: UInt64) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.terminalView?.metalRenderer(self, didPresentAt: Date())
+            self.terminalView?.metalRenderer(self, didPresentAt: Date(), requestGeneration: requestGeneration)
         }
     }
 

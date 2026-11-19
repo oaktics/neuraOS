@@ -2560,6 +2560,9 @@ extension TerminalView {
         guard let metalView = metalView else {
             return
         }
+#if os(macOS)
+        metalFrameRequests.request(at: Date())
+#endif
         metalView.setNeedsDisplay(metalView.bounds)
     }
 
@@ -2575,6 +2578,9 @@ extension TerminalView {
                 deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay))) { [weak self] in
                     guard let self else { return }
                     self.pendingMetalDisplay = false
+#if os(macOS)
+                    self.metalFrameRequests.request(at: Date())
+#endif
                     self.metalView?.setNeedsDisplay(self.metalView?.bounds ?? .zero)
                 }
         }

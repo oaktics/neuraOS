@@ -6,6 +6,49 @@ import os
 #endif
 
 /// The current state of the optional Metal terminal renderer.
+/// neuraOS: which requests for a Metal frame no presented frame has answered.
+///
+/// A frame answers only the requests made before it began drawing: a request
+/// that arrives while an earlier frame is on its way to the screen stays open
+/// when that frame is presented. The oldest open request keeps its time, so
+/// steady output cannot hide a renderer that draws but no longer presents.
+public struct MetalFrameRequestLedger: Sendable {
+    private var serial: UInt64 = 0
+    private var drawnThrough: UInt64 = 0
+    /// The first request after each draw began, oldest first.
+    private var open: [(serial: UInt64, at: Date)] = []
+    private static let limit = 256
+
+    public init() {}
+
+    /// When the oldest unanswered request was made, or nil when none is open.
+    public var oldestUnanswered: Date? { open.first?.at }
+
+    public mutating func request(at date: Date) {
+        serial &+= 1
+        // Later requests in the same generation share the first one's time.
+        if let last = open.last, last.serial > drawnThrough { return }
+        // Bounded without forgetting a request: the two oldest generations merge,
+        // keeping the earlier time and the later generation that answers both.
+        if open.count >= Self.limit {
+            let oldest = open.removeFirst()
+            open[0].at = oldest.at
+        }
+        open.append((serial, date))
+    }
+
+    /// A frame begins drawing; it will contain every request made so far.
+    public mutating func drawBegan() -> UInt64 {
+        drawnThrough = serial
+        return serial
+    }
+
+    /// The frame that began at `generation` reached the screen.
+    public mutating func presented(generation: UInt64) {
+        open.removeAll { $0.serial <= generation }
+    }
+}
+
 public struct MetalRendererStatus: Equatable, Sendable {
     public enum State: Equatable, Sendable {
         case disabled

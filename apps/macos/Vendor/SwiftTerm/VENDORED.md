@@ -39,6 +39,12 @@ and CoreGraphics renderer are upstream code.
   it, exposes `metalRenderStatistics`, `metalRowReuseEnabled` and
   `metalVerifiesRowReuse`, and bumps an epoch when attribute caches are reset.
 
+- `TerminalView`: `metalFrameRequests` (`MetalFrameRequestLedger`) records
+  which frame requests no presented frame has answered, by draw generation;
+  `unansweredMetalDisplayRequest` and `requestMetalFrame()` let the host detect
+  and recover a renderer that is asked to draw but no longer presents.
+  `apps/macos/Tests/NeuraOSTests/TerminalFrameRequestTests.swift` covers the ledger.
+
 `defaults write <bundle id> SwiftTermDisableMetalRowReuse -bool YES` turns the
 row reuse off at launch; the caches stay.
 `apps/macos/Tests/NeuraOSTests/TerminalRenderReuseTests.swift` rebuilds every
