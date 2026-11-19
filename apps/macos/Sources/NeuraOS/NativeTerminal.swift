@@ -4,6 +4,33 @@ import SwiftTerm
 import MetalKit
 
 /// Cmd-V is a terminal paste action; Codex needs Ctrl-V to read clipboard images.
+/// Which step follows for a terminal whose oldest frame request is unanswered.
+///
+/// Steps escalate only while the same request stays open. Once the request a step
+/// was taken for is answered, a later stall is a new one and starts with a redraw,
+/// however long after the previous check it is noticed.
+struct TerminalFrameRecovery {
+    enum Step: Equatable {case none, wait(TimeInterval), redraw, rebuild, fallback}
+    private(set) var stage = 0
+    private var watched: Date?
+
+    mutating func step(oldest: Date?, now: Date, deadline: TimeInterval) -> Step {
+        guard let oldest else {stage = 0; watched = nil; return .none}
+        if stage > 0, oldest != watched {stage = 0; watched = nil}
+        let waited = now.timeIntervalSince(oldest)
+        guard waited >= deadline else {return .wait(deadline - waited)}
+        switch stage {
+        case 0: stage = 1; return .redraw
+        case 1: stage = 2; return .rebuild
+        default: return .fallback
+        }
+    }
+    /// The request left open by the step just taken; escalation continues only for it.
+    mutating func watch(_ oldest: Date?) {watched = oldest}
+    /// A rebuild that had to wait is tried again at the next check.
+    mutating func postponeRebuild() {stage = 1}
+}
+
 class NativeTerminalView: TerminalView {
     var provider = "shell"
     private var darkAppearance: Bool?
@@ -51,7 +78,7 @@ class NativeTerminalView: TerminalView {
     // the layer, and finally draw without Metal.
     private var frameCheck: DispatchWorkItem?
     private var windowObservers: [NSObjectProtocol] = []
-    private var frameStage = 0
+    private var recovery = TerminalFrameRecovery()
     private var lastRebuild: TimeInterval = -.infinity
     private var metalAbandoned = false
     static var frameDeadline: TimeInterval = 1.0
@@ -87,36 +114,35 @@ class NativeTerminalView: TerminalView {
         guard isUsingMetalRenderer, canPresent else {return}
         // A synchronized update is still open: its frame is not due yet.
         if terminal.synchronizedOutputActive {scheduleFrameCheck(after: Self.frameDeadline); return}
-        guard let waited = unansweredFor else {frameStage = 0; return}
-        // The open request is still within its deadline.
-        // Every older request was presented, so an earlier stall is over: a later one
-        // starts again with the mildest step.
-        guard waited >= Self.frameDeadline else {
-            frameStage = 0
-            scheduleFrameCheck(after: Self.frameDeadline - waited)
-            return
-        }
-        switch frameStage {
-        case 0:
-            Diagnostics.shared.record("terminal.renderer.stalled", duration: waited, code: Self.stateCode(metalRendererStatus.state))
-            frameStage = 1
+        let waited = unansweredFor ?? 0
+        let state = Self.stateCode(metalRendererStatus.state)
+        switch recovery.step(oldest: unansweredMetalDisplayRequest, now: Date(), deadline: Self.frameDeadline) {
+        case .none: break
+        case .wait(let delay): scheduleFrameCheck(after: delay)
+        case .redraw:
+            Diagnostics.shared.record("terminal.renderer.stalled", duration: waited, code: state)
             updateMetalVisibility(); redrawEverything()
+            recovery.watch(unansweredMetalDisplayRequest)
             scheduleFrameCheck(after: Self.frameDeadline)
-        case 1:
+        case .rebuild:
             let now = ProcessInfo.processInfo.systemUptime
             // The rate limit postpones a rebuild; it must not end recovery.
-            guard now - lastRebuild > 10 else {scheduleFrameCheck(after: 10 - (now - lastRebuild) + 0.1); return}
+            guard now - lastRebuild > 10 else {
+                recovery.postponeRebuild()
+                scheduleFrameCheck(after: 10 - (now - lastRebuild) + 0.1)
+                return
+            }
             lastRebuild = now
-            Diagnostics.shared.record("terminal.renderer.rebuild", duration: waited, code: Self.stateCode(metalRendererStatus.state))
+            Diagnostics.shared.record("terminal.renderer.rebuild", duration: waited, code: state)
             do {try setUseMetal(false); try setUseMetal(true)}
             catch {metalAbandoned = true; Diagnostics.shared.record("terminal.renderer.fallback"); needsDisplay = true; return}
-            frameStage = 2
             updateMetalVisibility(); redrawEverything()
+            recovery.watch(unansweredMetalDisplayRequest)
             scheduleFrameCheck(after: Self.frameDeadline * 2)
-        default:
+        case .fallback:
             // A fresh layer did not present either: a slower terminal beats a frozen one.
             metalAbandoned = true
-            Diagnostics.shared.record("terminal.renderer.fallback", duration: waited, code: Self.stateCode(metalRendererStatus.state))
+            Diagnostics.shared.record("terminal.renderer.fallback", duration: waited, code: state)
             try? setUseMetal(false)
             needsDisplay = true
         }

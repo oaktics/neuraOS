@@ -1,5 +1,6 @@
 import XCTest
 import SwiftTerm
+@testable import NeuraOS
 
 final class TerminalFrameRequestTests: XCTestCase {
     private func time(_ seconds: TimeInterval) -> Date {Date(timeIntervalSinceReferenceDate: seconds)}
@@ -67,6 +68,45 @@ final class TerminalFrameRequestTests: XCTestCase {
         XCTAssertNotNil(ledger.oldestUnanswered)
         ledger.presented(generation: generations[999])
         XCTAssertNil(ledger.oldestUnanswered)
+    }
+
+    func testRecoveryEscalatesWhileTheSameRequestStaysOpen() {
+        var recovery = TerminalFrameRecovery()
+        XCTAssertEqual(recovery.step(oldest: nil, now: time(0), deadline: 1), .none)
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(0.5), deadline: 1), .wait(0.5))
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(1), deadline: 1), .redraw)
+        recovery.watch(time(0))
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(2), deadline: 1), .rebuild)
+        // The rebuild starts a new ledger; its own redraw is the request now watched.
+        recovery.watch(time(2))
+        XCTAssertEqual(recovery.step(oldest: time(2), now: time(4), deadline: 1), .fallback)
+    }
+
+    // Rebuild at t0 -> its frame is presented -> a new request stalls -> next check at t0+2.
+    // The new stall has waited past the deadline, but it is not the one that was rebuilt for.
+    func testNewStallAfterASuccessfulRebuildStartsOver() {
+        var recovery = TerminalFrameRecovery()
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(1), deadline: 1), .redraw)
+        recovery.watch(time(0))
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(2), deadline: 1), .rebuild)
+        recovery.watch(time(2))
+        XCTAssertEqual(recovery.step(oldest: time(2.25), now: time(4), deadline: 1), .redraw)
+    }
+
+    func testNewStallAfterASuccessfulRedrawStartsOver() {
+        var recovery = TerminalFrameRecovery()
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(1), deadline: 1), .redraw)
+        recovery.watch(time(0))
+        XCTAssertEqual(recovery.step(oldest: time(1.25), now: time(3), deadline: 1), .redraw)
+    }
+
+    func testPostponedRebuildIsTriedAgain() {
+        var recovery = TerminalFrameRecovery()
+        _ = recovery.step(oldest: time(0), now: time(1), deadline: 1)
+        recovery.watch(time(0))
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(2), deadline: 1), .rebuild)
+        recovery.postponeRebuild()
+        XCTAssertEqual(recovery.step(oldest: time(0), now: time(9), deadline: 1), .rebuild)
     }
 
     func testLatePresentationOfAnOlderFrameKeepsNewerRequests() {
