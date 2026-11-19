@@ -83,6 +83,8 @@ class NativeTerminalView: TerminalView {
         frameCheck = nil
         // Nothing can be presented while covered, minimized or hidden; that is not a stall.
         guard isUsingMetalRenderer, canPresent else {return}
+        // A synchronized update is still open: its frame is not due yet.
+        if terminal.synchronizedOutputActive {scheduleFrameCheck(after: Self.frameDeadline); return}
         let later = laterBaseline
         laterBaseline = nil
         let presented = metalRendererStatus.presentedFrameCount
@@ -371,10 +373,12 @@ struct NativeTerminal: NSViewRepresentable {
         func apply(_ output: TerminalOutput, to view: TerminalView) {
             updateStatus(output.status)
             applying = true
+            let before = view.getTerminal().getCursorLocation()
             for chunk in output.chunks {
                 if let cols = chunk.cols, let rows = chunk.rows {view.getTerminal().resize(cols: cols, rows: rows)}
                 if !chunk.data.isEmpty {view.feed(text: chunk.data)}
             }
+            let drew = Self.displayChanged(view, since: before)
             applying = false; cursor = output.cursor
             if !caughtUp && !output.more {
                 caughtUp = true
@@ -382,12 +386,20 @@ struct NativeTerminal: NSViewRepresentable {
                 focusIfVisible()
             }
             requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
-            if visible, !output.chunks.isEmpty {(view as? NativeTerminalView)?.expectFrame()}
+            if visible, drew {(view as? NativeTerminalView)?.expectFrame()}
+        }
+        // Title updates and status queries arrive as output but draw nothing, so no
+        // frame follows them. SwiftTerm redraws for dirty rows or a moved cursor.
+        private static func displayChanged(_ view: TerminalView, since cursor: (x: Int, y: Int)) -> Bool {
+            let terminal = view.getTerminal()
+            let now = terminal.getCursorLocation()
+            return terminal.getUpdateRange() != nil || now.x != cursor.x || now.y != cursor.y
         }
         // Replay can span megabytes after a busy background session. Yield between
         // bounded UTF-8 feeds so input, connection updates and painting can run.
         func applyResponsive(_ output: TerminalOutput, to view: TerminalView) async {
             updateStatus(output.status)
+            var drew = false
             for chunk in output.chunks {
                 guard !Task.isCancelled else {return}
                 applying = true
@@ -399,7 +411,10 @@ struct NativeTerminal: NSViewRepresentable {
                     guard !Task.isCancelled else {return}
                     let end = min(offset + 8192, bytes.count)
                     applying = true
+                    let before = view.getTerminal().getCursorLocation()
                     view.feed(byteArray: bytes[offset..<end])
+                    // Checked per slice: a display pass during the yield clears the dirty range.
+                    drew = Self.displayChanged(view, since: before) || drew
                     applying = false
                     offset = end
                     await Task.yield()
@@ -409,7 +424,7 @@ struct NativeTerminal: NSViewRepresentable {
             apply(TerminalOutput(data: "", chunks: [], cursor: output.cursor, more: output.more,
                                  status: output.status, cols: output.cols, rows: output.rows), to: view)
             requestFallbackDisplay(view, changed: !output.chunks.isEmpty)
-            if visible, !output.chunks.isEmpty {(view as? NativeTerminalView)?.expectFrame()}
+            if visible, drew {(view as? NativeTerminalView)?.expectFrame()}
         }
         private func pause(milliseconds: Int) async {
             guard !Task.isCancelled else {return}
