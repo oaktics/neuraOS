@@ -34,6 +34,37 @@ enum FilePresentation {
     }
 }
 
+/// Writes one file's edits in the order they were asked for. The daemon checks a save against
+/// the file's hash before it writes, so two saves sent at once can both pass that check and land
+/// in either order; here each write waits for the one before it and takes the text as it is then.
+/// The queue outlives the file's tab, so a write asked for as the tab closes still happens.
+@MainActor final class FileSaveQueue: ObservableObject {
+    @Published private(set) var pending = 0
+    @Published var error: String?
+    private var last: Task<Void, Never>?
+    var saving: Bool {pending > 0}
+
+    func enqueue(_ path: String, documents: Binding<[String: OpenDocument]>, allowed: @escaping @MainActor () -> Bool,
+                 write: @escaping @MainActor (OpenDocument) async throws -> FileContent) {
+        let previous = last
+        pending += 1
+        last = Task {
+            await previous?.value
+            defer {pending -= 1}
+            // An earlier write may already have covered this request.
+            guard allowed(), let document = documents.wrappedValue[path], document.dirty else {return}
+            do {
+                let content = try await write(document)
+                documents.wrappedValue[path]?.original = content
+                error = nil
+            } catch {self.error = error.localizedDescription}
+        }
+    }
+
+    /// Completes when every write asked for so far has finished.
+    func settle() async {await last?.value}
+}
+
 struct FilePane: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme
@@ -47,7 +78,7 @@ struct FilePane: View {
     @Binding var documents: [String: OpenDocument]
     @AppStorage(MarkdownMode.storageKey) private var storedMarkdownMode = MarkdownMode.rich.rawValue
     @StateObject private var rich: MarkdownEditorSession
-    @State private var saving = false
+    @StateObject private var saver = FileSaveQueue()
     @State private var loading = false
     @State private var error: String?
     @State private var previewURL: URL?
@@ -68,6 +99,8 @@ struct FilePane: View {
     private var showsRich: Bool {isMarkdown && markdownMode == .rich}
     private var showsSource: Bool {!isMarkdown || markdownMode == .source}
     private var editable: Bool {!model.isWorkspaceBlocked(workspace.id)}
+    private var saving: Bool {saver.saving}
+    private var shownError: String? {error ?? saver.error}
     /// A rich document is written to disk as it is edited, like a notes app; code and plain text keep an explicit ⌘S.
     private var autosaves: Bool {showsRich}
     private var text: Binding<String> {Binding(get: {documents[path]?.text ?? ""}, set: {documents[path]?.text = $0})}
@@ -84,8 +117,8 @@ struct FilePane: View {
             Divider()
             if finding && showsRich {findBar; Divider()}
             content
-            if document != nil, let error {
-                Text(error).font(.system(size: 11)).foregroundStyle(.red).textSelection(.enabled).padding(8)
+            if document != nil, let shownError {
+                Text(shownError).font(.system(size: 11)).foregroundStyle(.red).textSelection(.enabled).padding(8)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -102,7 +135,7 @@ struct FilePane: View {
         // to an earlier state leaves the document dirty again without any further edit.
         .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
-        // Closing the tab removes this view, and with it the pending autosave: write what is left now.
+        // Closing the tab removes this view and its pending autosave; the save queue lives on to write what is left.
         .onDisappear {if autosaves, document?.dirty == true {save()}}
         .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }
@@ -114,7 +147,7 @@ struct FilePane: View {
             else {Text(path).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(path).padding(.leading, 4)}
             Spacer(minLength: 8)
             if let document {
-                if autosaves && error == nil {
+                if autosaves && shownError == nil {
                     // Nothing to press, but ⌘S still writes at once for those who reach for it.
                     Button("") {save()}.keyboardShortcut(active ? KeyboardShortcut("s") : nil).disabled(!document.dirty || !visible)
                         .buttonStyle(.plain).frame(width: 0, height: 0).opacity(0).accessibilityHidden(true)
@@ -257,8 +290,6 @@ struct FilePane: View {
     private func autosave() async {
         guard autosaves, document?.dirty == true else {return}
         try? await Task.sleep(for: .milliseconds(800))
-        // A save already under way took an older text: wait for it, then write the newer one.
-        while saving, !Task.isCancelled {try? await Task.sleep(for: .milliseconds(150))}
         guard !Task.isCancelled, autosaves, document?.dirty == true else {return}
         save()
     }
@@ -291,7 +322,7 @@ struct FilePane: View {
 
     private func load() async {
         guard document?.dirty != true else {return}
-        loading = true; error = nil; previewURL = nil
+        loading = true; error = nil; saver.error = nil; previewURL = nil
         defer {loading = false}
         if FilePresentation.prefersPreview(path) {
             do {previewURL = try FilePresentation.previewURL(root: workspace.path, path: path)}
@@ -313,16 +344,12 @@ struct FilePane: View {
     }
 
     private func save() {
-        guard !model.isWorkspaceBlocked(workspace.id), let doc = document, !saving else {return}
-        saving = true; error = nil
-        Task {
-            defer {saving = false}
-            do {
-                guard !model.isWorkspaceBlocked(workspace.id) else {return}
-                let content: FileContent = try await model.api.command(["type": "file.save", "workspaceId": workspace.id,
-                    "path": path, "content": doc.text, "expectedHash": doc.original.hash])
-                documents[path]?.original = content
-            } catch {self.error = error.localizedDescription}
+        guard !model.isWorkspaceBlocked(workspace.id), document != nil else {return}
+        error = nil
+        let model = model, workspaceId = workspace.id, path = path
+        saver.enqueue(path, documents: $documents, allowed: {!model.isWorkspaceBlocked(workspaceId)}) {document in
+            try await model.api.command(["type": "file.save", "workspaceId": workspaceId,
+                "path": path, "content": document.text, "expectedHash": document.original.hash])
         }
     }
 }
