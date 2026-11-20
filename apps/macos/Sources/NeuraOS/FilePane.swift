@@ -98,7 +98,9 @@ struct FilePane: View {
             if id == workspace.id, document?.dirty != true {revision += 1}
         }
         .onChange(of: document?.text) {if finding && showsRich {runFind()}}
-        .task(id: autosaves ? document?.text : nil) {await autosave()}
+        // Keyed on the saved baseline as well: a save that lands after the text was taken back
+        // to an earlier state leaves the document dirty again without any further edit.
+        .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
         .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }

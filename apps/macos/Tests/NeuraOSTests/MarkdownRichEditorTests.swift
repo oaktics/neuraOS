@@ -83,7 +83,7 @@ final class MarkdownRichEditorTests: XCTestCase {
     func testLinksUseTheSelectionAsTheirLabel() {
         XCTAssertEqual(MarkdownLineEdit.link(label: "資料", url: " https://example.com/a b "), "[資料](https://example.com/a%20b)")
         XCTAssertEqual(MarkdownLineEdit.link(label: "", url: "https://example.com"), "[https://example.com](https://example.com)")
-        XCTAssertEqual(MarkdownLineEdit.link(label: "a]b", url: "https://example.com/(x)"), "[a\\]b](https://example.com/(x%29)")
+        XCTAssertEqual(MarkdownLineEdit.link(label: "a]b", url: "https://example.com/(x)"), "[a\\]b](https://example.com/%28x%29)")
     }
 
     /// The toolbar's own commands type into the engine's text view, found from the editor's anchor.

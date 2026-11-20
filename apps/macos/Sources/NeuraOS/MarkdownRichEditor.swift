@@ -212,7 +212,9 @@ enum MarkdownLineEdit {
     static func link(label: String, url: String) -> String {
         let address = url.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "%20")
         let text = label.isEmpty ? address : label.replacingOccurrences(of: "\n", with: " ")
-        return "[\(text.replacingOccurrences(of: "]", with: "\\]"))](\(address.replacingOccurrences(of: ")", with: "%29")))"
+        // Parentheses would end, or unbalance, the destination: addresses such as Wikipedia's carry them.
+        let destination = address.replacingOccurrences(of: "(", with: "%28").replacingOccurrences(of: ")", with: "%29")
+        return "[\(text.replacingOccurrences(of: "]", with: "\\]"))](\(destination))"
     }
 }
 
