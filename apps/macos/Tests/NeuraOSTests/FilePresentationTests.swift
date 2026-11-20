@@ -64,6 +64,21 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertEqual(documents["note.md"]?.original.content, "v2")
         XCTAssertFalse(queue.saving)
 
+        // Taken back to the saved text while a write is in flight: a request made then looks at the
+        // document again after that write has moved the baseline, and restores the text on disk.
+        written = []
+        documents["note.md"]?.text = "v2-edit"
+        queue.enqueue("note.md", documents: binding, allowed: {true}, write: write)
+        await Task.yield()
+        documents["note.md"]?.text = "v2"
+        XCTAssertEqual(documents["note.md"]?.dirty, false)
+        queue.enqueue("note.md", documents: binding, allowed: {true}, write: write)
+        await queue.settle()
+        XCTAssertEqual(written.map(\.text), ["v2-edit", "v2"])
+        XCTAssertEqual(documents["note.md"]?.dirty, false)
+        XCTAssertEqual(documents["note.md"]?.original.content, "v2")
+        written = []
+
         struct Refused: LocalizedError {var errorDescription: String? {"changed on disk"}}
         documents["note.md"]?.text = "v3"
         queue.enqueue("note.md", documents: binding, allowed: {true}) {_ in throw Refused()}
@@ -72,7 +87,7 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertEqual(documents["note.md"]?.dirty, true, "A refused write keeps the edit")
         queue.enqueue("note.md", documents: binding, allowed: {false}, write: write)
         await queue.settle()
-        XCTAssertEqual(written.count, 2, "A blocked workspace is not written to")
+        XCTAssertTrue(written.isEmpty, "A blocked workspace is not written to")
     }
 
     func testPresentationTypes() {
