@@ -137,6 +137,7 @@ struct FilePane: View {
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
         // Closing the tab removes this view and its pending autosave; the save queue lives on to write what is left.
         .onDisappear {if autosaves, document?.dirty == true {save()}}
+        .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }
 
     // A rich document shows writing tools, as a word processor does; every other file shows where it lives.
