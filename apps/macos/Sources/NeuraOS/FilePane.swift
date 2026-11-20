@@ -102,6 +102,8 @@ struct FilePane: View {
         // to an earlier state leaves the document dirty again without any further edit.
         .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
+        // Closing the tab removes this view, and with it the pending autosave: write what is left now.
+        .onDisappear {if autosaves, document?.dirty == true {save()}}
         .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }
 
