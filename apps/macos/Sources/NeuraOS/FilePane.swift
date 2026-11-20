@@ -136,7 +136,9 @@ struct FilePane: View {
         .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
         // Closing the tab removes this view and its pending autosave; the save queue lives on to write what is left.
-        .onDisappear {if autosaves, document?.dirty == true {save()}}
+        // A save still in flight will move the baseline, so even a document that looks clean now gets a last
+        // request: the queue decides whether anything is left once the earlier writes have landed.
+        .onDisappear {if autosaves, document?.dirty == true || saver.saving {save()}}
         .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }
 
