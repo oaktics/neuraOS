@@ -58,7 +58,9 @@ open class Highlighter {
         // Get the library's bundle based on how it's
         // being included in the host app
 #if SWIFT_PACKAGE
-        let bundle = Bundle.module
+        guard let bundle = Highlighter.resourceBundle else {
+            return nil
+        }
 #else
         let bundle = Bundle(for: Highlighter.self)
 #endif
@@ -95,6 +97,39 @@ open class Highlighter {
             return nil
         }
     }
+
+
+    // MARK: - Resource Lookup
+
+#if SWIFT_PACKAGE
+    /**
+     The bundle holding `highlight.min.js` and the themes, or `nil` when it is missing.
+
+     Deliberately not `Bundle.module` in an installed app: the accessor SwiftPM's
+     command-line build generates looks only in the `.app` root and at the build
+     machine's absolute `.build` path, and calls `fatalError` when neither exists.
+     A packaged app keeps resource bundles in `Contents/Resources`.
+    */
+    static let resourceBundle: Bundle? = {
+        let name = "Highlighter_Highlighter.bundle"
+        let containers = [Bundle.main, Bundle(for: Highlighter.self)]
+        for container in containers {
+            // Beside the executable or test bundle is where `swift build` and `swift test` leave it.
+            let directories = [container.resourceURL, container.bundleURL, container.bundleURL.deletingLastPathComponent()]
+            for directory in directories.compactMap({ $0 }) {
+                let url = directory.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: url.path), let bundle = Bundle(url: url) {
+                    return bundle
+                }
+            }
+        }
+        // Never reach the aborting accessor from an installed application.
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            return nil
+        }
+        return Bundle.module
+    }()
+#endif
 
 
     // MARK: - Primary Functions
