@@ -43,6 +43,7 @@ for(const [name,source] of [
   ['HighlighterSwift','HighlighterSwift/LICENCE.md'],
   ['NetworkImage','NetworkImage/LICENSE'],
   ['cmark-gfm','swift-cmark/COPYING'],
+  ['MarkdownEngine','swift-markdown-engine/LICENSE'],
 ]) {
   const destination=join(output,'Contents/Resources/Licenses',`${name}.txt`);
   await rm(destination,{force:true});

@@ -14,7 +14,8 @@ let package = Package(
         .package(path: "Vendor/SwiftTerm"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),
         .package(url: "https://github.com/swiftlang/swift-cmark", exact: "0.9.0"),
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1")
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.1"),
+        .package(url: "https://github.com/nodes-app/swift-markdown-engine", exact: "0.16.0")
     ],
     targets: [.target(name: "NeuraUpdateKit"),
               .executableTarget(name: "NeuraUpdater", dependencies: ["NeuraUpdateKit"]),
@@ -31,7 +32,8 @@ let package = Package(
         .product(name: "MarkdownUI", package: "swift-markdown-ui"),
         .product(name: "cmark-gfm", package: "swift-cmark"),
         .product(name: "cmark-gfm-extensions", package: "swift-cmark"),
-        .product(name: "Sparkle", package: "Sparkle")
+        .product(name: "Sparkle", package: "Sparkle"),
+        .product(name: "MarkdownEngine", package: "swift-markdown-engine")
     ], resources: [.process("Resources")],
     // Sparkle.framework is embedded in Contents/Frameworks by scripts/native/build.mjs.
     linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]),
