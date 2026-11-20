@@ -69,7 +69,9 @@ try {
 
   await cp(join(original, 'MacOS/NeuraOS'), join(app, 'Contents/MacOS/NeuraOS'));
   await cp(join(original, 'Info.plist'), join(app, 'Contents/Info.plist'));
-  await cp(join(original, 'Resources/NeuraOS_NeuraOS.bundle'), join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
+  for (const bundle of ['NeuraOS_NeuraOS.bundle', 'Highlighter_Highlighter.bundle']) {
+    await cp(join(original, 'Resources', bundle), join(app, 'Contents/Resources', bundle), {recursive: true});
+  }
   // The executable links Sparkle.framework at launch.
   await cp(join(original, 'Frameworks'), join(app, 'Contents/Frameworks'), {recursive: true, verbatimSymlinks: true});
   const executable = join(app, 'Contents/MacOS/NeuraOS');
@@ -95,10 +97,12 @@ try {
   const diagnostic = JSON.parse(await readFile(report, 'utf8'));
   if (diagnostic.schemaVersion !== 1 || !diagnostic.logs['app.jsonl']?.includes('report.saved')) throw new Error('Packaged diagnostic export failed');
   await rm(join(app, 'Contents/Resources/NeuraOS_NeuraOS.bundle'), {recursive: true});
+  await rm(join(app, 'Contents/Resources/Highlighter_Highlighter.bundle'), {recursive: true});
   let missingStatus, missingMessage;
   try {execFileSync(executable, ['--check-bundled-resources'], {timeout: 15000, stdio: 'pipe'});}
   catch (error) {missingStatus = error.status; missingMessage = error.stderr?.toString();}
-  if (missingStatus !== 1 || !missingMessage?.includes('Missing GitHub Markdown resources'))
+  // A status of 1 with both messages proves neither lookup aborted the process.
+  if (missingStatus !== 1 || !missingMessage?.includes('Missing GitHub Markdown resources') || !missingMessage?.includes('Missing syntax highlighting resources'))
     throw new Error(`Missing resources must fail cleanly, got status ${missingStatus}`);
   completed = true;
 } finally {

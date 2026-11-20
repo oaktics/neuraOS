@@ -9,7 +9,8 @@ let package = Package(
                .executable(name: "NeuraSleepService", targets: ["NeuraSleepService"]),
                .executable(name: "NeuraUpdater", targets: ["NeuraUpdater"])],
     dependencies: [
-        .package(url: "https://github.com/smittytone/HighlighterSwift.git", exact: "3.1.0"),
+        // HighlighterSwift 3.1.0 with a resource lookup that works in a packaged app; see Vendor/HighlighterSwift/VENDORED.md.
+        .package(path: "Vendor/HighlighterSwift"),
         // SwiftTerm v1.20.0 with local renderer fixes; see Vendor/SwiftTerm/VENDORED.md.
         .package(path: "Vendor/SwiftTerm"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", exact: "2.4.1"),

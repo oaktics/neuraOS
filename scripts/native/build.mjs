@@ -37,10 +37,10 @@ for(const file of await readdir(resourceRoot))if(file.endsWith('.bundle'))await 
 await mkdir(join(output,'Contents/Resources/Licenses'),{recursive:true});
 // SwiftPM's checkout files can be read-only; replace the previous copied license.
 for(const [name,source] of [
-  // SwiftTerm is vendored in the repository, not a SwiftPM checkout.
+  // SwiftTerm and HighlighterSwift are vendored in the repository, not SwiftPM checkouts.
   ['SwiftTerm',join(native,'Vendor/SwiftTerm/LICENSE')],
   ['MarkdownUI','swift-markdown-ui/LICENSE'],
-  ['HighlighterSwift','HighlighterSwift/LICENCE.md'],
+  ['HighlighterSwift',join(native,'Vendor/HighlighterSwift/LICENCE.md')],
   ['NetworkImage','NetworkImage/LICENSE'],
   ['cmark-gfm','swift-cmark/COPYING'],
   ['MarkdownEngine','swift-markdown-engine/LICENSE'],
