@@ -102,8 +102,13 @@ struct FilePane: View {
         // to an earlier state leaves the document dirty again without any further edit.
         .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
-        // Closing the tab removes this view, and with it the pending autosave: write what is left now.
-        .onDisappear {if autosaves, document?.dirty == true {save()}}
+        // Closing the tab removes this view, and with it the pending autosave and this view's own
+        // bookkeeping of a save in flight: hand what is left to a write that outlives the view.
+        .onDisappear {
+            guard autosaves, document?.dirty == true else {return}
+            let documents = $documents, path = path, workspaceId = workspace.id, model = model
+            Task {await FilePane.writeAfterClose(path, workspaceId: workspaceId, documents: documents, model: model)}
+        }
         .onChange(of: colorScheme) {NotificationCenter.default.post(name: MarkdownCodeHighlighter.appearanceChanged, object: nil)}
     }
 
@@ -261,6 +266,23 @@ struct FilePane: View {
         while saving, !Task.isCancelled {try? await Task.sleep(for: .milliseconds(150))}
         guard !Task.isCancelled, autosaves, document?.dirty == true else {return}
         save()
+    }
+
+    /// Writes the latest text of a closed rich document. A save that was already in flight carries
+    /// an older text and moves the saved baseline under this one, so a refused write is tried again
+    /// against the new baseline.
+    static func writeAfterClose(_ path: String, workspaceId: String, documents: Binding<[String: OpenDocument]>, model: AppModel) async {
+        for _ in 0..<4 {
+            guard let document = documents.wrappedValue[path], document.dirty, !model.isWorkspaceBlocked(workspaceId) else {return}
+            do {
+                let content: FileContent = try await model.api.command(["type": "file.save", "workspaceId": workspaceId,
+                    "path": path, "content": document.text, "expectedHash": document.original.hash])
+                documents.wrappedValue[path]?.original = content
+            } catch {
+                // Still dirty after the last attempt: the text stays in the draft cache, as an unsaved edit always has.
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+        }
     }
 
     private func switchMode(_ mode: MarkdownMode) {
