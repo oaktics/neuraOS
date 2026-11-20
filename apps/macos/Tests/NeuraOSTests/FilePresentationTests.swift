@@ -39,6 +39,42 @@ final class FilePresentationTests: XCTestCase {
         XCTAssertEqual(documents["note.txt"]?.dirty, true)
     }
 
+    /// Saves asked for while one is in flight must not overtake it: the last text asked for is the one left on disk.
+    @MainActor func testSavesAreWrittenInOrderWithTheLatestText() async {
+        var documents = ["note.md": OpenDocument(original: FileContent(path: "note.md", content: "v0", hash: "h0"), text: "v1")]
+        let binding = Binding(get: {documents}, set: {documents = $0})
+        let queue = FileSaveQueue()
+        var written: [(text: String, expected: String)] = []
+        let write: @MainActor (OpenDocument) async throws -> FileContent = {document in
+            // The first write is slow, as a save in flight is when the tab closes.
+            if written.isEmpty {try? await Task.sleep(for: .milliseconds(150))}
+            written.append((document.text, document.original.hash))
+            return FileContent(path: "note.md", content: document.text, hash: "hash-of-" + document.text)
+        }
+        queue.enqueue("note.md", documents: binding, allowed: {true}, write: write)
+        await Task.yield()
+        documents["note.md"]?.text = "v2"
+        queue.enqueue("note.md", documents: binding, allowed: {true}, write: write)
+        queue.enqueue("note.md", documents: binding, allowed: {true}, write: write)
+        XCTAssertTrue(queue.saving)
+        await queue.settle()
+        XCTAssertEqual(written.map(\.text), ["v1", "v2"], "The third request found nothing left to write")
+        XCTAssertEqual(written.map(\.expected), ["h0", "hash-of-v1"], "Each write is checked against the baseline the one before it left")
+        XCTAssertEqual(documents["note.md"]?.dirty, false)
+        XCTAssertEqual(documents["note.md"]?.original.content, "v2")
+        XCTAssertFalse(queue.saving)
+
+        struct Refused: LocalizedError {var errorDescription: String? {"changed on disk"}}
+        documents["note.md"]?.text = "v3"
+        queue.enqueue("note.md", documents: binding, allowed: {true}) {_ in throw Refused()}
+        await queue.settle()
+        XCTAssertEqual(queue.error, "changed on disk")
+        XCTAssertEqual(documents["note.md"]?.dirty, true, "A refused write keeps the edit")
+        queue.enqueue("note.md", documents: binding, allowed: {false}, write: write)
+        await queue.settle()
+        XCTAssertEqual(written.count, 2, "A blocked workspace is not written to")
+    }
+
     func testPresentationTypes() {
         XCTAssertTrue(FilePresentation.isMarkdown("README.MD"))
         for path in ["photo.png", "scan.pdf", "movie.mp4", "audio.mp3", "document.docx", "sheet.xlsx"] {
