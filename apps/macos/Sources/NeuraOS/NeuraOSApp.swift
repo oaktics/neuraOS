@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Darwin
 import ChromiumBridge
+import Highlighter
 
 @main enum NeuraOSMain {
     static func main() {
@@ -47,7 +48,12 @@ struct NeuraOSApp: App {
             if !available {
                 FileHandle.standardError.write(Data("Missing GitHub Markdown resources\n".utf8))
             }
-            exit(available ? 0 : 1)
+            // Creating a highlighter aborted installed builds when its bundle was looked up through SwiftPM.
+            let highlights = Highlighter()?.highlight("let x = 1", as: "swift") != nil
+            if !highlights {
+                FileHandle.standardError.write(Data("Missing syntax highlighting resources\n".utf8))
+            }
+            exit(available && highlights ? 0 : 1)
         }
     }
     var body: some Scene {
