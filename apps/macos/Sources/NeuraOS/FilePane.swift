@@ -135,6 +135,11 @@ struct FilePane: View {
         // to an earlier state leaves the document dirty again without any further edit.
         .task(id: autosaves ? document : nil) {await autosave()}
         .onChange(of: visible) {if !visible, autosaves, document?.dirty == true {save()}}
+        // The display mode is shared by every Markdown tab: whichever tab changes it, each rich
+        // document that is leaving autosave writes what its own pending autosave would have.
+        .onChange(of: storedMarkdownMode) {old, _ in
+            if isMarkdown, MarkdownMode.stored(old) == .rich, document?.dirty == true || saver.saving {save()}
+        }
         // Closing the tab removes this view and its pending autosave; the save queue lives on to write what is left.
         // A save still in flight will move the baseline, so even a document that looks clean now gets a last
         // request: the queue decides whether anything is left once the earlier writes have landed.
@@ -297,7 +302,6 @@ struct FilePane: View {
     }
 
     private func switchMode(_ mode: MarkdownMode) {
-        if autosaves, document?.dirty == true {save()}
         closeFind()
         storedMarkdownMode = mode.rawValue
     }
