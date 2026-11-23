@@ -97,6 +97,27 @@ final class FixedTabTests: XCTestCase {
         XCTAssertNil(model.fixedId)
     }
 
+    @MainActor func testAProjectTabOpensOverAWorktreeOfItsProject() {
+        let model = AppModel(startPolling: false)
+        var snapshot = Snapshot()
+        snapshot.workspaces = [Workspace(id: "a-root", projectId: "a", name: "メイン", path: "/a", branch: "main", kind: "root"),
+                               Workspace(id: "b-tree", projectId: "b", name: "fix", path: "/b/fix", branch: "fix", kind: "worktree"),
+                               Workspace(id: "b-root", projectId: "b", name: "メイン", path: "/b", branch: "main", kind: "root")]
+        model.applySnapshot(snapshot)
+        model.select("a-root")
+        let tab = FixedTabs.shared.add(FixedTab(kind: "browser", title: "test-\(UUID().uuidString)", url: "https://example.com/", projectId: "b"))
+        defer {FixedTabs.shared.remove(tab.id)}
+        // Links the page opens land in its own project: the project's folder comes underneath.
+        model.openFixed(tab.id)
+        XCTAssertEqual(model.selectedId, "b-root")
+        XCTAssertEqual(model.fixedId, tab.id)
+        // A worktree of the same project that is already selected stays.
+        model.select("b-tree")
+        model.openFixed(tab.id)
+        XCTAssertEqual(model.selectedId, "b-tree")
+        XCTAssertEqual(model.fixedId, tab.id)
+    }
+
     @MainActor func testAFixedTabAloneEnablesTabAndBrowserCommands() {
         let model = AppModel(startPolling: false)
         model.selectedId = nil

@@ -251,7 +251,12 @@ struct FixedTabMenu: View {
     }
 
     private func place(_ current: Bool, _ change: @escaping (inout FixedTab) -> Void) -> Binding<Bool> {
-        Binding(get: {current}, set: {on in if on {store.update(tab.id, change)}})
+        Binding(get: {current}, set: {on in
+            guard on else {return}
+            store.update(tab.id, change)
+            // A tab on screen that moved to another project brings that project's worktree underneath.
+            if model.fixedId == tab.id {model.openFixed(tab.id)}
+        })
     }
 
     /// Removing the row never stops a process: a running terminal returns to its worktree's tabs.
