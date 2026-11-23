@@ -493,6 +493,7 @@ fn validate_command(mut c: Value) -> Result<Value, ApiError> {
     }
     match action {
         "list" | "snapshot" | "screenshot" | "stop" => {}
+        "console" => allowed.extend(["level", "limit", "clear"]),
         "navigate" => allowed.push("url"),
         "click" => allowed.push("ref"),
         "fill" => allowed.extend(["ref", "text"]),
@@ -539,6 +540,26 @@ fn validate_command(mut c: Value) -> Result<Value, ApiError> {
                     return Err(invalid());
                 }
             }
+        }
+        "console" => {
+            if c.get("level").is_some()
+                && !["debug", "info", "warn", "error"].contains(&field(&c, "level"))
+            {
+                return Err(invalid());
+            }
+            let limit = match c.get("limit") {
+                None => 100,
+                Some(v) => v.as_u64().ok_or_else(invalid)?,
+            };
+            if !(1..=500).contains(&limit) {
+                return Err(invalid());
+            }
+            let clear = match c.get("clear") {
+                None => false,
+                Some(v) => v.as_bool().ok_or_else(invalid)?,
+            };
+            c["limit"] = json!(limit);
+            c["clear"] = json!(clear);
         }
         "fill" => bounded("text", 0, 10000)?,
         "key" => {
@@ -771,6 +792,57 @@ mod tests {
         let (task, _) = dispatch(&b, &s, &p, &c).await;
         b.shutdown();
         let _ = task.await;
+    }
+    #[test]
+    fn console_bounds_and_defaults() {
+        let base = json!({"action":"console","workspaceId":Uuid::new_v4().to_string(),"tabId":Uuid::new_v4().to_string()});
+        let c = validate_command(base.clone()).unwrap();
+        assert_eq!(c["limit"], 100);
+        assert_eq!(c["clear"], false);
+        for patch in [
+            json!({"limit":0}),
+            json!({"limit":501}),
+            json!({"limit":1.5}),
+            json!({"limit":"1"}),
+            json!({"clear":1}),
+            json!({"level":null}),
+            json!({"level":"trace"}),
+            json!({"method":"Runtime.evaluate"}),
+        ] {
+            let mut c = base.clone();
+            c.as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(validate_command(c).is_err());
+        }
+        for level in ["info", "warn", "error", "debug"] {
+            let mut c = base.clone();
+            c["level"] = json!(level);
+            c["limit"] = json!(500);
+            c["clear"] = json!(true);
+            assert!(validate_command(c).is_ok());
+        }
+    }
+    #[tokio::test]
+    async fn console_uses_tab_lock_and_permission_checks() {
+        let (b, s, mut p, mut c, _lease) = fixture();
+        c["command"]["action"] = json!("console");
+        let (task, request) = dispatch(&b, &s, &p, &c).await;
+        assert_eq!(request["command"]["limit"], 100);
+        assert_eq!(
+            b.call(c.clone(), &s, true).await.unwrap_err().error,
+            "browser_busy"
+        );
+        p["results"] = json!([{"id":request["id"],"result":{"entries":[],"untrusted":true}}]);
+        b.poll(p.clone(), &s).unwrap();
+        assert!(task.await.unwrap().is_ok());
+        p["results"] = json!([]);
+        p["tabs"][0]["enabled"] = json!(false);
+        b.poll(p, &s).unwrap();
+        assert_eq!(
+            b.call(c, &s, true).await.unwrap_err().error,
+            "browser_disabled"
+        );
     }
     #[test]
     fn rejects_unbounded_or_arbitrary_commands() {

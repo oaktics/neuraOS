@@ -197,6 +197,9 @@ struct BrowserAutomationError: Error {let code: String}
         func call(_ method: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {try check();let result = try await devTools(view, method, params);try check();return result}
         try check()
         let action = c["action"] as? String ?? ""
+        if action == "console" {
+            return view.consoleBuffer.readLevel(c["level"] as? String, limit: c["limit"] as? Int ?? 100, clear: c["clear"] as? Bool ?? false)
+        }
         if action == "screenshot" {
             // A hidden AppKit CEF view can return an all-white compositor surface.
             // Render the existing view for this capture, then restore visibility;
