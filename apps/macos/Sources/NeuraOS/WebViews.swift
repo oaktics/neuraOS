@@ -153,17 +153,16 @@ struct BrowserPane: View {
     let visible: Bool
     @Binding var title: String?
     @Binding var url: String?
-    let pin: BrowserPin?
     let split: Bool
-    /// A fixed sidebar tab: no split, and the pin saves the current page as the tab's destination.
+    /// A fixed sidebar tab: no split, and ⌘D saves the current page as the tab's destination.
     let fixed: Bool
     let actions: BrowserPaneActions
     @StateObject private var browser: BrowserModel
     @FocusState private var findFocused: Bool
     @State private var showingOnePasswordSetup = false
     init(storageId: String, workspaceId: String, projectId: String, visible: Bool, title: Binding<String?>, url: Binding<String?>,
-         pin: BrowserPin? = nil, split: Bool = false, fixed: Bool = false, eager: Bool = true, automation: Bool = true, view: NCChromiumView? = nil, actions: BrowserPaneActions) {
-        self.visible = visible; self._title = title; self._url = url; self.pin = pin; self.split = split; self.fixed = fixed; self.actions = actions
+         split: Bool = false, fixed: Bool = false, eager: Bool = true, automation: Bool = true, view: NCChromiumView? = nil, actions: BrowserPaneActions) {
+        self.visible = visible; self._title = title; self._url = url; self.split = split; self.fixed = fixed; self.actions = actions
         _browser = StateObject(wrappedValue: BrowserModel(storageId: storageId, workspaceId: workspaceId, projectId: projectId, view: view, eager: eager, automation: automation))
     }
     var body: some View {
@@ -230,7 +229,7 @@ struct BrowserPane: View {
             (target ?? menu).addItem(item)
         }
         add("URLをコピー") {browser.perform(.copyURL)}
-        add(fixed ? "このページを固定タブの行き先にする" : pin == nil ? "このプロジェクトにピン留め" : "ピン留めを解除") {actions.togglePin(browser.address, browser.title)}
+        add(fixed ? "このページを固定タブの行き先にする" : "このプロジェクトに固定") {actions.togglePin(browser.address, browser.title)}
         if !fixed {add(split ? "分割を解除" : "右に並べて表示") {actions.toggleSplit()}}
         menu.addItem(.separator())
         let downloads = NSMenuItem(title: "ダウンロード", action: nil, keyEquivalent: "")
@@ -293,8 +292,7 @@ struct BrowserPane: View {
             }
             Button {actions.editAddress(browser.address)} label: {
                 HStack(spacing: 6) {
-                    if pin != nil {Image(systemName: "pin.fill").font(.system(size: 9)).foregroundStyle(Color.accentColor)}
-                    else if browser.address.hasPrefix("https://") {Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.tertiary)}
+                    if browser.address.hasPrefix("https://") {Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.tertiary)}
                     Text(browser.notice ?? BrowserInput.displayHost(browser.address))
                         .lineLimit(1).truncationMode(.middle)
                         .foregroundStyle(browser.notice == nil ? Color.primary : Color.accentColor)
@@ -315,9 +313,8 @@ struct BrowserPane: View {
             if !compact {
                 Button {browser.perform(.copyURL)} label: {Image(systemName: "link").frame(width: 24, height: 24)}.help("URLをコピー（⇧⌘C）")
                 Button {actions.togglePin(browser.address, browser.title)} label: {
-                    Image(systemName: pin == nil ? "pin" : "pin.fill").frame(width: 24, height: 24)
-                        .foregroundStyle(pin == nil ? Color.primary : Color.accentColor)
-                }.help(fixed ? "このページを固定タブの行き先にする（⌘D）" : pin == nil ? "このプロジェクトにピン留め（⌘D）" : "ピン留めを解除（⌘D）")
+                    Image(systemName: "pin").frame(width: 24, height: 24)
+                }.help(fixed ? "このページを固定タブの行き先にする（⌘D）" : "このプロジェクトに固定（⌘D）")
                 if !fixed {
                     Button {actions.toggleSplit()} label: {
                         Image(systemName: split ? "rectangle" : "rectangle.split.2x1").frame(width: 24, height: 24)
@@ -329,7 +326,7 @@ struct BrowserPane: View {
             Menu {
                 if compact {
                     Button("URLをコピー") {browser.perform(.copyURL)}
-                    Button(fixed ? "このページを固定タブの行き先にする" : pin == nil ? "このプロジェクトにピン留め" : "ピン留めを解除") {actions.togglePin(browser.address, browser.title)}
+                    Button(fixed ? "このページを固定タブの行き先にする" : "このプロジェクトに固定") {actions.togglePin(browser.address, browser.title)}
                     if !fixed {Button(split ? "分割を解除" : "右に並べて表示") {actions.toggleSplit()}}
                     Divider()
                 }

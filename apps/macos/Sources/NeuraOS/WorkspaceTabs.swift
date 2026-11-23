@@ -9,8 +9,6 @@ struct WorkspaceTab: Codable, Identifiable, Equatable {
     var filePath: String?
     // The tab this one was opened from; closing returns there.
     var openerId: String?
-    // Set while the tab shows one of the project's pinned pages.
-    var pinId: String?
     var browserURL: String?
     var title: String {
         if kind == "file", let filePath {return (filePath as NSString).lastPathComponent}
@@ -86,8 +84,8 @@ struct WorkspaceTabState: Codable {
     var activeId: String? {splitFocused == true ? split?.id ?? selectedId : selectedId}
     var active: WorkspaceTab? {tabs.first {$0.id == activeId}}
     var fraction: Double {min(0.8, max(0.2, splitFraction ?? 0.5))}
-    /// Tabs listed in the tab strip; a pinned page is shown by its pin instead.
-    var listed: [WorkspaceTab] {tabs.filter {$0.pinId == nil}}
+    /// Tabs listed in the tab strip.
+    var listed: [WorkspaceTab] {tabs}
 
     // A nil selection is the permanent home surface, not a missing tab.
     mutating func migrateAgentTabs() {
@@ -226,7 +224,7 @@ struct WorkspaceTabState: Codable {
     }
 
     private mutating func remember(_ tab: WorkspaceTab) {
-        guard tab.pinId == nil, let index = listed.firstIndex(where: {$0.id == tab.id}) else {return}
+        guard let index = listed.firstIndex(where: {$0.id == tab.id}) else {return}
         let target: String?
         switch tab.kind {
         case "browser": target = tab.browserURL.flatMap {["http", "https"].contains(URL(string: $0)?.scheme?.lowercased() ?? "") ? $0 : nil}

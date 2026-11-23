@@ -21,7 +21,11 @@ enum BrowserCommand: Equatable {
 }
 
 /// Which kind of fixed tab the creation sheet starts with.
-struct FixedTabKind: Identifiable, Equatable {let id: String}
+struct FixedTabKind: Identifiable, Equatable {
+    let id: String
+    /// Set when the sheet was opened from a project: the new tab starts as that project's.
+    var projectId: String?
+}
 
 enum WorkspaceAction: Equatable {
     case add(String), close, move(Int), select(Int), inspector(String)
@@ -30,7 +34,6 @@ enum WorkspaceAction: Equatable {
     /// Load a page in the active browser tab.
     case navigate(URL)
     case focusTab(String)
-    case openPin(String)
     case browser(BrowserCommand)
     case toggleSplit
     /// Step through recently used tabs; `finishRecent` commits when Control is released.
@@ -390,6 +393,7 @@ final class DaemonClient {
         snapshot.workspaces = DeletionSnapshotMerge.apply(next.workspaces, previousJob: {previousJobs[$0]}, accepted: &acceptedDeletions)
         acceptedDeletions = acceptedDeletions.filter {workspaceIDs.contains($0.key)}
         state.apply(snapshot)
+        FixedTabs.shared.adoptPins(projectIds: snapshot.projects.map(\.id))
         // Only an exact start operation ID proves acceptance. Retry revisions can
         // advance due to another caller, so those require same-operation replay.
         for workspace in next.workspaces {

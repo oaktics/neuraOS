@@ -38,6 +38,38 @@ final class FixedTabTests: XCTestCase {
         XCTAssertEqual(FixedTabs(defaults: defaults).tabs.map(\.id), [shell.id, agent.id])
     }
 
+    @MainActor func testProjectTabsAreListedUnderTheirProjectAndAdoptOldPins() throws {
+        let suite = "FixedTabTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {defaults.removePersistentDomain(forName: suite)}
+        let spaces = [SidebarSpace(id: "work", name: "仕事")]
+        // What the worktree tab strip used to save for a project's pinned pages.
+        let pins = #"[{"id":"a","url":"https://github.com/org/repo","title":"Repo"},{"id":"b","url":"http://localhost:3000/","title":""}]"#
+        defaults.set(Data(pins.utf8), forKey: "browserPins.app")
+        let store = FixedTabs(defaults: defaults)
+        let local = store.add(FixedTab(kind: "browser", title: "Linear", url: "https://linear.app/", spaceId: "work"))
+        store.adoptPins(projectIds: ["app", "other"])
+        XCTAssertEqual(store.tabs(inProject: "app").map(\.title), ["Repo", "localhost:3000"])
+        XCTAssertNil(defaults.data(forKey: "browserPins.app"))
+        // Adopting again, or fixing the same page again, adds nothing.
+        store.adoptPins(projectIds: ["app"])
+        let repo = store.fix(url: "https://github.com/org/repo", title: "Again", toProject: "app")
+        XCTAssertFalse(repo.added)
+        XCTAssertEqual(store.tabs(inProject: "app").count, 2)
+        XCTAssertTrue(store.fix(url: "https://github.com/org/repo", title: "", toProject: "other").added)
+        // A project's tabs are in neither the shared row nor a Space's list.
+        XCTAssertTrue(store.global.isEmpty)
+        XCTAssertEqual(store.tabs(in: "work", spaces: spaces).map(\.id), [local.id])
+        // Reordering stays within the project.
+        let port = try XCTUnwrap(store.tabs(inProject: "app").last)
+        store.move(port.id, before: repo.tab.id)
+        store.move(local.id, before: port.id)
+        let reloaded = FixedTabs(defaults: defaults)
+        XCTAssertEqual(reloaded.tabs(inProject: "app").map(\.id), [port.id, repo.tab.id])
+        reloaded.update(port.id) {$0.projectId = nil; $0.spaceId = "work"}
+        XCTAssertEqual(reloaded.tabs(in: "work", spaces: spaces).map(\.id), [local.id, port.id])
+    }
+
     @MainActor func testAFixedTabCoversTheWorktreeWithoutDeselectingIt() {
         let model = AppModel(startPolling: false)
         model.selectedId = "worktree"

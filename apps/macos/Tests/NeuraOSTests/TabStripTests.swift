@@ -38,20 +38,19 @@ final class TabStripTests: XCTestCase {
         XCTAssertEqual(drag.target(widths: widths, index: 2), 0)
     }
 
-    func testMovingAmongListedTabsSkipsPinnedPages() {
-        var layout = state(4)
-        layout.tabs[1].pinId = "pin"
-        XCTAssertEqual(layout.listed.map(\.id), ["t0", "t2", "t3"])
-        layout.move("t3", toListed: 0)
-        XCTAssertEqual(layout.listed.map(\.id), ["t3", "t0", "t2"])
-        layout.move("t3", toListed: 2)
-        XCTAssertEqual(layout.listed.map(\.id), ["t0", "t2", "t3"])
-        layout.move("t0", toListed: 9)
-        XCTAssertEqual(layout.listed.map(\.id), ["t2", "t3", "t0"])
+    func testMovingAmongListedTabs() {
+        var layout = state(3)
+        XCTAssertEqual(layout.listed.map(\.id), ["t0", "t1", "t2"])
         layout.move("t2", toListed: 0)
-        XCTAssertEqual(layout.listed.map(\.id), ["t2", "t3", "t0"])
-        XCTAssertEqual(layout.tabs.count, 4)
-        XCTAssertEqual(layout.listed(after: "t3").map(\.id), ["t0"])
+        XCTAssertEqual(layout.listed.map(\.id), ["t2", "t0", "t1"])
+        layout.move("t2", toListed: 2)
+        XCTAssertEqual(layout.listed.map(\.id), ["t0", "t1", "t2"])
+        layout.move("t0", toListed: 9)
+        XCTAssertEqual(layout.listed.map(\.id), ["t1", "t2", "t0"])
+        layout.move("t1", toListed: 0)
+        XCTAssertEqual(layout.listed.map(\.id), ["t1", "t2", "t0"])
+        XCTAssertEqual(layout.tabs.count, 3)
+        XCTAssertEqual(layout.listed(after: "t2").map(\.id), ["t0"])
         XCTAssertTrue(layout.listed(after: "t0").isEmpty)
     }
 
