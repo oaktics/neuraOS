@@ -13,6 +13,7 @@
 #include "include/cef_application_mac.h"
 #include "include/cef_api_hash.h"
 #include <dlfcn.h>
+#include <algorithm>
 #include <atomic>
 #include <map>
 #include <set>
@@ -97,6 +98,7 @@ template<class T> struct CallbackRef {T *value; explicit CallbackRef(T *v): valu
 
 @interface NCChromiumView () {
 @public
+    NCConsoleBuffer *_consoleBuffer;
     cef_browser_t *_browser;
     cef_registration_t *_devRegistration;
     NSMutableDictionary<NSNumber *, id> *_devCallbacks;
@@ -283,6 +285,23 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
     c->api.get_download_handler = [](cef_client_t *self) -> cef_download_handler_t * {return MakeDownloadHandler(View(self));};
     c->api.get_display_handler = [](cef_client_t *self) -> cef_display_handler_t * {
         auto h = new Handler<cef_display_handler_t>(View(self));
+        h->api.on_console_message = [](cef_display_handler_t *s, cef_browser_t *browser, cef_log_severity_t severity,
+                                       const cef_string_t *message, const cef_string_t *source, int line) -> int {
+            CallbackRef browserRef(browser);
+            NCChromiumView *v = View(s); if (!v || v->_closed) return 0;
+            NSString *level = severity == LOGSEVERITY_DEBUG ? @"debug" :
+                severity == LOGSEVERITY_WARNING ? @"warn" :
+                (severity == LOGSEVERITY_ERROR || severity == LOGSEVERITY_FATAL) ? @"error" : @"info";
+            // Copy only bounded prefixes, even when the renderer emits a huge string.
+            auto bounded = [](const cef_string_t *value, size_t limit) -> NSString * {
+                if (!value || !value->str) return @"";
+                size_t n = std::min(value->length, limit);
+                if (n < value->length && n && value->str[n-1] >= 0xD800 && value->str[n-1] <= 0xDBFF) --n;
+                return [[NSString alloc] initWithCharacters:(const unichar *)value->str length:n];
+            };
+            [v.consoleBuffer appendLevel:level text:bounded(message, 8192) sourceURL:bounded(source, 2048) line:line];
+            return 0; // Preserve Chromium's normal console handling.
+        };
         h->api.on_auto_resize = [](cef_display_handler_t *s, cef_browser_t *browser, const cef_size_t *size) -> int {
             CallbackRef browserRef(browser); NCChromiumView *v = View(s);
             if (!v.onPreferredSize) return 0;
@@ -474,6 +493,7 @@ static cef_client_t *MakeClient(NCChromiumView *view) {
 #include "BrowserChromeTabs.inc"
 
 @implementation NCChromiumView
+- (NCConsoleBuffer *)consoleBuffer {if (!_consoleBuffer) _consoleBuffer = [NCConsoleBuffer new]; return _consoleBuffer;}
 - (instancetype)initWithFrame:(NSRect)frame {if ((self = [super initWithFrame:frame])) {_url = @""; _title = @""; _pendingURL = @"about:blank"; self.wantsLayer = YES;} return self;}
 - (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab {if ((self = [self initWithFrame:frame])) _chromeTab = chromeTab; return self;}
 - (BOOL)chromeTab {return _chromeTab;}

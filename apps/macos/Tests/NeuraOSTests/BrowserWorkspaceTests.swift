@@ -157,51 +157,33 @@ final class BrowserWorkspaceTests: XCTestCase {
         XCTAssertEqual(onlyTab.step(1, in: state(["shell"])), "shell0")
     }
 
-    @MainActor func testHistoryRanksHostsAndTitlesAndSkipsSearchPages() {
-        let history = BrowserHistory(file: nil)
-        let start = Date(timeIntervalSince1970: 1_000_000)
-        history.record("https://docs.swift.org/concurrency", title: "Concurrency", at: start)
-        history.record("https://example.com/swift", title: "Notes", at: start.addingTimeInterval(60))
-        history.record("https://swift.org/", title: "Swift.org", at: start.addingTimeInterval(120))
-        history.record("https://www.google.com/search?q=swift", title: "swift - Google", at: start.addingTimeInterval(180))
-        history.record("file:///etc/passwd", title: "", at: start)
-        XCTAssertEqual(history.search("swift").map(\.url), ["https://swift.org/", "https://docs.swift.org/concurrency", "https://example.com/swift"])
-        XCTAssertEqual(history.search("").first?.url, "https://swift.org/")
-        // Repeated callbacks for one load count once.
-        history.record("https://swift.org/", title: "", at: start.addingTimeInterval(121))
-        XCTAssertEqual(history.visits["https://swift.org/"]?.count, 1)
-        XCTAssertEqual(history.visits["https://swift.org/"]?.title, "Swift.org")
-        history.record("https://swift.org/", title: "Swift", at: start.addingTimeInterval(600))
-        XCTAssertEqual(history.visits["https://swift.org/"]?.count, 2)
-    }
-
     func testCommandBarOffersTheTypedDestinationFirst() throws {
         let tabs = [CommandBarTab(workspaceId: "w", workspaceName: "app / main", tabId: "t1", title: "Pull requests", url: "https://github.com/org/repo/pulls"),
                     CommandBarTab(workspaceId: "other", workspaceName: "app / fix", tabId: "t2", title: "Preview", url: "http://localhost:3000/")]
         let fixed = [FixedTab(id: "p", kind: "browser", title: "Repo", url: "https://github.com/org/repo", projectId: "project")]
         let context = CommandBarContext(workspaceId: "w", conversationProvider: "claude", tabs: tabs, fixed: fixed)
         // Empty: Return opens a terminal, as ⌘T did before the command bar existed.
-        let empty = CommandBarResults.items(query: "", context: context, history: [])
+        let empty = CommandBarResults.items(query: "", context: context)
         XCTAssertEqual(empty.first?.action, .add("shell"))
         XCTAssertEqual(empty.dropFirst().first?.action, .add("claude"))
         XCTAssertTrue(empty.contains {$0.action == .openFixed("p")})
         XCTAssertTrue(empty.contains {$0.action == .focusTab(workspaceId: "w", tabId: "t1")})
         XCTAssertFalse(empty.contains {$0.action == .focusTab(workspaceId: "other", tabId: "t2")})
-        let typed = CommandBarResults.items(query: "localhost:3000", context: context, history: [])
+        let typed = CommandBarResults.items(query: "localhost:3000", context: context)
         XCTAssertEqual(typed.first?.action, .open(URL(string: "http://localhost:3000")!))
         // The tab already showing it, in another worktree, is one step away.
         XCTAssertEqual(typed.dropFirst().first?.action, .focusTab(workspaceId: "other", tabId: "t2"))
         XCTAssertEqual(typed.dropFirst().first?.detail, "app / fix · localhost:3000")
-        let search = CommandBarResults.items(query: "github", context: context, history: [BrowserVisit(url: "https://github.com/org/repo", title: "Repo", last: Date(), count: 3)])
+        let search = CommandBarResults.items(query: "github", context: context)
         XCTAssertEqual(search.first?.detail, "Googleで検索")
-        // The fixed page is listed once even though history has it too.
+        // The matching destination is listed once.
         XCTAssertEqual(search.filter {$0.address == "https://github.com/org/repo"}.count, 1)
-        XCTAssertEqual(CommandBarResults.items(query: "term", context: context, history: []).last?.action, .add("shell"))
+        XCTAssertEqual(CommandBarResults.items(query: "term", context: context).last?.action, .add("shell"))
         var editing = context; editing.editing = true; editing.currentURL = "https://github.com/org/repo/pulls"
-        XCTAssertEqual(CommandBarResults.items(query: editing.currentURL, context: editing, history: []).first?.hint, "再読み込み")
-        XCTAssertEqual(CommandBarResults.items(query: "docs.rs", context: editing, history: []).first?.action, .navigate(URL(string: "https://docs.rs")!))
-        XCTAssertFalse(CommandBarResults.items(query: "term", context: editing, history: []).contains {$0.action == .add("shell")})
-        XCTAssertTrue(CommandBarResults.items(query: "file:///etc/passwd", context: context, history: []).isEmpty)
+        XCTAssertEqual(CommandBarResults.items(query: editing.currentURL, context: editing).first?.hint, "再読み込み")
+        XCTAssertEqual(CommandBarResults.items(query: "docs.rs", context: editing).first?.action, .navigate(URL(string: "https://docs.rs")!))
+        XCTAssertFalse(CommandBarResults.items(query: "term", context: editing).contains {$0.action == .add("shell")})
+        XCTAssertTrue(CommandBarResults.items(query: "file:///etc/passwd", context: context).isEmpty)
     }
 
     @MainActor func testGlobalKeysCloseTabsAndWalkRecentOnes() {

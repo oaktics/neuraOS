@@ -50,7 +50,6 @@ import ChromiumBridge
         self.view.onState = { [weak self] url, title, back, forward, loading in
             DispatchQueue.main.async {
                 guard let self else {return}
-                let finished = self.isLoading && !loading
                 self.title = title
                 // CEF callbacks arrive on its UI thread (the AppKit main thread).
                 self.canGoBack = back; self.canGoForward = forward; self.isLoading = loading
@@ -60,7 +59,6 @@ import ChromiumBridge
                     UserDefaults.standard.set(url, forKey: "browser.\(self.storageId)")
                 }
                 if !loading, !url.isEmpty {self.settled = true}
-                if finished, !self.observedURL.isEmpty {BrowserHistory.shared.record(self.observedURL, title: title)}
             }
         }
         self.view.onError = { [weak self] message in DispatchQueue.main.async {self?.message = message} }
@@ -90,7 +88,7 @@ import ChromiumBridge
         if let legacy = defaults.string(forKey: legacyKey) {
             defaults.set(legacy, forKey: key); defaults.removeObject(forKey: legacyKey); return legacy
         }
-        return "https://www.google.com/"
+        return "about:blank"
     }
     nonisolated static func navigationURL(_ input: String) -> URL? {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -262,9 +260,6 @@ struct BrowserPane: View {
         extensionList.autoenablesItems = false
         add("拡張機能を追加・管理…", to: extensionList) {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
         add("Chrome ウェブストアを開く…", to: extensionList) {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
-        add("このページを拡張対応ウィンドウで開く", to: extensionList) {
-            if let url = BrowserModel.navigationURL(browser.address) {browser.message = NCOpenExtensionWindow(url.absoluteString)}
-        }
         if NCExtensionActions().contains(where: {$0.identifier == OnePasswordIntegration.extensionID}) {
             add("1Password のデスクトップ連携を設定…", to: extensionList) {showingOnePasswordSetup = true}
         }
@@ -281,15 +276,6 @@ struct BrowserPane: View {
     private func toolbar(compact: Bool) -> some View {
         HStack(spacing: compact ? 2 : 6) {
             if !browser.view.chromeTab {
-            Group {
-                Button {browser.perform(.back)} label: {Image(systemName: "chevron.left").frame(width: 24, height: 24)}
-                    .help("戻る（⌘[）").disabled(!browser.canGoBack)
-                Button {browser.perform(.forward)} label: {Image(systemName: "chevron.right").frame(width: 24, height: 24)}
-                    .help("進む（⌘]）").disabled(!browser.canGoForward)
-                Button {browser.perform(browser.isLoading ? .stop : .reload)} label: {
-                    Image(systemName: browser.isLoading ? "xmark" : "arrow.clockwise").frame(width: 24, height: 24)
-                }.help(browser.isLoading ? "読み込みを停止（⌘.）" : "再読み込み（⌘R）")
-            }
             Button {actions.editAddress(browser.address)} label: {
                 HStack(spacing: 6) {
                     if browser.address.hasPrefix("https://") {Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.tertiary)}
@@ -322,7 +308,6 @@ struct BrowserPane: View {
                 }
                 BrowserDownloadsButton()
             }
-            if !browser.view.chromeTab {BrowserExtensionToolbar(browser: browser).fixedSize()}
             Menu {
                 if compact {
                     Button("URLをコピー") {browser.perform(.copyURL)}
@@ -343,9 +328,6 @@ struct BrowserPane: View {
                 }
                 Button("拡張機能を追加・管理…") {browser.message = NCOpenExtensionWindow("chrome://extensions/")}
                 Button("Chrome ウェブストアを開く…") {browser.message = NCOpenExtensionWindow("https://chromewebstore.google.com/")}
-                Button("このページを拡張対応ウィンドウで開く") {
-                    if let url = BrowserModel.navigationURL(browser.address) {browser.message = NCOpenExtensionWindow(url.absoluteString)}
-                }
                 if browser.automationAvailable {
                     Divider()
                     Toggle("エージェント（MCP）からの操作を許可", isOn: Binding(

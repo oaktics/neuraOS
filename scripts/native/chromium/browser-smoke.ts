@@ -53,7 +53,7 @@ const fixture=createServer((req,res)=>{
  res.setHeader('Content-Type','text/html; charset=utf-8');
  if(req.url==='/second'){res.end(req.headers.cookie?.includes('fixtureSession=same-tab')?'<h1>Navigation verified</h1><a href="/">Return</a>':'Missing existing session');return;}
  if(req.url==='/popup'){res.end('<h1>Popup verified</h1><button onclick="window.close()">Close popup</button>');return;}
- res.end(`<!doctype html><html><head><title>Browser fixture</title></head><body style="font:20px system-ui;padding:30px"><h1>neuraOS MCP fixture</h1><label>Name <input id="name" aria-label="Name"></label><button id="submit" onclick="document.querySelector('#result').textContent='Hello '+document.querySelector('#name').value;fetch('/result?value='+encodeURIComponent(document.querySelector('#name').value))">Submit</button><p id="result">Ready</p><button onclick="window.open('/popup')">Popup</button><a href="/second">Navigate</a><input type="password" value="fixture-secret" aria-label="Secret"><div style="height:1500px">Scroll fixture</div><script>document.cookie='fixtureSession=same-tab; Path=/';</script></body></html>`);
+ res.end(`<!doctype html><html><head><title>Browser fixture</title></head><body style="font:20px system-ui;padding:30px"><h1>neuraOS MCP fixture</h1><label>Name <input id="name" aria-label="Name"></label><button id="submit" onclick="document.querySelector('#result').textContent='Hello '+document.querySelector('#name').value;fetch('/result?value='+encodeURIComponent(document.querySelector('#name').value))">Submit</button><p id="result">Ready</p><button onclick="window.open('/popup')">Popup</button><a href="/second">Navigate</a><input type="password" value="fixture-secret" aria-label="Secret"><div style="height:1500px">Scroll fixture</div><script>console.log('console-fixture-log');console.info('console-fixture-info');console.warn('console-fixture-warn');console.error('console-fixture-error');console.debug('console-fixture-debug');setTimeout(()=>{throw new Error('console-fixture-uncaught')},0);document.cookie='fixtureSession=same-tab; Path=/';</script></body></html>`);
 });
 let cleanupDaemon:Awaited<ReturnType<typeof createDaemon>>|undefined,cleanupApp:ChildProcess|undefined,cleanupMCP:ChildProcess|undefined,cleanupClaude:ChildProcess|undefined,cleanupNative:ChildProcess|undefined;
 let appLog='';const evidence:any={startedAt:new Date().toISOString(),checks:[]};
@@ -133,6 +133,17 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  evidence.phase='browser-operations';
  assert.equal((await call('list')).tabs.length,2);evidence.checks.push('same-project list; foreign project excluded');
  await call('wait',{text:'neuraOS MCP fixture',timeoutMs:10000});
+ const history=(await call('console')).result;
+ for(const [text,level] of [['log','info'],['info','info'],['warn','warn'],['error','error'],['debug','debug'],['uncaught','error']]) {
+  const entry=history.entries.find((e:any)=>e.text.includes('console-fixture-'+text));
+  assert.ok(entry,`missing console ${text}`);assert.equal(entry.level,level);assert.ok(entry.timestamp>0);assert.ok(entry.url.includes('127.0.0.1'));assert.ok(entry.line>0);
+ }
+ assert.equal(history.untrusted,true);
+ const consumed=(await call('console',{level:'error',limit:1,clear:true})).result;
+ assert.equal(consumed.entries.length,1);assert.equal(consumed.hasMore,true);
+ assert.ok(!(await call('console')).result.entries.some((e:any)=>e.text===consumed.entries[0].text));
+ assert.ok((await call('console',{},1)).result.entries.some((e:any)=>e.text===consumed.entries[0].text),'other tab history must remain isolated');
+ evidence.checks.push('console captures pre-request log/info/warn/error/debug and uncaught exception; filtered clear and tab isolation');
  let s=await snap();assert.ok(!JSON.stringify(s).includes('fixture-secret'));evidence.checks.push('CEF DOM snapshot; password excluded');
  const screenshot=(await call('screenshot')).result.data;assert.ok(screenshot.length>100);await writeFile(data+'/before.png',assertPNG(screenshot));evidence.checks.push('CEF PNG screenshot');
  const stale=ref(s,'Submit');await call('fill',{ref:ref(s,'Name'),text:'CEF Bridge'});
@@ -152,6 +163,7 @@ const ref=(s:any,name:string)=>{const element=s.elements.find((e:any)=>e.name===
  for(let i=0;i<50&&(await call('list')).tabs.length!==2;i++)await new Promise(r=>setTimeout(r,100));
  await assert.rejects(call('snapshot',{workspaceId:popup.workspaceId,tabId:popup.tabId}),/browser_tab_closed/);evidence.checks.push('closed popup removed from native registry');
  await call('navigate',{url:url+'second'});await call('wait',{text:'Navigation verified'});await assert.rejects(call('click',{ref:stale}),/browser_stale_ref/);evidence.checks.push('navigation retains CEF session cookie; stale document refs rejected');
+ assert.ok((await call('console')).result.entries.some((e:any)=>e.text.includes('console-fixture-warn')),'navigation preserves history');
  await call('navigate',{url});await call('wait',{text:'neuraOS MCP fixture'});
  if(process.env.NEURA_BROWSER_REAL_CLI==='1'){
    assert(d,'Real CLI mode requires the legacy in-process daemon');

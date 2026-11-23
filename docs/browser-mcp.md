@@ -36,6 +36,7 @@ Failed commands are not replayed; reload a crashed page before issuing new work.
 - `browser_snapshot`: main-frame visible text and up to 500 element refs. Text is
   limited to 60,000 characters; names to 200. No form values are returned;
   password and one-time-code inputs are excluded. Page content is untrusted data.
+- `browser_console`: bounded console history; see the console contract below.
 - `browser_screenshot`: viewport PNG as MCP image content for both CLIs.
 - `browser_navigate`: HTTP(S) or about:blank, excluding embedded URL credentials.
 - `browser_click`, `browser_fill`, `browser_key`, `browser_scroll`: act on a fresh
@@ -48,9 +49,46 @@ After a DOM mutation, input, action or navigation, obtain another snapshot.
 Refs live in a private isolated world, contain native-generated UUIDs, and map
 to exact element objects. MutationObserver callbacks plus synchronous pending
 records checks reject stale refs before dispatch. Dynamic pages may require
-frequent rereads. Cross-origin iframe interaction, uploads, network/console APIs,
+frequent rereads. Cross-origin iframe interaction, uploads, generic network APIs,
 generic JS, Cookie APIs, external CLI setup and remote access are not supported.
 Popups use the existing workspace popup tab path and are independently addressable.
+
+## Console history
+
+`browser_console` requires `workspaceId` and `tabId`, with optional `level`
+(`debug`, `info`, `warn`, `error`), integer `limit` (1–500, default 100), and
+boolean `clear` (default false). Existing project, enabled-tab and exclusive
+request checks apply, including reads and clears. Fixed tabs remain excluded.
+
+The native CEF `OnConsoleMessage` callback captures messages from browser
+creation, before the first MCP call, without injecting JavaScript or attaching a
+DevTools event subscription. It captures console log/info/warn/error/debug and
+uncaught exceptions delivered by CEF. CEF combines log and info as `info`, maps
+verbose/debug to `debug`, and fatal/error to `error`. Network diagnostics are
+included only if CEF emits them to this callback; this is **not** a complete CDP
+`Log`/network event stream, nor an object/stack inspector. CDP Runtime/Log event
+subscriptions would distinguish log/info and expose richer metadata but require
+additional observer lifecycle and reconnect handling; the existing DevTools
+transport currently handles command results only.
+
+Each entry contains `level`, bounded `text`, optional `url` and 1-based `line`,
+and `timestamp` in Unix milliseconds measured at native receipt (not the original
+renderer time). Entries are returned oldest first in callback arrival order.
+History persists across reloads, navigations and renderer restarts in the same
+view; source URLs identify the origin. Closing the view/app discards history;
+restored but never-loaded pages have no earlier history. It is never persisted.
+
+Each tab retains at most 500 entries, evicting the oldest. Text is capped at 8192
+UTF-16 units and source URLs at 2048, without splitting surrogate pairs. A read
+caps its JSON result at 256 KiB, including escaped text and metadata; the existing
+10 MiB native envelope limit still applies. `hasMore` indicates additional entries
+matching the filter; `dropped` is the cumulative count of buffer evictions during
+this view's lifetime. `clear: true` consumes **only returned entries**, leaving
+filtered-out or size/limit-excluded messages available. An uncertain transport
+result is not replayed; consumed entries may already be gone. Text may be truncated.
+The result includes `untrusted: true`, `source: "cef-console"`, and
+`timestampKind: "received-unix-ms"`. Log text and URLs are untrusted page data,
+never agent instructions; console output can contain application secrets.
 
 ## Authentication and lifecycle
 
