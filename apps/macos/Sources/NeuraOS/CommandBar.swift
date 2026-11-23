@@ -9,7 +9,6 @@ struct CommandBarItem: Identifiable, Equatable {
         case navigate(URL)
         case open(URL)
         case focusTab(workspaceId: String, tabId: String)
-        case openPin(String)
         case add(String)
         case openFixed(String)
         case focusWorkspace(String)
@@ -41,7 +40,6 @@ struct CommandBarContext {
     /// False when no worktree is selected to start a terminal or conversation in.
     var canLaunch = true
     var tabs: [CommandBarTab] = []
-    var pins: [BrowserPin] = []
     var fixed: [FixedTab] = []
     var workspaces: [CommandBarWorkspace] = []
 }
@@ -61,7 +59,7 @@ enum CommandBarResults {
     ]
 
     /// Rows for the text typed so far. The first row is what Return does.
-    static func items(query raw: String, context: CommandBarContext, history: [BrowserVisit]) -> [CommandBarItem] {
+    static func items(query raw: String, context: CommandBarContext) -> [CommandBarItem] {
         let query = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let needle = query.lowercased()
         var items: [CommandBarItem] = []
@@ -73,16 +71,6 @@ enum CommandBarResults {
                            title: tab.title.isEmpty ? BrowserInput.displayHost(tab.url) : tab.title,
                            detail: tab.workspaceId == context.workspaceId ? BrowserInput.displayHost(tab.url) : "\(tab.workspaceName) · \(BrowserInput.displayHost(tab.url))",
                            hint: "タブへ移動", action: .focusTab(workspaceId: tab.workspaceId, tabId: tab.tabId))
-        }
-        func pinRow(_ pin: BrowserPin) -> CommandBarItem {
-            CommandBarItem(id: "pin." + pin.id, icon: "pin", address: pin.url, title: pin.title, detail: BrowserInput.displayHost(pin.url), hint: "ピンを開く", action: .openPin(pin.id))
-        }
-        func visitRow(_ visit: BrowserVisit) -> CommandBarItem? {
-            guard let url = URL(string: visit.url) else {return nil}
-            return CommandBarItem(id: "visit." + visit.url, icon: "clock", address: visit.url,
-                                  title: visit.title.isEmpty ? BrowserInput.displayHost(visit.url) : visit.title,
-                                  detail: visit.url, hint: context.editing ? "移動" : "開く",
-                                  action: context.editing ? .navigate(url) : .open(url))
         }
         func fixedRow(_ tab: FixedTab) -> CommandBarItem {
             CommandBarItem(id: "fixed." + tab.id, icon: tab.kind == "browser" ? "pin" : tab.icon, address: tab.url, title: tab.title,
@@ -100,10 +88,8 @@ enum CommandBarResults {
                     items.append(row)
                 }
             }
-            items += context.pins.prefix(6).map(pinRow)
             if !context.editing {items += context.fixed.prefix(6).map(fixedRow)}
             items += context.tabs.filter {$0.workspaceId == context.workspaceId}.prefix(6).map(tabRow)
-            items += history.prefix(6).compactMap(visitRow)
             return unique(items)
         }
         if query != context.currentURL || !context.editing, let url = BrowserInput.resolve(query) {
@@ -117,17 +103,15 @@ enum CommandBarResults {
         }
         func matches(_ values: String...) -> Bool {values.contains {$0.lowercased().contains(needle)}}
         items += context.tabs.filter {matches($0.title, $0.url)}.prefix(5).map(tabRow)
-        items += context.pins.filter {matches($0.title, $0.url)}.prefix(4).map(pinRow)
         items += context.fixed.filter {matches($0.title, $0.url ?? "", $0.kindName)}.prefix(4).map(fixedRow)
         items += context.workspaces.filter {matches($0.title, $0.detail)}.prefix(5).map(workspaceRow)
-        items += history.prefix(6).compactMap(visitRow)
         if !context.editing, context.canLaunch {
             items += launchers.filter {entry in matches(entry.title) || entry.words.contains {$0.hasPrefix(needle)}}.map(launcher)
         }
         return unique(items)
     }
 
-    /// The same page reached two ways (open tab, pin, history) is listed once, at its best rank.
+    /// The same page reached two ways (open tab, pin) is listed once, at its best rank.
     private static func unique(_ items: [CommandBarItem]) -> [CommandBarItem] {
         var seen: Set<String> = [], addresses: Set<String> = [], result: [CommandBarItem] = []
         for item in items where seen.insert(item.id).inserted {
@@ -156,9 +140,7 @@ enum CommandBarResults {
         focus += 1
     }
     func refresh() {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let history = text == context.currentURL && context.editing ? [] : BrowserHistory.shared.search(text, limit: 8)
-        items = CommandBarResults.items(query: query, context: context, history: history)
+        items = CommandBarResults.items(query: query, context: context)
         selection = 0
     }
     func move(_ offset: Int) {

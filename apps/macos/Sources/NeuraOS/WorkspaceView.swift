@@ -37,7 +37,6 @@ struct WorkspaceView: View {
     @State private var tabFrames: [String: CGRect] = [:]
     @State private var tabStripFrame = CGRect.zero
     @State private var gutterHover = false
-    @ObservedObject private var pins = BrowserPins.shared
     /// Files, Git and GitHub have nothing to add while only web pages are on screen.
     private var inspectorAutoHidden: Bool {
         guard model.autoHideInspector, primaryKind == "browser" else {return false}
@@ -51,7 +50,6 @@ struct WorkspaceView: View {
         if model.inspectorAutoHidden != inspectorAutoHidden {model.inspectorAutoHidden = inspectorAutoHidden}
     }
     private var primaryKind: String? {layout.tabs.first {$0.id == layout.selectedId}?.kind}
-    private var projectPins: [BrowserPin] {pins.list(workspace.projectId)}
     private static let splitGutter: CGFloat = 7
     private var deletionBlocked: Bool {model.isWorkspaceBlocked(workspace.id)}
     private var storageKey: String {"workspaceTabs.\(workspace.id)"}
@@ -74,11 +72,9 @@ struct WorkspaceView: View {
             // Control may be released while another app is in front.
             if cycle.active {cycle.finish(); layout.touch(layout.activeId)}
         }
-        .onChange(of: model.frontId) {_, _ in publishActiveKind(); publishInspector(); openExternalLinks()}
-        .onChange(of: ExternalLinks.shared.pending) {_, _ in openExternalLinks()}
+        .onChange(of: model.frontId) {_, _ in publishActiveKind(); publishInspector()}
         .onChange(of: inspectorAutoHidden) {_, _ in publishInspector()}
         .onChange(of: layout.selectedId) {_, _ in if model.frontId == workspace.id, model.inspectorPeek {model.inspectorPeek = false}}
-        .onChange(of: projectPins.map(\.id)) {_, _ in dropStalePins()}
         .onChange(of: layout.splitId) {_, _ in persist()}
         .onChange(of: layout.splitFraction) {_, _ in persist()}
     }
@@ -131,7 +127,7 @@ struct WorkspaceView: View {
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
             return openURL(url, opener: nil, wanted: model.splitAgentLinks ? .split : .tab, focusSplit: false) ? .handled : .discarded
         })
-        .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); publishInspector(); installClickMonitor(); openExternalLinks()}
+        .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); publishInspector(); installClickMonitor()}
         .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
@@ -154,7 +150,6 @@ struct WorkspaceView: View {
             case .open(let url, let placement): openURL(url, opener: nil, wanted: placement)
             case .navigate(let url): navigateActive(url)
             case .focusTab(let id): if layout.tabs.contains(where: {$0.id == id}) {layout.focus(id)}
-            case .openPin(let id): openPin(id)
             case .browser(let command): browserCommand(command)
             case .toggleSplit: toggleSplit()
             case .recent(let offset):
@@ -197,10 +192,6 @@ struct WorkspaceView: View {
             .background(layout.selectedId == nil ? Color.primary.opacity(0.055) : .clear)
             .accessibilityLabel("ホーム").help("ホームに戻る")
             Divider().frame(height: 18)
-            if !projectPins.isEmpty {
-                HStack(spacing: 2) {ForEach(projectPins) {pin in pinButton(pin)}}.padding(.horizontal, 6)
-                Divider().frame(height: 18)
-            }
             ScrollViewReader {proxy in
                 ScrollView(.horizontal) {
                     HStack(spacing: 0) {
@@ -245,15 +236,15 @@ struct WorkspaceView: View {
         .contextMenu {
             Button(layout.split?.id == item.id ? "分割を解除" : "右に並べて表示") {layout.toggleSplit(item.id)}
             if item.kind == "browser" {
-                Button("このプロジェクトにピン留め") {togglePin(item.id, address: item.browserURL ?? "", title: item.browserTitle ?? "")}
-                    .disabled(BrowserModel.navigationURL(item.browserURL ?? "")?.host == nil)
                 Button("再読み込み") {BrowserModel.live("\(workspace.id).\(item.id)")?.perform(.reload)}
                 Button("タブを複製") {
                     if let url = BrowserModel.navigationURL(item.browserURL ?? "") {openURL(url, opener: item.id, wanted: .tab)}
                 }.disabled(BrowserModel.navigationURL(item.browserURL ?? "")?.host == nil)
             }
             Divider()
-            Button("サイドバーに固定") {fixToSidebar(item)}
+            Button("このプロジェクトに固定") {fixToSidebar(item, project: true)}
+                .disabled(!(item.kind == "browser" ? BrowserModel.navigationURL(item.browserURL ?? "")?.host != nil : item.isTerminal && item.terminalId != nil))
+            Button("サイドバーに固定（このWorkspace）") {fixToSidebar(item)}
                 .disabled(!(item.kind == "browser" ? BrowserModel.navigationURL(item.browserURL ?? "")?.host != nil : item.isTerminal && item.terminalId != nil))
             Divider()
             Button("タブを閉じる") {close(item)}.disabled(model.isTerminalStarting(item.id))
@@ -290,48 +281,6 @@ struct WorkspaceView: View {
         tabDrag = drag
         if let target = drag?.target(widths: widths, index: index), target != index {
             withAnimation(.easeOut(duration: 0.15)) {layout.move(id, toListed: target)}
-        }
-    }
-    private func pinButton(_ pin: BrowserPin) -> some View {
-        let tab = layout.tabs.first {$0.pinId == pin.id}
-        let active = tab != nil && layout.activeId == tab?.id
-        let shown = tab != nil && (active || layout.selectedId == tab?.id || layout.split?.id == tab?.id)
-        return Button {
-            if NSEvent.modifierFlags.contains(.option), let tab {layout.toggleSplit(tab.id)} else {openPin(pin.id)}
-        } label: {
-            FaviconView(address: pin.url, size: 16)
-                .frame(width: 28, height: 26)
-                .background(shown ? Color.primary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 6))
-                .overlay(alignment: .bottom) {
-                    if tab != nil {Capsule().fill(active ? Color.accentColor : Color.secondary.opacity(0.6)).frame(width: 10, height: 2).offset(y: 3)}
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain).foregroundStyle(.secondary)
-        .help("\(pin.title)\n\(pin.url)").accessibilityLabel("ピン: \(pin.title)")
-        .contextMenu {
-            Button("開く") {openPin(pin.id)}
-            if let tab {
-                Button("保存したページに戻る") {
-                    if let url = URL(string: pin.url) {BrowserModel.live("\(workspace.id).\(tab.id)")?.navigate(url.absoluteString)}
-                    layout.focus(tab.id)
-                }
-                Button("現在のページをピンの行き先にする") {
-                    if let url = tab.browserURL, BrowserModel.navigationURL(url)?.host != nil {
-                        pins.update(pin.id, in: workspace.projectId, url: url, title: tab.browserTitle ?? "")
-                    }
-                }
-                Button(layout.split?.id == tab.id ? "分割を解除" : "右に並べて表示") {layout.toggleSplit(tab.id)}
-                Button("ページを閉じる（ピンは残す）") {close(tab)}
-            }
-            Divider()
-            Button("ピン留めを解除") {pins.remove(pin.id, from: workspace.projectId)}
-        }
-        .draggable("pin." + pin.id)
-        .dropDestination(for: String.self) {ids, _ in
-            guard let id = ids.first, id.hasPrefix("pin.") else {return false}
-            pins.move(String(id.dropFirst(4)), before: pin.id, in: workspace.projectId)
-            return true
         }
     }
     @ViewBuilder private var addTabButtons: some View {
@@ -395,7 +344,7 @@ struct WorkspaceView: View {
                         else if item.kind == "browser" {
                             BrowserPane(storageId: "\(workspace.id).\(item.id)", workspaceId: workspace.id, projectId: workspace.projectId, visible: visible,
                                         title: $layout.tabValue(item.id, \.browserTitle), url: $layout.tabValue(item.id, \.browserURL),
-                                        pin: item.pinId.flatMap {id in projectPins.first {$0.id == id}}, split: splitTab != nil,
+                                        split: splitTab != nil,
                                         eager: !restoredTabs.contains(item.id), view: popupViews[item.id], actions: browserActions(item))
                         }
                     }
@@ -449,7 +398,7 @@ struct WorkspaceView: View {
             },
             closed: {remove(item)},
             editAddress: {_ in layout.focus(item.id); showCommandBar(edit: true)},
-            togglePin: {address, title in togglePin(item.id, address: address, title: title)},
+            togglePin: {address, title in fixToProject(item.id, address: address, title: title)},
             toggleSplit: {if layout.split != nil {toggleSplit()} else {layout.toggleSplit(item.id)}}
         )
     }
@@ -537,11 +486,6 @@ struct WorkspaceView: View {
             return .split
         }
     }
-    /// Links handed over by other apps open as ordinary tabs in the worktree on screen.
-    private func openExternalLinks() {
-        guard restored, model.frontId == workspace.id, !deletionBlocked, closingTab == nil, !ExternalLinks.shared.pending.isEmpty else {return}
-        for url in ExternalLinks.shared.take() {openURL(url, opener: nil, wanted: .tab)}
-    }
     @discardableResult
     private func openURL(_ url: URL, opener: String?, wanted: BrowserPlacement, focusSplit: Bool = true) -> Bool {
         guard !deletionBlocked else {return false}
@@ -587,9 +531,10 @@ struct WorkspaceView: View {
         layout.reopenClosed(workspaceId: workspace.id)
     }
     /// Move a tab to the sidebar's fixed tabs. A terminal or agent keeps running; only its place changes.
-    private func fixToSidebar(_ item: WorkspaceTab) {
+    private func fixToSidebar(_ item: WorkspaceTab, project: Bool = false) {
         guard !deletionBlocked, !model.isTerminalStarting(item.id) else {return}
-        var fixed = FixedTab(kind: item.kind, title: item.displayTitle(terminal: model.terminal(id: item.terminalId)), spaceId: model.sidebarSpaces.active.id)
+        var fixed = FixedTab(kind: item.kind, title: item.displayTitle(terminal: model.terminal(id: item.terminalId)),
+                             spaceId: project ? nil : model.sidebarSpaces.active.id, projectId: project ? workspace.projectId : nil)
         if item.kind == "browser" {
             guard let url = BrowserModel.navigationURL(item.browserURL ?? ""), url.host != nil else {return}
             fixed.url = url.absoluteString
@@ -610,34 +555,11 @@ struct WorkspaceView: View {
         if layout.split != nil {layout.splitId = nil; layout.splitFocused = nil}
         else if let id = layout.activeId {layout.toggleSplit(id)}
     }
-    private func openPin(_ id: String) {
-        guard !deletionBlocked, let pin = pins.pin(id, in: workspace.projectId) else {return}
-        if let tab = layout.tabs.first(where: {$0.pinId == id}) {layout.focus(tab.id); return}
-        guard BrowserModel.navigationURL(pin.url) != nil else {return}
-        var tab = WorkspaceTab(kind: "browser", number: (layout.tabs.filter {$0.kind == "browser"}.map(\.number).max() ?? 0) + 1)
-        tab.pinId = id; tab.browserURL = pin.url; tab.browserTitle = pin.title
-        UserDefaults.standard.set(pin.url, forKey: "browser.\(workspace.id).\(tab.id)")
-        // Pinned pages sit before ordinary tabs, in pin order.
-        layout.tabs.insert(tab, at: layout.tabs.prefix {$0.pinId != nil}.count)
-        layout.focus(tab.id)
-    }
-    private func togglePin(_ tabId: String, address: String, title: String) {
-        guard let index = layout.tabs.firstIndex(where: {$0.id == tabId}) else {return}
-        if let pinId = layout.tabs[index].pinId {
-            pins.remove(pinId, from: workspace.projectId)
-            layout.tabs[index].pinId = nil
-            return
-        }
-        guard let url = BrowserModel.navigationURL(address), url.host != nil else {return}
-        let pin = pins.add(url: url.absoluteString, title: title, to: workspace.projectId)
-        if !layout.tabs.contains(where: {$0.pinId == pin.id}) {layout.tabs[index].pinId = pin.id}
-    }
-    /// A pin removed in any worktree releases its page here as an ordinary tab.
-    private func dropStalePins() {
-        let ids = Set(projectPins.map(\.id))
-        for index in layout.tabs.indices {
-            if let pinId = layout.tabs[index].pinId, !ids.contains(pinId) {layout.tabs[index].pinId = nil}
-        }
+    /// ⌘D: keep this page under the project in the sidebar. The tab itself stays where it is.
+    private func fixToProject(_ tabId: String, address: String, title: String) {
+        guard !deletionBlocked, let url = BrowserModel.navigationURL(address), url.host != nil else {return}
+        let added = FixedTabs.shared.fix(url: url.absoluteString, title: title, toProject: workspace.projectId).added
+        BrowserModel.live("\(workspace.id).\(tabId)")?.flash(added ? "このプロジェクトに固定しました" : "このページは固定済みです")
     }
     private func activeBrowser() -> BrowserModel? {
         guard let tab = layout.active, tab.kind == "browser" else {return nil}
@@ -650,14 +572,14 @@ struct WorkspaceView: View {
     }
     private func browserCommand(_ command: BrowserCommand) {
         guard !deletionBlocked, let tab = layout.active, tab.kind == "browser", let browser = activeBrowser() else {return}
-        if command == .togglePin {togglePin(tab.id, address: browser.address, title: browser.title)} else {browser.perform(command)}
+        if command == .togglePin {fixToProject(tab.id, address: browser.address, title: browser.title)} else {browser.perform(command)}
     }
     private func showCommandBar(edit: Bool) {
         guard !deletionBlocked, let window = NSApp.windows.first(where: {$0.identifier?.rawValue.hasPrefix("main") == true && $0.isVisible}) ?? NSApp.mainWindow else {return}
         let browser = activeBrowser()
         let context = CommandBarContext(editing: edit && browser != nil, currentURL: browser?.address ?? "", workspaceId: workspace.id,
                                         conversationProvider: model.conversationProvider(for: workspace),
-                                        tabs: model.browserTabs(), pins: projectPins,
+                                        tabs: model.browserTabs(),
                                         fixed: FixedTabs.shared.tabs, workspaces: model.commandBarWorkspaces().filter {$0.id != workspace.id})
         CommandBarPanel.shared.show(over: window, context: context) {action, split in
             guard !deletionBlocked else {return}
@@ -667,7 +589,6 @@ struct WorkspaceView: View {
             case .focusTab(let workspaceId, let tabId):
                 if workspaceId == workspace.id {layout.focus(tabId)}
                 else {model.requestedTab = (workspaceId, tabId); model.select(workspaceId)}
-            case .openPin(let id): openPin(id)
             case .add(let kind): add(kind)
             case .openFixed(let id): model.openFixed(id)
             case .focusWorkspace(let id): model.select(id)
@@ -759,7 +680,6 @@ struct WorkspaceView: View {
             }
         }
         layout.normalize()
-        dropStalePins()
         persist()
     }
     private func reconcileTerminals() {

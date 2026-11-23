@@ -10,6 +10,7 @@ const target={workspaceId:uuid,tabId:uuid};
 export const browserCommand=z.discriminatedUnion('action',[
   z.object({action:z.literal('list'),workspaceId:uuid.optional()}).strict(),
   ...(['snapshot','screenshot','stop'] as const).map(action=>z.object({action:z.literal(action),...target}).strict()),
+  z.object({action:z.literal('console'),...target,level:z.enum(['debug','info','warn','error']).optional(),limit:z.number().int().min(1).max(500).default(100),clear:z.boolean().default(false)}).strict(),
   z.object({action:z.literal('navigate'),...target,url:z.string().max(8192).refine(value=>{try{if(value==='about:blank')return true;const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&!u.username&&!u.password;}catch{return value==='about:blank';}})}).strict(),
   z.object({action:z.literal('click'),...target,ref:z.string().max(100)}).strict(),
   z.object({action:z.literal('fill'),...target,ref:z.string().max(100),text:z.string().max(10000)}).strict(),

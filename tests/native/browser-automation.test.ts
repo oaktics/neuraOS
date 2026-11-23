@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,readFile} from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import {createDaemon} from '../../apps/daemon/src/server.ts';
 import {issueBrowserCredential} from '../../apps/daemon/src/browser-credentials.ts';
@@ -114,4 +114,28 @@ test('ordinary 30-second budget expires without releasing dispatched native work
   await f.poll([{id:request.id,error:'browser_cancelled'}]);
   const next=f.call({action:'snapshot',...f.target()}).then(r=>r);const [r2]=await f.next();await f.poll([{id:r2.id,result:{}}]);assert.equal((await next).statusCode,200);
  }finally{await f.close();t.mock.timers.reset();}
+});
+
+test('console validates bounds and retains project, permission and exclusive routing',async()=>{
+ const f=await fixture();try{
+  const tool=browserTools.find(t=>t.name==='browser_console');assert.ok(tool);assert.match(tool.description,/untrusted/);
+  for(const options of [{limit:0},{limit:501},{limit:1.5},{limit:'1'},{clear:1},{level:'trace'},{level:null},{method:'Runtime.evaluate'}])
+   assert.equal((await f.call({action:'console',...f.target(),...options})).statusCode,400);
+  assert.equal((await f.call({action:'console',...f.target(2)})).statusCode,403);
+  const pending=f.call({action:'console',...f.target(),level:'error',limit:2,clear:true}).then(r=>r);
+  const [request]=await f.next();assert.equal(request.command.action,'console');assert.equal(request.command.clear,true);
+  assert.equal((await f.call({action:'console',...f.target()})).json().error,'browser_busy');
+  const result={entries:[{level:'error',text:'untrusted <script>',timestamp:1}],untrusted:true};
+  await f.poll([{id:request.id,result}]);assert.deepEqual((await pending).json().result,result);
+  f.tabs[0].enabled=false;await f.poll();assert.equal((await f.call({action:'console',...f.target()})).json().error,'browser_disabled');
+ }finally{await f.close();}
+});
+
+test('console MCP catalog matches native runtime and forwards only the scoped command',async()=>{
+ const native=JSON.parse(await readFile(new URL('../../crates/native-core/src/providers/tools.json',import.meta.url),'utf8'));
+ assert.deepEqual(native.find((t:any)=>t.name==='browser_console'),browserTools.find(t=>t.name==='browser_console'));
+ let payload:any;
+ const result=await callBrowser('browser_console',{workspaceId:'w',tabId:'t',level:'warn',limit:1,clear:true},async(_path:any,body:any)=>{payload=body;return {result:{entries:[],untrusted:true}};},'caller','credential');
+ assert.deepEqual(payload,{terminalId:'caller',command:{workspaceId:'w',tabId:'t',level:'warn',limit:1,clear:true,action:'console'}});
+ assert.ok(result.content[0].text);assert.equal(JSON.parse(result.content[0].text).result.untrusted,true);
 });

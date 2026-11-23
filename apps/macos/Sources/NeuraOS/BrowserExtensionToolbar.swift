@@ -2,17 +2,7 @@ import AppKit
 import SwiftUI
 import ChromiumBridge
 
-/// AppKit owns the anchor so the extension surface is a real NSPopover.
-struct BrowserExtensionToolbar: NSViewRepresentable {
-    let browser: BrowserModel
-    func makeNSView(context: Context) -> ExtensionToolbarView {ExtensionToolbarView(browser: browser)}
-    func updateNSView(_ view: ExtensionToolbarView, context: Context) {
-        if view.browser !== browser {view.popup.close(); view.browser = browser}
-        view.synchronizeSource()
-    }
-    static func dismantleNSView(_ view: ExtensionToolbarView, coordinator: ()) {view.stop()}
-}
-
+/// Legacy Alloy toolbar retained for ExtensionSmokeAccessory.
 final class ExtensionToolbarView: NSView, NSMenuDelegate {
     weak var browser: BrowserModel?
     private let fixtureSource: NCChromiumView

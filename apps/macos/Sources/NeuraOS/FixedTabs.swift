@@ -13,6 +13,9 @@ struct FixedTab: Codable, Identifiable, Equatable {
     var url: String?
     /// The sidebar Space that shows this tab; nil shows it in every Space.
     var spaceId: String?
+    /// Set for a tab that belongs to one project: it is listed under that project, whichever
+    /// worktree is open, and `spaceId` is ignored.
+    var projectId: String?
     /// Where a terminal or agent runs, chosen when the tab was fixed.
     var workspaceId: String?
     var terminalId: String?
@@ -34,12 +37,14 @@ struct FixedTab: Codable, Identifiable, Equatable {
     }
 
     /// Tabs shown in every Space, as the icon row at the top of the sidebar.
-    var global: [FixedTab] {tabs.filter {$0.spaceId == nil}}
+    var global: [FixedTab] {tabs.filter {$0.spaceId == nil && $0.projectId == nil}}
+    /// A project's own tabs, shown under its name in the sidebar.
+    func tabs(inProject projectId: String) -> [FixedTab] {tabs.filter {$0.projectId == projectId}}
     /// A Space's own tabs. A tab whose Space no longer exists falls back to the first Space.
     func tabs(in spaceId: String, spaces: [SidebarSpace]) -> [FixedTab] {
         let known = Set(spaces.map(\.id)), fallback = spaces.first?.id
         return tabs.filter {tab in
-            guard let owner = tab.spaceId else {return false}
+            guard tab.projectId == nil, let owner = tab.spaceId else {return false}
             return owner == spaceId || (!known.contains(owner) && spaceId == fallback)
         }
     }
@@ -77,7 +82,8 @@ struct FixedTab: Codable, Identifiable, Equatable {
     /// Reorder within the list the dragged tab already belongs to.
     func move(_ id: String, before targetId: String?) {
         guard id != targetId, let source = tabs.firstIndex(where: {$0.id == id}) else {return}
-        if let targetId, tabs.first(where: {$0.id == targetId})?.spaceId != tabs[source].spaceId {return}
+        if let targetId, let target = tabs.first(where: {$0.id == targetId}),
+           target.spaceId != tabs[source].spaceId || target.projectId != tabs[source].projectId {return}
         let tab = tabs.remove(at: source)
         let destination = targetId.flatMap {target in tabs.firstIndex(where: {$0.id == target})} ?? tabs.endIndex
         tabs.insert(tab, at: destination)
@@ -87,6 +93,32 @@ struct FixedTab: Codable, Identifiable, Equatable {
     func terminalBinding(_ id: String) -> Binding<String?> {
         Binding(get: { [weak self] in self?.tab(id)?.terminalId },
                 set: { [weak self] value in self?.update(id) {$0.terminalId = value} })
+    }
+
+    /// Fix a page to a project. The same address is fixed once per project.
+    @discardableResult
+    func fix(url: String, title: String, toProject projectId: String) -> (tab: FixedTab, added: Bool) {
+        if let existing = tabs.first(where: {$0.projectId == projectId && $0.kind == "browser" && $0.url == url}) {return (existing, false)}
+        return (add(FixedTab(kind: "browser", title: title, url: url, projectId: projectId)), true)
+    }
+
+    /// Pages pinned to a project by earlier versions (icons in the worktree tab strip) become
+    /// that project's fixed tabs. Each project's saved list is converted once, then removed.
+    func adoptPins(projectIds: [String]) {
+        struct Pin: Codable {var id: String; var url: String; var title: String}
+        var changed = false
+        for projectId in projectIds {
+            let key = "browserPins.\(projectId)"
+            guard let data = defaults.data(forKey: key) else {continue}
+            for pin in (try? JSONDecoder().decode([Pin].self, from: data)) ?? []
+            where !tabs.contains(where: {$0.projectId == projectId && $0.url == pin.url}) {
+                tabs.append(FixedTab(kind: "browser", title: pin.title.isEmpty ? BrowserInput.displayHost(pin.url) : pin.title,
+                                     url: pin.url, projectId: projectId))
+                changed = true
+            }
+            defaults.removeObject(forKey: key)
+        }
+        if changed {save()}
     }
 
     private func save() {
@@ -99,6 +131,8 @@ extension AppModel {
     func openFixed(_ id: String) {
         guard let tab = FixedTabs.shared.tab(id) else {return}
         Diagnostics.shared.record("action.open-fixed-tab")
+        // A project's tab sits over one of that project's worktrees, so links it opens land there.
+        if let projectId = tab.projectId, selected?.projectId != projectId, let host = hostWorkspace(for: projectId) {select(host.id)}
         if !openedFixedIds.contains(id), tab.kind == "browser", let url = tab.url {
             // A page that was put away starts again from its saved destination.
             UserDefaults.standard.set(url, forKey: "browser.fixed.\(id)")
@@ -276,14 +310,12 @@ struct FixedTabView: View {
                                         conversationProvider: selected.map {model.conversationProvider(for: $0)} ?? "codex",
                                         canLaunch: selected != nil,
                                         tabs: model.browserTabs(),
-                                        pins: selected.map {BrowserPins.shared.list($0.projectId)} ?? [],
                                         fixed: store.tabs, workspaces: model.commandBarWorkspaces())
         CommandBarPanel.shared.show(over: window, context: context) {action, _ in
             switch action {
             case .navigate(let url): handle(.navigate(url))
             case .open(let url): openInWorktree(url)
             case .focusTab(let workspaceId, let tabId): model.requestedTab = (workspaceId, tabId); model.select(workspaceId)
-            case .openPin(let id): if let workspaceId = model.selectedId {forward(.openPin(id), to: workspaceId)}
             case .add(let kind): if let workspaceId = model.selectedId {forward(.add(kind), to: workspaceId)}
             case .openFixed(let id): model.openFixed(id)
             case .focusWorkspace(let id): model.select(id)
@@ -297,14 +329,19 @@ struct NewFixedTabSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State var kind: String
+    var project: String?
     @State private var title = ""
     @State private var address = ""
     @State private var projectId = ""
-    @State private var everywhere = false
+    /// "space", "all" or "project".
+    @State var scope = "space"
 
     private var projects: [Project] {model.state.projects.filter {model.hostWorkspace(for: $0.id) != nil}}
     private var url: URL? {BrowserInput.address(address)}
-    private var valid: Bool {kind == "browser" ? url?.host != nil : model.hostWorkspace(for: projectId) != nil}
+    private var valid: Bool {
+        if kind != "browser" {return model.hostWorkspace(for: projectId) != nil}
+        return url?.host != nil && (scope != "project" || model.state.projects.contains {$0.id == projectId})
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -329,15 +366,22 @@ struct NewFixedTabSheet: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             TextField(kind == "browser" ? "名前（空欄ならサイト名）" : "名前（例：調べもの係）", text: $title).textFieldStyle(.roundedBorder)
-            Picker("表示する場所", selection: $everywhere) {
-                Text("このSpace（\(model.sidebarSpaces.active.name)）").tag(false)
-                Text("すべてのSpace（全体共通）").tag(true)
+            Picker("表示する場所", selection: $scope) {
+                Text("このWorkspace（\(model.sidebarSpaces.active.name)）").tag("space")
+                Text("すべてのWorkspace（全体共通）").tag("all")
+                Text("プロジェクトの下（そのプロジェクト専用）").tag("project")
             }.pickerStyle(.radioGroup)
+            if scope == "project", kind == "browser" {
+                Picker("プロジェクト", selection: $projectId) {
+                    ForEach(model.state.projects) {project in Text(project.name).tag(project.id)}
+                }
+            }
             HStack {
                 Button("キャンセル") {dismiss()}.keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("追加") {
-                    var tab = FixedTab(kind: kind, title: title, spaceId: everywhere ? nil : model.sidebarSpaces.active.id)
+                    var tab = FixedTab(kind: kind, title: title, spaceId: scope == "space" ? model.sidebarSpaces.active.id : nil,
+                                       projectId: scope == "project" ? projectId : nil)
                     if kind == "browser" {tab.url = url?.absoluteString} else {tab.workspaceId = model.hostWorkspace(for: projectId)?.id}
                     let added = FixedTabs.shared.add(tab)
                     dismiss()
@@ -347,6 +391,7 @@ struct NewFixedTabSheet: View {
         }
         .padding(24).frame(width: 440)
         .onAppear {
+            if let project {projectId = project; scope = "project"}
             if projectId.isEmpty {projectId = model.selected?.projectId ?? projects.first?.id ?? ""}
         }
     }

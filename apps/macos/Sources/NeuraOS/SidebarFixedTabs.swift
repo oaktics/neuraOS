@@ -78,9 +78,7 @@ struct FixedTabPanes: View {
 struct SidebarFixedTabs: View {
     @Environment(AppModel.self) private var model
     @ObservedObject private var store = FixedTabs.shared
-    @State private var renaming: FixedTab?
-    @State private var name = ""
-    @State private var stopping: FixedTab?
+    @ObservedObject private var prompts = FixedTabPrompts.shared
 
     var body: some View {
         let space = model.sidebarSpaces.active
@@ -124,19 +122,19 @@ struct SidebarFixedTabs: View {
                 .frame(height: Self.listHeight(count: local.count, unit: SidebarMetrics.rowHeight, spacing: SidebarMetrics.rowSpacing, visible: Self.visibleRows))
             }
         }
-        .alert("固定タブの名前", isPresented: Binding(get: {renaming != nil}, set: {if !$0 {renaming = nil}})) {
-            TextField("名前", text: $name)
-            Button("キャンセル", role: .cancel) {renaming = nil}
+        .alert("固定タブの名前", isPresented: Binding(get: {prompts.renaming != nil}, set: {if !$0 {prompts.renaming = nil}})) {
+            TextField("名前", text: $prompts.name)
+            Button("キャンセル", role: .cancel) {prompts.renaming = nil}
             Button("変更") {
-                let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let tab = renaming, !value.isEmpty {store.update(tab.id) {$0.title = value}}
-                renaming = nil
+                let value = prompts.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let tab = prompts.renaming, !value.isEmpty {store.update(tab.id) {$0.title = value}}
+                prompts.renaming = nil
             }
         }
-        .confirmationDialog("\(stopping?.title ?? "")のプロセスを停止しますか？", isPresented: Binding(get: {stopping != nil}, set: {if !$0 {stopping = nil}})) {
+        .confirmationDialog("\(prompts.stopping?.title ?? "")のプロセスを停止しますか？", isPresented: Binding(get: {prompts.stopping != nil}, set: {if !$0 {prompts.stopping = nil}})) {
             Button("停止", role: .destructive) {
-                if let terminal = model.terminal(id: stopping?.terminalId) {Task {await model.stopTerminal(terminal)}}
-                stopping = nil
+                if let terminal = model.terminal(id: prompts.stopping?.terminalId) {Task {await model.stopTerminal(terminal)}}
+                prompts.stopping = nil
             }
         }
     }
@@ -152,10 +150,7 @@ struct SidebarFixedTabs: View {
 
     private func running(_ tab: FixedTab) -> Bool {model.terminal(id: tab.terminalId)?.status == "running"}
 
-    @ViewBuilder private func icon(_ tab: FixedTab, size: CGFloat) -> some View {
-        if tab.kind == "browser" {FaviconView(address: tab.url, size: size)}
-        else {Image(systemName: tab.icon).font(.system(size: size * 0.82)).frame(width: size, height: size)}
-    }
+    private func icon(_ tab: FixedTab, size: CGFloat) -> some View {FixedTabIcon(tab: tab, size: size)}
 
     private func tile(_ tab: FixedTab) -> some View {
         let selected = model.fixedId == tab.id
@@ -169,7 +164,7 @@ struct SidebarFixedTabs: View {
         }
         .buttonStyle(.plain)
         .help(tab.title + (tab.url.map {"\n" + $0} ?? "")).accessibilityLabel("固定タブ: \(tab.title)")
-        .contextMenu {menu(tab)}
+        .contextMenu {FixedTabMenu(tab: tab)}
         .draggable("fixed." + tab.id)
         .dropDestination(for: String.self) {ids, _ in drop(ids, before: tab)}
     }
@@ -190,7 +185,7 @@ struct SidebarFixedTabs: View {
         }
         .buttonStyle(.plain)
         .help(tab.url ?? tab.kindName).accessibilityLabel("固定タブ: \(tab.title)").accessibilityAddTraits(selected ? .isSelected : [])
-        .contextMenu {menu(tab)}
+        .contextMenu {FixedTabMenu(tab: tab)}
         .draggable("fixed." + tab.id)
         .dropDestination(for: String.self) {ids, _ in drop(ids, before: tab)}
     }
@@ -200,8 +195,34 @@ struct SidebarFixedTabs: View {
         store.move(String(id.dropFirst(6)), before: tab.id)
         return true
     }
+}
 
-    @ViewBuilder private func menu(_ tab: FixedTab) -> some View {
+struct FixedTabIcon: View {
+    let tab: FixedTab
+    let size: CGFloat
+    var body: some View {
+        if tab.kind == "browser" {FaviconView(address: tab.url, size: size)}
+        else {Image(systemName: tab.icon).font(.system(size: size * 0.82)).frame(width: size, height: size)}
+    }
+}
+
+/// The rename and stop prompts of a fixed tab, asked from any list that shows it and
+/// presented once by the sidebar.
+@MainActor final class FixedTabPrompts: ObservableObject {
+    static let shared = FixedTabPrompts()
+    @Published var renaming: FixedTab?
+    @Published var name = ""
+    @Published var stopping: FixedTab?
+}
+
+/// The context menu of a fixed tab, wherever it is listed.
+struct FixedTabMenu: View {
+    @Environment(AppModel.self) private var model
+    @ObservedObject private var store = FixedTabs.shared
+    let tab: FixedTab
+    private var running: Bool {model.terminal(id: tab.terminalId)?.status == "running"}
+
+    var body: some View {
         Button("開く") {model.openFixed(tab.id)}
         if model.openedFixedIds.contains(tab.id), tab.kind == "browser" {
             Button("片付ける（ページを破棄して行き先に戻す）") {model.closeFixed(tab.id, unload: true)}
@@ -211,28 +232,82 @@ struct SidebarFixedTabs: View {
                 }
             }
         }
-        if running(tab) {Button("プロセスを停止…") {stopping = tab}}
+        if running {Button("プロセスを停止…") {FixedTabPrompts.shared.stopping = tab}}
         Divider()
-        Button("名前を変更…") {name = tab.title; renaming = tab}
-        if tab.spaceId == nil {
-            Button("このSpaceだけに表示") {store.update(tab.id) {$0.spaceId = model.sidebarSpaces.active.id}}
-        } else {
-            Button("すべてのSpaceに表示（全体共通）") {store.update(tab.id) {$0.spaceId = nil}}
+        Button("名前を変更…") {FixedTabPrompts.shared.name = tab.title; FixedTabPrompts.shared.renaming = tab}
+        Menu("表示する場所") {
+            let space = model.sidebarSpaces.active
+            Toggle("このWorkspace（\(space.name)）", isOn: place(tab.projectId == nil && tab.spaceId != nil) {$0.projectId = nil; $0.spaceId = space.id})
+            Toggle("すべてのWorkspace（全体共通）", isOn: place(tab.projectId == nil && tab.spaceId == nil) {$0.projectId = nil; $0.spaceId = nil})
+            Divider()
+            ForEach(model.state.projects) {project in
+                Toggle("プロジェクト: \(project.name)", isOn: place(tab.projectId == project.id) {$0.projectId = project.id; $0.spaceId = nil})
+            }
         }
         Divider()
         // A launch in flight still reports to this tab; removing it now would stop the new process.
-        Button(tab.isTerminal && running(tab) ? "固定を解除（タブとして元の作業に戻す）" : "固定を解除", role: .destructive) {unfix(tab)}
+        Button(tab.isTerminal && running ? "固定を解除（タブとして元の作業に戻す）" : "固定を解除", role: .destructive) {unfix()}
             .disabled(model.isTerminalStarting(tab.id))
     }
 
+    private func place(_ current: Bool, _ change: @escaping (inout FixedTab) -> Void) -> Binding<Bool> {
+        Binding(get: {current}, set: {on in
+            guard on else {return}
+            store.update(tab.id, change)
+            // A tab on screen that moved to another project brings that project's worktree underneath.
+            if model.fixedId == tab.id {model.openFixed(tab.id)}
+        })
+    }
+
     /// Removing the row never stops a process: a running terminal returns to its worktree's tabs.
-    private func unfix(_ tab: FixedTab) {
+    private func unfix() {
         guard !model.isTerminalStarting(tab.id) else {return}
         let terminal = model.terminal(id: tab.terminalId)
         model.removeFixed(tab.id)
         if let terminal, terminal.status == "running", model.state.workspaces.contains(where: {$0.id == terminal.workspaceId}) {
             model.select(terminal.workspaceId)
             model.requestedTerminalId = terminal.id
+        }
+    }
+}
+
+/// A project's own fixed tabs: a row of icons under its name, the same in every worktree.
+struct SidebarProjectFixedTabs: View {
+    @Environment(AppModel.self) private var model
+    @ObservedObject private var store = FixedTabs.shared
+    let projectId: String
+
+    var body: some View {
+        let tabs = store.tabs(inProject: projectId)
+        if !tabs.isEmpty {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 28, maximum: 28), spacing: 4, alignment: .leading)], alignment: .leading, spacing: 4) {
+                ForEach(tabs) {tab in item(tab)}
+            }
+            .padding(.horizontal, SidebarMetrics.gutter + SidebarMetrics.inset - 6).padding(.bottom, 2)
+        }
+    }
+
+    private func item(_ tab: FixedTab) -> some View {
+        let selected = model.fixedId == tab.id
+        return Button {model.openFixed(tab.id)} label: {
+            FixedTabIcon(tab: tab, size: 15)
+                .frame(width: 28, height: 26)
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                .background(selected ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+                .overlay(alignment: .topTrailing) {
+                    if model.terminal(id: tab.terminalId)?.status == "running" {Circle().fill(.green).frame(width: 5, height: 5).padding(3)}
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tab.title + (tab.url.map {"\n" + $0} ?? "")).accessibilityLabel("プロジェクトの固定タブ: \(tab.title)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .contextMenu {FixedTabMenu(tab: tab)}
+        .draggable("fixed." + tab.id)
+        .dropDestination(for: String.self) {ids, _ in
+            guard let id = ids.first, id.hasPrefix("fixed.") else {return false}
+            store.move(String(id.dropFirst(6)), before: tab.id)
+            return true
         }
     }
 }
