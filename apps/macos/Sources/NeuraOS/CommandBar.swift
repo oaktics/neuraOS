@@ -9,7 +9,6 @@ struct CommandBarItem: Identifiable, Equatable {
         case navigate(URL)
         case open(URL)
         case focusTab(workspaceId: String, tabId: String)
-        case openPin(String)
         case add(String)
         case openFixed(String)
         case focusWorkspace(String)
@@ -41,7 +40,6 @@ struct CommandBarContext {
     /// False when no worktree is selected to start a terminal or conversation in.
     var canLaunch = true
     var tabs: [CommandBarTab] = []
-    var pins: [BrowserPin] = []
     var fixed: [FixedTab] = []
     var workspaces: [CommandBarWorkspace] = []
 }
@@ -74,9 +72,6 @@ enum CommandBarResults {
                            detail: tab.workspaceId == context.workspaceId ? BrowserInput.displayHost(tab.url) : "\(tab.workspaceName) · \(BrowserInput.displayHost(tab.url))",
                            hint: "タブへ移動", action: .focusTab(workspaceId: tab.workspaceId, tabId: tab.tabId))
         }
-        func pinRow(_ pin: BrowserPin) -> CommandBarItem {
-            CommandBarItem(id: "pin." + pin.id, icon: "pin", address: pin.url, title: pin.title, detail: BrowserInput.displayHost(pin.url), hint: "ピンを開く", action: .openPin(pin.id))
-        }
         func fixedRow(_ tab: FixedTab) -> CommandBarItem {
             CommandBarItem(id: "fixed." + tab.id, icon: tab.kind == "browser" ? "pin" : tab.icon, address: tab.url, title: tab.title,
                            detail: "固定タブ · " + (tab.url.map(BrowserInput.displayHost) ?? tab.kindName), hint: "開く", action: .openFixed(tab.id))
@@ -93,7 +88,6 @@ enum CommandBarResults {
                     items.append(row)
                 }
             }
-            items += context.pins.prefix(6).map(pinRow)
             if !context.editing {items += context.fixed.prefix(6).map(fixedRow)}
             items += context.tabs.filter {$0.workspaceId == context.workspaceId}.prefix(6).map(tabRow)
             return unique(items)
@@ -109,7 +103,6 @@ enum CommandBarResults {
         }
         func matches(_ values: String...) -> Bool {values.contains {$0.lowercased().contains(needle)}}
         items += context.tabs.filter {matches($0.title, $0.url)}.prefix(5).map(tabRow)
-        items += context.pins.filter {matches($0.title, $0.url)}.prefix(4).map(pinRow)
         items += context.fixed.filter {matches($0.title, $0.url ?? "", $0.kindName)}.prefix(4).map(fixedRow)
         items += context.workspaces.filter {matches($0.title, $0.detail)}.prefix(5).map(workspaceRow)
         if !context.editing, context.canLaunch {

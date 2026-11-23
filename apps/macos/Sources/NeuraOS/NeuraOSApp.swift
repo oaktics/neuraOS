@@ -211,7 +211,7 @@ struct RootView: View {
         .sheet(isPresented: $model.showNewProject) {NewProjectSheet()}
         .sheet(isPresented: $model.showNewSpace) {NewSidebarSpaceSheet()}
         .sheet(isPresented: $model.showNewWorkspace) {NewWorkspaceSheet()}
-        .sheet(item: $model.newFixedTabKind) {kind in NewFixedTabSheet(kind: kind.id)}
+        .sheet(item: $model.newFixedTabKind) {kind in NewFixedTabSheet(kind: kind.id, project: kind.projectId)}
         .alert("操作を完了できませんでした", isPresented: Binding(get: {model.error != nil}, set: {if !$0 {model.error = nil}})) {Button("閉じる") {model.error = nil}} message: {Text(model.error ?? "")}
     }
 }
@@ -248,6 +248,8 @@ struct Sidebar: View {
             .padding(.top, 14).padding(.bottom, SidebarMetrics.sectionSpacing - 6)
             // 2. Tabs that are always here: everywhere first, then this Space's.
             SidebarFixedTabs()
+                // Pages pinned to a project by earlier versions move under that project.
+                .task(id: model.state.projects.map(\.id)) {FixedTabs.shared.adoptPins(projectIds: model.state.projects.map(\.id))}
             // 3. Where the work is. Project names are their own headings; adding a project is
             // rare and lives in the "+" menu at the bottom.
             GeometryReader {geometry in
@@ -399,6 +401,7 @@ struct Sidebar: View {
                 Button(space.name) {model.moveProject(project.id, to: space.id)}
             }
         }.disabled(model.sidebarSpaces.spaces.count < 2)
+        Button("固定タブを追加…") {model.newFixedTabKind = FixedTabKind(id: "browser", projectId: project.id)}
         Divider()
         Button("neuraOSから削除…", role: .destructive) {removingProject = project}
             .disabled(!model.connected || model.isBusy("project.remove.\(project.id)") || model.state.features?.contains("project.remove") != true)
@@ -412,6 +415,7 @@ struct Sidebar: View {
                     VStack(alignment: .leading, spacing: SidebarMetrics.rowSpacing) {
                         projectRow(project, space: space)
                         if !collapsed.contains(project.id) {
+                            SidebarProjectFixedTabs(projectId: project.id)
                             ForEach(model.state.workspaces.filter {$0.projectId == project.id}) {workspace in
                                 workspaceRow(workspace, space: space)
                             }

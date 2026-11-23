@@ -157,48 +157,16 @@ final class BrowserWorkspaceTests: XCTestCase {
         XCTAssertEqual(onlyTab.step(1, in: state(["shell"])), "shell0")
     }
 
-    func testPinnedPagesLeaveTheStripAndNumberKeysSkipThem() {
-        var layout = state(["browser", "claude", "shell"])
-        layout.tabs[0].pinId = "pin"
-        XCTAssertEqual(layout.listed.map(\.id), ["claude1", "shell2"])
-        layout.select(number: 1)
-        XCTAssertEqual(layout.selectedId, "claude1")
-        layout.select(number: 9)
-        XCTAssertEqual(layout.selectedId, "shell2")
-        layout.move("shell2", before: "claude1")
-        XCTAssertEqual(layout.tabs.map(\.id), ["browser0", "shell2", "claude1"])
-    }
-
-    @MainActor func testPinsAreSharedPerProjectAndSurviveReload() throws {
-        let suite = "BrowserPinsTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer {defaults.removePersistentDomain(forName: suite)}
-        let pins = BrowserPins(defaults: defaults)
-        let local = pins.add(url: "http://localhost:3000/", title: "", to: "project")
-        XCTAssertEqual(local.title, "localhost:3000")
-        let repo = pins.add(url: "https://github.com/org/repo", title: "Repo", to: "project")
-        // The same page is pinned once.
-        XCTAssertEqual(pins.add(url: "https://github.com/org/repo", title: "Again", to: "project").id, repo.id)
-        XCTAssertTrue(pins.list("other").isEmpty)
-        pins.move(repo.id, before: local.id, in: "project")
-        pins.update(local.id, in: "project", url: "http://localhost:5173/", title: "Vite")
-        let reloaded = BrowserPins(defaults: defaults)
-        XCTAssertEqual(reloaded.list("project").map(\.url), ["https://github.com/org/repo", "http://localhost:5173/"])
-        XCTAssertEqual(reloaded.pin(local.id, in: "project")?.title, "Vite")
-        reloaded.remove(repo.id, from: "project")
-        XCTAssertEqual(BrowserPins(defaults: defaults).list("project").map(\.id), [local.id])
-    }
-
     func testCommandBarOffersTheTypedDestinationFirst() throws {
         let tabs = [CommandBarTab(workspaceId: "w", workspaceName: "app / main", tabId: "t1", title: "Pull requests", url: "https://github.com/org/repo/pulls"),
                     CommandBarTab(workspaceId: "other", workspaceName: "app / fix", tabId: "t2", title: "Preview", url: "http://localhost:3000/")]
-        let pins = [BrowserPin(id: "p", url: "https://github.com/org/repo", title: "Repo")]
-        let context = CommandBarContext(workspaceId: "w", conversationProvider: "claude", tabs: tabs, pins: pins)
+        let fixed = [FixedTab(id: "p", kind: "browser", title: "Repo", url: "https://github.com/org/repo", projectId: "project")]
+        let context = CommandBarContext(workspaceId: "w", conversationProvider: "claude", tabs: tabs, fixed: fixed)
         // Empty: Return opens a terminal, as ⌘T did before the command bar existed.
         let empty = CommandBarResults.items(query: "", context: context)
         XCTAssertEqual(empty.first?.action, .add("shell"))
         XCTAssertEqual(empty.dropFirst().first?.action, .add("claude"))
-        XCTAssertTrue(empty.contains {$0.action == .openPin("p")})
+        XCTAssertTrue(empty.contains {$0.action == .openFixed("p")})
         XCTAssertTrue(empty.contains {$0.action == .focusTab(workspaceId: "w", tabId: "t1")})
         XCTAssertFalse(empty.contains {$0.action == .focusTab(workspaceId: "other", tabId: "t2")})
         let typed = CommandBarResults.items(query: "localhost:3000", context: context)
