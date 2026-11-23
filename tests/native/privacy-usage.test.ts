@@ -34,3 +34,10 @@ test('local builds grant websites the same resources as signed releases', {skip:
  const local = Object.keys(entitlements('client')).filter(resource).sort();
  assert.deepEqual(local, Object.keys(entitlements('certified-client')).filter(resource).sort());
 });
+
+// Existing Launch Services registrations may survive an update; new bundles
+// must not advertise themselves as HTTP(S) handlers.
+test('development browser does not register web URL schemes', {skip: process.platform !== 'darwin'}, () => {
+ const plist = json(['-'], appInfoPlist({bundleId: 'app.neuraos.native', version: '1.0', build: '1'}));
+ assert.equal(plist.CFBundleURLTypes, undefined);
+});

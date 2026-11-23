@@ -74,8 +74,7 @@ struct WorkspaceView: View {
             // Control may be released while another app is in front.
             if cycle.active {cycle.finish(); layout.touch(layout.activeId)}
         }
-        .onChange(of: model.frontId) {_, _ in publishActiveKind(); publishInspector(); openExternalLinks()}
-        .onChange(of: ExternalLinks.shared.pending) {_, _ in openExternalLinks()}
+        .onChange(of: model.frontId) {_, _ in publishActiveKind(); publishInspector()}
         .onChange(of: inspectorAutoHidden) {_, _ in publishInspector()}
         .onChange(of: layout.selectedId) {_, _ in if model.frontId == workspace.id, model.inspectorPeek {model.inspectorPeek = false}}
         .onChange(of: projectPins.map(\.id)) {_, _ in dropStalePins()}
@@ -131,7 +130,7 @@ struct WorkspaceView: View {
             guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {return .systemAction}
             return openURL(url, opener: nil, wanted: model.splitAgentLinks ? .split : .tab, focusSplit: false) ? .handled : .discarded
         })
-        .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); publishInspector(); installClickMonitor(); openExternalLinks()}
+        .onAppear {restore(); openRequestedTerminal(); openRequestedTab(); publishActiveKind(); publishInspector(); installClickMonitor()}
         .onChange(of: model.state.workspaceTerminals(workspace.id).membership) {_, _ in reconcileTerminals()}
         .onReceive(model.terminalLaunchesChanged) {_ in
             // Keep launch lifecycle events even when several changes share a render turn.
@@ -536,11 +535,6 @@ struct WorkspaceView: View {
             if fromSplit || contentFrame.width < 720 {return .tab}
             return .split
         }
-    }
-    /// Links handed over by other apps open as ordinary tabs in the worktree on screen.
-    private func openExternalLinks() {
-        guard restored, model.frontId == workspace.id, !deletionBlocked, closingTab == nil, !ExternalLinks.shared.pending.isEmpty else {return}
-        for url in ExternalLinks.shared.take() {openURL(url, opener: nil, wanted: .tab)}
     }
     @discardableResult
     private func openURL(_ url: URL, opener: String?, wanted: BrowserPlacement, focusSplit: Bool = true) -> Bool {
