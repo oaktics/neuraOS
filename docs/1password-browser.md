@@ -7,12 +7,21 @@ real-account workflows.
 
 ## Desktop integration setup
 
-With the official 1Password MV3 extension enabled, open the puzzle-piece menu
-beside the browser address field → **1Password のデスクトップ連携を設定…** →
+Install or reinstall the official 1Password MV3 extension through the neuraOS
+toolbar menu → **拡張機能** → **Chrome ウェブストアを開く…**. Enable it through
+**拡張機能を追加・管理…** (`chrome://extensions`). These dedicated Chrome-style
+windows are retained because installation in an ordinary workspace tab has not
+been verified.
+
+With the extension enabled, open the neuraOS toolbar menu → **拡張機能** →
+**1Password のデスクトップ連携を設定…** →
 **デスクトップ連携を準備**. The app verifies the official helper's Apple-anchored
 signature, identifier and team before registering it. An identical existing
 manifest is success; a differing file is never overwritten, and profile/host
 folder/manifest symlinks are rejected.
+
+Use Chrome's puzzle-piece button beside the address field for the extension
+action popup after setup.
 
 Registration is at `<data>/Chromium/NativeMessagingHosts/com.1password.1password.json`,
 where `<data>/Chromium` is `NCChromiumProfileDirectory()` (Chromium's user-data-dir),

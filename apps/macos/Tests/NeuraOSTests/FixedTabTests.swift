@@ -125,14 +125,14 @@ final class FixedTabTests: XCTestCase {
                      FixedTab(id: "f2", kind: "claude", title: "調べもの係", workspaceId: "root")]
         let workspaces = [CommandBarWorkspace(id: "w2", title: "ログイン画面の修正", detail: "connect")]
         var context = CommandBarContext(workspaceId: "w1", fixed: fixed, workspaces: workspaces)
-        XCTAssertTrue(CommandBarResults.items(query: "", context: context, history: []).contains {$0.action == .openFixed("f1")})
-        XCTAssertEqual(CommandBarResults.items(query: "調べ", context: context, history: []).dropFirst().first?.action, .openFixed("f2"))
-        XCTAssertTrue(CommandBarResults.items(query: "claude", context: context, history: []).contains {$0.action == .openFixed("f2")})
-        XCTAssertTrue(CommandBarResults.items(query: "ログイン", context: context, history: []).contains {$0.action == .focusWorkspace("w2")})
-        XCTAssertTrue(CommandBarResults.items(query: "connect", context: context, history: []).contains {$0.action == .focusWorkspace("w2")})
+        XCTAssertTrue(CommandBarResults.items(query: "", context: context).contains {$0.action == .openFixed("f1")})
+        XCTAssertEqual(CommandBarResults.items(query: "調べ", context: context).dropFirst().first?.action, .openFixed("f2"))
+        XCTAssertTrue(CommandBarResults.items(query: "claude", context: context).contains {$0.action == .openFixed("f2")})
+        XCTAssertTrue(CommandBarResults.items(query: "ログイン", context: context).contains {$0.action == .focusWorkspace("w2")})
+        XCTAssertTrue(CommandBarResults.items(query: "connect", context: context).contains {$0.action == .focusWorkspace("w2")})
         // With no worktree to run in, the launchers are not offered.
         context.canLaunch = false
-        XCTAssertFalse(CommandBarResults.items(query: "", context: context, history: []).contains {$0.action == .add("shell")})
-        XCTAssertFalse(CommandBarResults.items(query: "term", context: context, history: []).contains {$0.action == .add("shell")})
+        XCTAssertFalse(CommandBarResults.items(query: "", context: context).contains {$0.action == .add("shell")})
+        XCTAssertFalse(CommandBarResults.items(query: "term", context: context).contains {$0.action == .add("shell")})
     }
 }

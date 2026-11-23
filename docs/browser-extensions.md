@@ -36,9 +36,13 @@ From the **拡張機能** submenu of that neuraOS menu:
   compatibility remain subject to Chromium and each extension's requirements.
 - **1Password のデスクトップ連携を設定…** remains available when its extension
   is installed. This does not establish real-account save/fill acceptance.
-- **このページを拡張対応ウィンドウで開く** is still an explicit option to open
-  the URL in a separate, full Chrome-style window. It does not transfer the
-  original document, form draft or navigation history.
+The general-purpose **このページを拡張対応ウィンドウで開く** handoff is removed
+from workspace menus. Management and Store windows still use
+`NCOpenExtensionWindow`: installing/reinstalling 1Password through a normal
+workspace tab has not been verified, so the existing installation route is
+retained. Install from the Store, enable in `chrome://extensions`, configure
+desktop integration, then use the real puzzle-piece button in the workspace
+Chrome toolbar. No account/trust/profile migration is performed by this change.
 
 ## Chrome tab hosting
 
@@ -170,7 +174,7 @@ waits for its extension context to load, and records catalog, context, tab-query
 explicit-ID scripting and ungranted-host results in `evidence.json`. Both phases
 assert clean shutdown, with a popover still open. `NEURA_EXTENSION_TEST_HOLD=1`
 pauses each phase for UI inspection; create `continue` in the printed isolated
-data directory to resume. The fixture also mounts the production toolbar for pin/menu testing, without
+data directory to resume. The fixture also mounts the legacy Alloy toolbar for extension pin/menu testing, without
 registering a BrowserModel or MCP tab. Pins belong to the isolated test bundle. See [Chrome's unpacked-extension guide](https://developer.chrome.com/docs/extensions/get-started/tutorial/hello-world) for the native management workflow.
 
 ## Extension Origin regression
