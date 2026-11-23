@@ -10,7 +10,13 @@ FOUNDATION_EXPORT NSString * _Nullable NCChromiumProfileDirectory(void);
 // Opens a full Chrome-style window in the same profile as embedded tabs.
 FOUNDATION_EXPORT NSString * _Nullable NCOpenExtensionWindow(NSString *url);
 FOUNDATION_EXPORT void NCShutdownChromium(void (^completion)(void));
+// Main-thread-only, bounded in-memory console history. No page objects are retained.
+@interface NCConsoleBuffer : NSObject
+- (void)appendLevel:(NSString *)level text:(NSString *)text sourceURL:(NSString *)url line:(NSInteger)line;
+- (NSDictionary<NSString *, id> *)readLevel:(nullable NSString *)level limit:(NSInteger)limit clear:(BOOL)clear;
+@end
 @interface NCChromiumView : NSView
+@property(nonatomic, readonly) NCConsoleBuffer *consoleBuffer;
 // Chrome Views surface: a native child window with Chrome-owned tab/action context.
 // Keeps the Chrome toolbar and extension permissions associated with this page.
 - (instancetype)initWithFrame:(NSRect)frame chromeTab:(BOOL)chromeTab;
