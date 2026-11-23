@@ -263,6 +263,8 @@ struct Sidebar: View {
             .padding(.top, 14).padding(.bottom, SidebarMetrics.sectionSpacing - 6)
             // 2. Tabs that are always here: everywhere first, then this Space's.
             SidebarFixedTabs()
+                // Pages pinned to a project by earlier versions move under that project.
+                .task(id: model.state.projects.map(\.id)) {FixedTabs.shared.adoptPins(projectIds: model.state.projects.map(\.id))}
             // 3. Where the work is. Project names are their own headings; adding a project is
             // rare and lives in the "+" menu at the bottom.
             GeometryReader {geometry in
