@@ -294,13 +294,9 @@ struct WorkspaceView: View {
     // Keep the home mounted so switching tabs preserves the selected task and unsent instructions.
     private var home: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                Label("ホーム", systemImage: "house").font(.title2.weight(.semibold))
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) {addTabButtons}
-                    VStack(alignment: .leading, spacing: 8) {addTabButtons}
-                }.controlSize(.large)
-            }.padding(20)
+            WorkspaceLaunchpad(name: workspace.name) {kind in
+                add(kind == "conversation" ? model.conversationProvider(for: workspace) : kind)
+            }
             Divider()
             if model.state.features?.contains("agent.supervision") == true {
                 AgentSupervisor(workspace: workspace, visible: layout.selectedId == nil && model.frontId == workspace.id && !deletionBlocked)
