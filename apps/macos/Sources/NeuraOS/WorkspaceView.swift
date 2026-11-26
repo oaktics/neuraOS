@@ -225,7 +225,7 @@ struct WorkspaceView: View {
                     if item.kind == "browser" {FaviconView(address: item.browserURL, size: 13)} else {Image(systemName: item.icon)}
                     Text(title).lineLimit(1).truncationMode(.tail).frame(maxWidth: 160, alignment: .leading)
                     if let path = item.filePath, documents[path]?.dirty == true {Circle().frame(width: 5, height: 5)}
-                    TerminalRunningIndicator(terminalId: item.terminalId)
+                    TerminalActivityIndicator(terminalId: item.terminalId)
                 }.padding(.leading, 10).frame(height: 31).contentShape(Rectangle())
             }.buttonStyle(.plain).accessibilityLabel(title).help((item.filePath ?? item.browserURL ?? title) + "\n⌥クリックで右に並べて表示")
             Button {close(item)} label: {Image(systemName: "xmark").font(.system(size: 9)).frame(width: 22, height: 28).contentShape(Rectangle())}.buttonStyle(.plain).disabled(model.isTerminalStarting(item.id)).accessibilityLabel("\(title)を閉じる").help("\(title)を閉じる" + (active ? "（⌘W）" : ""))
@@ -705,12 +705,16 @@ struct WorkspaceView: View {
 }
 
 // Observe activity-bearing records only at the leaf, never in the tab bar owner.
-private struct TerminalRunningIndicator: View {
+private struct TerminalActivityIndicator: View {
     @Environment(AppModel.self) private var model
     let terminalId: String?
     var body: some View {
-        if model.terminal(id: terminalId)?.status == "running" {
-            Circle().fill(.green).frame(width: 5, height: 5)
+        if let terminal = model.terminal(id: terminalId) {
+            if terminal.provider == "codex" || terminal.provider == "claude" {
+                WorkspaceActivityIndicator(terminals: [terminal], connected: model.connected, showsLabel: true)
+            } else if terminal.status == "running" {
+                Circle().fill(.green).frame(width: 5, height: 5)
+            }
         }
     }
 }
@@ -733,8 +737,12 @@ struct TerminalPane: View {
         VStack(spacing: 0) {
             if let terminal {
                 HStack(spacing: 8) {
-                    Circle().fill(terminal.status == "running" ? Color.green : Color.secondary).frame(width: 5, height: 5)
-                    Text(terminal.status == "running" ? "実行中" : terminal.status == "interrupted" ? "Daemonの再起動により中断" : "終了").font(.system(size: 11)).foregroundStyle(.secondary)
+                    if terminal.provider == "codex" || terminal.provider == "claude" {
+                        TerminalActivityIndicator(terminalId: terminal.id)
+                    } else {
+                        Circle().fill(terminal.status == "running" ? Color.green : Color.secondary).frame(width: 5, height: 5)
+                        Text(terminal.status == "running" ? "実行中" : terminal.status == "interrupted" ? "Daemonの再起動により中断" : "終了").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     if terminal.status == "running" {Button("停止") {showStop = true}.font(.system(size: 11)).buttonStyle(.plain)}
                     else {
