@@ -48,12 +48,13 @@ struct WorkspaceActivityIndicator: View {
     let terminals: [TerminalRecord]
     let connected: Bool
     var showsStopped = true
+    var showsLabel = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var summary: WorkspaceActivity {WorkspaceActivity(terminals: terminals, connected: connected)}
 
     var body: some View {
         if let activity = summary.activity, showsStopped || activity != .stopped {
-            Group {
+            HStack(spacing: 4) {
                 switch activity {
                 case .working:
                     if reduceMotion {
@@ -76,6 +77,7 @@ struct WorkspaceActivityIndicator: View {
                 case .stopped:
                     Image(systemName: "minus.circle").foregroundStyle(.secondary)
                 }
+                if showsLabel {Text(activity.label).lineLimit(1).fixedSize()}
             }
             .font(.system(size: 10, weight: .medium))
             .frame(minWidth: 14, minHeight: 16)
