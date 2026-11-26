@@ -94,6 +94,7 @@ struct AgentSupervisor: View {
     @State private var busy = false
     @State private var error: String?
     @State private var includeStopped = false
+    @State private var loaded = false
     private var visibleAgents: [ManagedAgent] {
         let running = Set(model.state.terminals.filter {$0.status == "running"}.map(\.id))
         return agents.filter {$0.isVisible(runningTerminalIDs: running, includeStopped: includeStopped)}
@@ -102,20 +103,73 @@ struct AgentSupervisor: View {
     // The agent list and conversation are refetched every 3 s; skip that while no window is on screen.
     private var refreshEnabled: Bool {visible && AppVisibility.shared.visible}
     var body: some View {
-        HSplitView {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("エージェントの作業一覧").font(.headline).padding()
-                Toggle("停止した作業も表示", isOn: $includeStopped)
-                    .toggleStyle(.checkbox).font(.callout).padding(.horizontal).padding(.bottom, 8)
-                List(visibleAgents, selection: $selected) {agent in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(agent.name).lineLimit(1)
-                        Text("\(agent.provider == "claude" ? "Claude" : "Codex") · \((agent.watching?.isEmpty == false) ? "監督" : agent.parentTaskId != nil ? "委任先" : "独立")").font(.caption2).foregroundStyle(.secondary)
-                        HStack {Text(workspaceName(agent)); Spacer(); Text(agent.statusLabel)}.font(.caption).foregroundStyle(.secondary)
-                    }.padding(.vertical, 4).tag(agent.id)
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text("エージェント").font(.system(size: 13, weight: .semibold))
+                Text("\(visibleAgents.count)").font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+                Spacer()
+                Toggle("停止済み", isOn: $includeStopped)
+                    .toggleStyle(.checkbox).font(.caption)
+                Button {Task {await refresh()}} label: {Image(systemName: "arrow.clockwise")}
+                    .buttonStyle(.borderless).help("更新").accessibilityLabel("更新")
+            }.padding(.horizontal, 24).padding(.vertical, 14)
+            if let error {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Text(error).font(.callout).textSelection(.enabled)
+                    Spacer(minLength: 0)
+                }.padding(12).background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.horizontal, 24).padding(.bottom, 12)
+            }
+            Divider()
+            if visibleAgents.isEmpty {
+                VStack(spacing: 12) {
+                    if !loaded && error == nil {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: error == nil ? "square.stack.3d.up" : "wifi.exclamationmark")
+                            .font(.system(size: 28, weight: .light)).foregroundStyle(.tertiary)
+                        Text(error != nil ? "作業一覧を取得できません" : includeStopped ? "作業はありません" : "起動中のエージェントはありません")
+                            .font(.callout).foregroundStyle(.secondary)
+                        if !includeStopped && error == nil {
+                            Button("停止した作業を表示") {includeStopped = true}
+                                .buttonStyle(.borderless).font(.callout)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                HSplitView {
+                    agentList
+                    conversation
                 }
-                if visibleAgents.isEmpty {Text(includeStopped ? "このプロジェクトの作業はありません。" : "起動中のエージェントはありません。停止した作業は「停止した作業も表示」から確認・再開できます。").font(.callout).foregroundStyle(.secondary).padding()}
-            }.frame(minWidth: 200, idealWidth: 250, maxWidth: 340)
+            }
+        }
+        .background(Palette.surface)
+        .task(id: refreshEnabled) {guard refreshEnabled else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
+        .onChange(of: visibleAgents.map(\.id)) {_, _ in reconcileSelection()}
+        .task(id: selected) {history = AgentHistoryWindow(); lastReadStamp = nil; steer = false; text = ""; answers = [:]; await read()}
+    }
+    private var agentList: some View {
+        List(visibleAgents, selection: $selected) {agent in
+            VStack(alignment: .leading, spacing: 7) {
+                Text(agent.name).font(.system(size: 13, weight: .medium)).lineLimit(2)
+                HStack(spacing: 5) {
+                    Circle().fill(agent.status == "working" ? Color.green : agent.status == "waiting" ? Color.orange : Color.secondary)
+                        .frame(width: 6, height: 6)
+                    Text(agent.statusLabel)
+                    Spacer(minLength: 0)
+                    Text(agent.provider == "claude" ? "Claude" : "Codex")
+                }.font(.caption).foregroundStyle(.secondary)
+                Text(workspaceName(agent)).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            }.padding(.vertical, 8).tag(agent.id)
+        }
+        .listStyle(.sidebar).scrollContentBackground(.hidden)
+        .frame(minWidth: 210, idealWidth: 260, maxWidth: 340)
+    }
+    private var conversation: some View {
             VStack(alignment: .leading, spacing: 12) {
                 if let agent = current {
                     HStack {
@@ -177,13 +231,8 @@ struct AgentSupervisor: View {
                             .disabled(busy || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.terminal(id: agent.terminalId)?.status != "running")
                     }
                     Text("応答の終了は、依頼やテストの完了を保証するものではありません。").font(.caption).foregroundStyle(.secondary)
-                } else {ContentUnavailableView("エージェントを選択", systemImage: "person.3", description: Text("会話を確認し、追加の指示を送れます。"))}
-                if let error {Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)}
-            }.padding().frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .task(id: refreshEnabled) {guard refreshEnabled else {return}; while !Task.isCancelled {await refresh(); do {try await Task.sleep(for: .seconds(3))} catch {return}}}
-        .onChange(of: visibleAgents.map(\.id)) {_, _ in reconcileSelection()}
-        .task(id: selected) {history = AgentHistoryWindow(); lastReadStamp = nil; steer = false; text = ""; answers = [:]; await read()}
+                } else {ContentUnavailableView("エージェントを選択", systemImage: "person.3")}
+            }.padding(20).frame(minWidth: 300, maxWidth: .infinity, maxHeight: .infinity)
     }
     private func reconcileSelection() {
         if !visibleAgents.contains(where: {$0.id == selected}) {selected = visibleAgents.first?.id}
@@ -191,10 +240,12 @@ struct AgentSupervisor: View {
     private func answerBinding(_ id: String) -> Binding<String> {Binding(get: {answers[id] ?? ""}, set: {answers[id] = $0})}
     private func workspaceName(_ agent: ManagedAgent) -> String {model.state.workspaces.first {$0.id == agent.workspaceId}?.name ?? "作業"}
     private func refresh() async {
+        defer {loaded = true}
         do {
             let result: ManagedAgents = try await model.api.get("v1/agents")
             let ids = Set(model.state.workspaces.filter {$0.projectId == workspace.projectId}.map(\.id))
             agents = result.agents.filter {ids.contains($0.workspaceId)}
+            error = nil
             reconcileSelection()
             await read()
         } catch {self.error = error.localizedDescription}
